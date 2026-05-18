@@ -44,6 +44,7 @@ IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 SANDBOX_LIST_URL = (
     "https://platform.adobe.io/data/foundation/sandbox-management/sandboxes"
 )
+QUERIES_URL = "https://platform.adobe.io/data/foundation/query/queries"
 DEFAULT_SCOPES = (
     "openid,AdobeID,read_organizations,"
     "additional_info.projectedProductContext,session"
@@ -159,6 +160,33 @@ def list_sandboxes(token, conf):
         body, _ = http(SANDBOX_LIST_URL, headers=headers)
         data = json.loads(body)
         return True, data.get("sandboxes") or []
+    except urllib.error.HTTPError as e:
+        err = e.read().decode(errors="replace")[:400]
+        return False, f"HTTP {e.code}: {err}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def list_queries(token, conf, sandbox):
+    """Probe AEP Query Service in one sandbox by listing queries.
+
+    Returns (ok, result) where, on success, result is the list of query
+    objects (the /queries execution history). A 403 here means the token
+    authenticated but lacks Query Service permission in this sandbox - a
+    direct answer to 'do these creds have query access?'.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "x-api-key": conf.get("api_key") or conf["client_id"],
+        "x-gw-ims-org-id": conf["org_id"],
+        "x-sandbox-name": sandbox,
+        "Accept": "application/json",
+    }
+    url = f"{QUERIES_URL}?{urllib.parse.urlencode({'limit': 10})}"
+    try:
+        body, _ = http(url, headers=headers)
+        data = json.loads(body)
+        return True, data.get("queries") or []
     except urllib.error.HTTPError as e:
         err = e.read().decode(errors="replace")[:400]
         return False, f"HTTP {e.code}: {err}"
@@ -306,6 +334,47 @@ def probe(path: Path):
             print(f"     {ANSI['yellow']}{name:<20}{ANSI['reset']} "
                   f"{ANSI['dim']}{sb_type:<12}{ANSI['reset']} "
                   f"{state:<10} {title}")
+
+    # 4) Query Service probe - try to list queries in each sandbox.
+    #    Listing sandboxes proves tenancy; this proves Query Service access.
+    if ok and result:
+        sandbox_names = [sb.get("name") for sb in result if sb.get("name")]
+    else:
+        # Sandbox-management denied/empty - fall back to the configured
+        # default sandbox so we can still test query access. "all" is a
+        # sentinel meaning "every sandbox", not a real name, so map it to
+        # 'prod' (the one sandbox that virtually always exists).
+        fallback = conf.get("sandbox") or "prod"
+        if fallback == "all":
+            fallback = "prod"
+        sandbox_names = [fallback]
+        print(f"  {ANSI['dim']}(no sandbox list; testing query access against "
+              f"'{fallback}' from config){ANSI['reset']}")
+
+    print()
+    print(f"  {ANSI['bold']}AEP /query/queries  (Query Service access){ANSI['reset']}")
+    any_access = False
+    for sb in sandbox_names:
+        ok_q, res_q = list_queries(token, conf, sb)
+        if not ok_q:
+            print(f"     {ANSI['yellow']}{sb:<20}{ANSI['reset']} "
+                  f"{ANSI['red']}[FAIL] {res_q}{ANSI['reset']}")
+        else:
+            any_access = True
+            n = len(res_q)
+            print(f"     {ANSI['yellow']}{sb:<20}{ANSI['reset']} "
+                  f"{ANSI['green']}[OK] Query Service reachable - "
+                  f"{n} recent quer{'y' if n == 1 else 'ies'} listed{ANSI['reset']}")
+            for q in res_q[:3]:
+                qid = shorten(q.get("id", "?"), 18)
+                state = (q.get("state") or "?")
+                sql = (q.get("sql", "") or "").strip().replace("\n", " ")[:60]
+                print(f"        {ANSI['dim']}{qid:<22} {state:<10} {sql}{ANSI['reset']}")
+    if any_access:
+        print(f"  {ANSI['green']}=> Credential HAS Query Service access.{ANSI['reset']}")
+    else:
+        print(f"  {ANSI['red']}=> Credential has NO Query Service access in any "
+              f"tested sandbox.{ANSI['reset']}")
 
 
 # ----------------------------------------------------------------------------
