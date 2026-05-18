@@ -8,7 +8,7 @@ sql/
 # Downloaded failed-batch payloads from batch_fetcher.
 failed_batches/
 
-# Credential bank for prober.py / hot-swap testing. Only the example template
+# Credential bank for credential_validator.py / hot-swap testing. Only the example template
 # is tracked; real per-tenant creds stay local.
 creds/*.json
 !creds/example.json

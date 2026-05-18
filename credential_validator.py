@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-prober.py
-=========
+credential_validator.py
+========================
 Quickly check whether an Adobe IMS / AEP credential set is alive.
 
 Pick a credential JSON from ./creds/ (e.g. prod.json, dev.json) and the
-prober will:
+validator will:
   1. Authenticate against the IMS token endpoint (client_credentials).
-  2. Decode the returned JWT (no signature check) to show granted scopes,
+  2. Decode the returned access token (no signature check) to show scopes,
      org, client_id, expiry, and the technical account it belongs to.
   3. Hit AEP /sandbox-management/sandboxes to list which sandboxes the
      credential can actually see - a useful proxy for tenancy/admin breadth.
@@ -15,9 +15,9 @@ prober will:
 Stdlib only, VDI-friendly. No pip install required.
 
 Usage:
-    python prober.py                # interactive menu
-    python prober.py prod dev       # probe one or more by name (filename stem)
-    python prober.py --all          # probe every set in ./creds/
+    python credential_validator.py            # interactive menu
+    python credential_validator.py prod dev   # one or more by name (filename stem)
+    python credential_validator.py --all      # validate every set in ./creds/
 """
 
 from __future__ import annotations
@@ -91,12 +91,12 @@ class ColoredFormatter(logging.Formatter):
 _handler = logging.StreamHandler(sys.stdout)
 _handler.setFormatter(ColoredFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
-logger = logging.getLogger("prober")
+logger = logging.getLogger("credential_validator")
 SSL_CTX = ssl._create_unverified_context()
 
 
 # ----------------------------------------------------------------------------
-# HTTP / IMS / JWT helpers
+# HTTP / IMS / access-token helpers
 # ----------------------------------------------------------------------------
 def http(url, method="GET", headers=None, data=None, timeout=30):
     req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
@@ -138,11 +138,14 @@ def b64url_decode(seg: str) -> bytes:
     return base64.urlsafe_b64decode(seg.encode("ascii"))
 
 
-def decode_jwt(token: str):
-    """Returns (header, payload) dicts. Signature is NOT verified."""
+def decode_access_token(token: str):
+    """Decode the OAuth server-to-server access token into (header, payload)
+    dicts. Signature is NOT verified -- this is only to surface the scopes,
+    org, expiry and technical account already granted to the credential."""
     parts = token.split(".")
     if len(parts) != 3:
-        raise ValueError(f"Not a JWT (got {len(parts)} segments)")
+        raise ValueError(f"Not a decodable access token "
+                         f"(got {len(parts)} segments)")
     header = json.loads(b64url_decode(parts[0]).decode("utf-8"))
     payload = json.loads(b64url_decode(parts[1]).decode("utf-8"))
     return header, payload
@@ -286,14 +289,14 @@ def probe(path: Path):
 
     token = resp["access_token"]
 
-    # 2) Decode JWT
+    # 2) Decode the access token
     try:
-        _hdr, payload = decode_jwt(token)
+        _hdr, payload = decode_access_token(token)
         granted = payload.get("scope", "(no scope claim)")
         user = payload.get("user_id") or payload.get("aa_id") or "?"
-        client_in_jwt = payload.get("client_id") or "?"
+        client_in_token = payload.get("client_id") or "?"
         token_type = payload.get("type") or "?"
-        org_in_jwt = payload.get("org") or "?"
+        org_in_token = payload.get("org") or "?"
         created_at = payload.get("created_at")
         expires_in_ms = payload.get("expires_in")
         try:
@@ -306,15 +309,15 @@ def probe(path: Path):
         for s in granted.split(","):
             print(f"     {ANSI['cyan']}- {s.strip()}{ANSI['reset']}")
         print(f"  {ANSI['bold']}Token type:{ANSI['reset']} {token_type}")
-        print(f"  {ANSI['bold']}JWT org:{ANSI['reset']}    {org_in_jwt}"
+        print(f"  {ANSI['bold']}Token org:{ANSI['reset']}    {org_in_token}"
               + (f"  {ANSI['yellow']}(mismatch vs config!){ANSI['reset']}"
-                 if org_in_jwt != conf["org_id"] else ""))
-        print(f"  {ANSI['bold']}JWT client:{ANSI['reset']} {shorten(client_in_jwt)}")
+                 if org_in_token != conf["org_id"] else ""))
+        print(f"  {ANSI['bold']}Token client:{ANSI['reset']} {shorten(client_in_token)}")
         print(f"  {ANSI['bold']}Tech acct:{ANSI['reset']}  {user}")
         print(f"  {ANSI['bold']}Created:{ANSI['reset']}    {created_str}  "
               f"{ANSI['dim']}(expires_in {expires_in_ms} ms){ANSI['reset']}")
     except Exception as e:
-        logger.warning(f"Could not decode access_token JWT: {e}")
+        logger.warning(f"Could not decode access token: {e}")
 
     # 3) AEP probe - sandbox listing
     print()

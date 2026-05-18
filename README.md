@@ -20,7 +20,7 @@ The toolkit spans two product ranges:
 |------|--------------|
 | [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
-| [`prober.py`](prober.py) | Quickly checks whether an IMS/AEP credential set is alive and what it can see. |
+| [`credential_validator.py`](credential_validator.py) | Quickly checks whether an IMS/AEP credential set is alive and what it can see. |
 
 All tools are stdlib-only, config-driven, and tenant-aware so the same
 scripts run cleanly across multiple Adobe orgs without folder collisions.
@@ -99,15 +99,15 @@ batch and download its failed-record files. Reports are written under
 python failed_batch_report.py --hours=72 --sandbox=prod
 ```
 
-## prober.py
+## credential_validator.py
 
 Quickly checks whether an Adobe IMS / AEP credential set is alive. Pick a
-credential JSON from `./creds/`; the prober authenticates, decodes the
-returned JWT (granted scopes, org, expiry, technical account) and lists the
-sandboxes the credential can actually see — a useful proxy for tenancy and
-admin breadth.
+credential JSON from `./creds/`; it authenticates via OAuth
+server-to-server, inspects the returned access token (granted scopes, org,
+expiry, technical account) and lists the sandboxes the credential can
+actually see — a useful proxy for tenancy and admin breadth.
 
 ```
-python prober.py            # interactive menu
-python prober.py --all      # probe every set in ./creds/
+python credential_validator.py            # interactive menu
+python credential_validator.py --all      # validate every set in ./creds/
 ```
