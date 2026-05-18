@@ -107,6 +107,14 @@ server-to-server, inspects the returned access token (granted scopes, org,
 expiry, technical account) and lists the sandboxes the credential can
 actually see — a useful proxy for tenancy and admin breadth.
 
+It then sweeps the major AEP product API surfaces — Query Service, Catalog,
+Schema Registry, Flow Service, Data Ingestion, Real-Time Profile, Identity,
+Privacy, and Customer Journey Analytics — firing one lightweight GET at each
+and reporting per product whether it **stood up** for this credential:
+`UP` (reachable + authorized), `NO-PERM` (reachable but the credential
+lacks access — e.g. an AEP-only credential hitting CJA), or `DOWN`
+(unreachable). A quick "what can these creds actually talk to?" map.
+
 ```
 python credential_validator.py            # interactive menu
 python credential_validator.py --all      # validate every set in ./creds/

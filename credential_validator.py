@@ -45,6 +45,41 @@ SANDBOX_LIST_URL = (
     "https://platform.adobe.io/data/foundation/sandbox-management/sandboxes"
 )
 QUERIES_URL = "https://platform.adobe.io/data/foundation/query/queries"
+
+# AEP product API surfaces swept by the connectivity check. One lightweight
+# GET each -- we only care whether the service "stood up" for this
+# credential, not the payload. Tuple: (label, url, sandbox_scoped,
+# extra_headers). sandbox_scoped surfaces get an x-sandbox-name header.
+PRODUCT_SURFACES = [
+    ("Query Service",
+     "https://platform.adobe.io/data/foundation/query/queries?limit=1",
+     True, {}),
+    ("Catalog Service",
+     "https://platform.adobe.io/data/foundation/catalog/dataSets?limit=1",
+     True, {}),
+    ("Schema Registry",
+     "https://platform.adobe.io/data/foundation/schemaregistry/tenant/schemas?limit=1",
+     True, {"Accept": "application/vnd.adobe.xed-id+json"}),
+    ("Flow Service (Sources)",
+     "https://platform.adobe.io/data/foundation/flowservice/connectionSpecs?limit=1",
+     False, {}),
+    ("Data Ingestion (batches)",
+     "https://platform.adobe.io/data/foundation/catalog/batches?limit=1",
+     True, {}),
+    ("Real-Time Profile",
+     "https://platform.adobe.io/data/core/ups/config/mergePolicies?limit=1",
+     True, {}),
+    ("Identity Service",
+     "https://platform.adobe.io/data/core/idnamespace/identities",
+     False, {}),
+    ("Privacy Service",
+     "https://platform.adobe.io/data/core/privacy/jobs",
+     False, {}),
+    ("Customer Journey Analytics",
+     "https://cja.adobe.io/data/dataviews?limit=1",
+     False, {}),
+]
+
 DEFAULT_SCOPES = (
     "openid,AdobeID,read_organizations,"
     "additional_info.projectedProductContext,session"
@@ -195,6 +230,69 @@ def list_queries(token, conf, sandbox):
         return False, f"HTTP {e.code}: {err}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _classify_status(code: int) -> tuple[str, str, str]:
+    """Map an HTTP status (or 0/-1 for transport failure) to a verdict for
+    the connectivity sweep. We only care if the service stood up, so 4xx
+    other than auth/permission still counts as 'reachable'.
+
+    Returns (tag, ansi_color_key, human_label)."""
+    if 200 <= code < 300:
+        return "UP", "green", "reachable + authorized"
+    if code in (401, 403):
+        return "NO-PERM", "yellow", f"reachable, no access (HTTP {code})"
+    if code in (400, 404, 405, 406, 415, 422):
+        return "UP", "green", f"reachable (HTTP {code})"
+    if code == 429:
+        return "UP", "green", "reachable (HTTP 429 rate-limited)"
+    if code >= 500:
+        return "ERR", "red", f"service error (HTTP {code})"
+    return "DOWN", "red", "unreachable"
+
+
+def probe_surface(token, conf, url, sandbox_scoped, extra_headers, sandbox):
+    """Fire one GET at a product API surface. Returns (code, detail)."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "x-api-key": conf.get("api_key") or conf["client_id"],
+        "x-gw-ims-org-id": conf["org_id"],
+        "Accept": "application/json",
+    }
+    if sandbox_scoped and sandbox:
+        headers["x-sandbox-name"] = sandbox
+    headers.update(extra_headers)
+    try:
+        http(url, headers=headers, timeout=20)
+        return 200, ""
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")[:140].replace("\n", " ")
+    except urllib.error.URLError as e:
+        return 0, f"{type(e).__name__}: {getattr(e, 'reason', e)}"
+    except Exception as e:
+        return -1, f"{type(e).__name__}: {e}"
+
+
+def probe_product_surfaces(token, conf, sandbox):
+    """Sweep every entry in PRODUCT_SURFACES and print a one-line verdict
+    per product: did the service stand up for this credential?"""
+    print()
+    sb_note = f" (sandbox-scoped tests use '{sandbox}')" if sandbox else ""
+    print(f"  {ANSI['bold']}AEP product API surfaces{ANSI['reset']}{ANSI['dim']}{sb_note}{ANSI['reset']}")
+    up = 0
+    for label, url, sb_scoped, extra in PRODUCT_SURFACES:
+        code, detail = probe_surface(token, conf, url, sb_scoped, extra, sandbox)
+        tag, color, human = _classify_status(code)
+        if tag == "UP":
+            up += 1
+        line = (f"     {ANSI['yellow']}{label:<28}{ANSI['reset']} "
+                f"{ANSI[color]}[{tag}]{ANSI['reset']} {human}")
+        if tag in ("ERR", "DOWN") and detail:
+            line += f" {ANSI['dim']}- {detail}{ANSI['reset']}"
+        print(line)
+    total = len(PRODUCT_SURFACES)
+    print(f"  {ANSI['green' if up else 'red']}=> {up}/{total} product surface(s) "
+          f"stood up for this credential.{ANSI['reset']}")
 
 
 # ----------------------------------------------------------------------------
@@ -378,6 +476,11 @@ def probe(path: Path):
     else:
         print(f"  {ANSI['red']}=> Credential has NO Query Service access in any "
               f"tested sandbox.{ANSI['reset']}")
+
+    # 5) Product API surface sweep - one simple GET per AEP product to see
+    #    which services stand up for this credential. sandbox_names[0] is the
+    #    first sandbox resolved above (real list or config fallback).
+    probe_product_surfaces(token, conf, sandbox_names[0] if sandbox_names else "")
 
 
 # ----------------------------------------------------------------------------
