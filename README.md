@@ -5,10 +5,20 @@ with Adobe Experience Platform (AEP) from a locked-down VDI — no
 `pip install` required. Every tool reads the same shared `config.json`
 (copied from `config.example.json`), so credentials are configured once.
 
+The toolkit spans two product ranges:
+
+**Babelfish range** — Query Service template tooling:
+
 | Tool | What it does |
 |------|--------------|
-| [`babelfish_query_renamer.py`](babelfish_query_renamer.py) | Tidies up messy Query Service SQL template names (optionally AI-suggested via Claude). |
-| [`batch_fetcher_2.py`](batch_fetcher_2.py) | Lists recent batches, then downloads a chosen batch's files locally. |
+| [`babelfish_query_renamer.py`](babelfish_query_renamer.py) | Tidies up messy Query Service SQL template names (optionally AI-suggested via Claude) and pushes renames back. |
+| [`babelfish_query_fetcher.py`](babelfish_query_fetcher.py) | Strict read-only export of Query Service templates to local Markdown + RTF. Never writes back. |
+
+**Swiss Army range** — batch / credential utilities:
+
+| Tool | What it does |
+|------|--------------|
+| [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
 | [`prober.py`](prober.py) | Quickly checks whether an IMS/AEP credential set is alive and what it can see. |
 
@@ -25,6 +35,8 @@ contain credentials.
    the renamer.
 
 ---
+
+# Babelfish range
 
 ## babelfish_query_renamer.py
 
@@ -46,7 +58,23 @@ single cross-tenant Markdown mega-file with every query's SQL.
 python babelfish_query_renamer.py
 ```
 
-## batch_fetcher_2.py
+## babelfish_query_fetcher.py
+
+A strict read-only fork of the renamer: it **never writes back to AEP** —
+no PUT, no rename, no name suggestions, no prompts. It authenticates,
+discovers every accessible sandbox, fetches all templates, excludes
+system/service-account queries (Adobe's `@AdobeID` namespace), and writes
+the human-authored queries to local `.sql` files plus a cross-tenant
+Markdown mega-file and a formatted RTF (titled header, per-sandbox
+sections, monospace SQL). Fully non-interactive — safe to schedule.
+
+```
+python babelfish_query_fetcher.py
+```
+
+# Swiss Army range
+
+## batch_fetcher.py
 
 Pulls a single AEP batch's files down to your local machine. It lists the
 most recent batches in the sandbox, you paste (or pick) the batch ID you
@@ -56,14 +84,14 @@ embedded error payloads. Replaces three earlier scripts (`auth.py`,
 (override via `region` in `config.json`).
 
 ```
-python batch_fetcher_2.py
+python batch_fetcher.py
 ```
 
 ## failed_batch_report.py
 
 Exports a CSV summary of every batch that FAILED in the last N hours
 (default 24) in the configured sandbox — a quick estate-wide health
-snapshot. Use `batch_fetcher_2.py` instead when you need to drill into one
+snapshot. Use `batch_fetcher.py` instead when you need to drill into one
 batch and download its failed-record files. Reports are written under
 `./failed_batches/` (gitignored).
 

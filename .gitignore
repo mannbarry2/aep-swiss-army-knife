@@ -5,7 +5,7 @@ config.json
 # Generated query exports (per-tenant SQL + the mega Markdown file).
 sql/
 
-# Downloaded failed-batch payloads from batch_fetcher_2.
+# Downloaded failed-batch payloads from batch_fetcher.
 failed_batches/
 
 # Credential bank for prober.py / hot-swap testing. Only the example template

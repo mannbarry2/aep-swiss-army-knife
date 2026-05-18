@@ -51,7 +51,7 @@ DEFAULT_SCOPES = (
 )
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches batch_fetcher_2.py style
+# ANSI / logging - matches batch_fetcher.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:

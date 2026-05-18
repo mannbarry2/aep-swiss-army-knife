@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-batch_fetcher_2.py
-==================
+batch_fetcher.py
+================
 Lists recent AEP batches in the configured sandbox, prompts the user for a
 batch ID, and downloads every file in that batch to the current working
 directory. Replaces the earlier auth.py / authandret.py / fetchbatch.py trio.
@@ -11,7 +11,7 @@ VDI-friendly: stdlib only, no pip install required.
 First-time setup:
     1. Copy `config.example.json` to `config.json` (next to this script).
     2. Fill in client_id / client_secret / org_id and your sandbox_names.
-    3. python batch_fetcher_2.py
+    3. python batch_fetcher.py
 
 `config.json` is gitignored -- never commit it. It contains the client_secret,
 which is a credential.

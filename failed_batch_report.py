@@ -4,11 +4,11 @@ failed_batch_report.py
 ======================
 Exports a CSV summary of every AEP batch that FAILED in the last N hours
 (default 24) in the configured sandbox. Use this for a quick estate-wide
-health snapshot; use batch_fetcher_2.py when you need to drill into one
+health snapshot; use batch_fetcher.py when you need to drill into one
 batch and download its failed-record files.
 
 VDI-friendly: stdlib only, no pip install required. Reads the same shared
-config.json as batch_fetcher_2.py / babelfish_query_renamer.py.
+config.json as batch_fetcher.py / babelfish_query_renamer.py.
 
 First-time setup:
     1. Copy `config.example.json` to `config.json` (next to this script).
