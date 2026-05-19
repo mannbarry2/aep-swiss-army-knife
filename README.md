@@ -1,8 +1,9 @@
-# Swiss Army Knife
+# AEP Swiss Army Knife
 
 A small toolkit of single-file, stdlib-only command-line tools for working
 with Adobe Experience Platform (AEP) from a locked-down VDI — no
-`pip install` required. Every tool reads the same shared `config.json`
+`pip install` required. 
+Every tool reads the same shared `config.json`
 (copied from `config.example.json`), so credentials are configured once.
 
 The toolkit spans two product ranges:
@@ -14,7 +15,7 @@ The toolkit spans two product ranges:
 | [`babelfish_query_renamer.py`](babelfish_query_renamer.py) | Tidies up messy Query Service SQL template names (optionally AI-suggested via Claude) and pushes renames back. |
 | [`babelfish_query_fetcher.py`](babelfish_query_fetcher.py) | Strict read-only export of Query Service templates to local Markdown + RTF. Never writes back. |
 
-**Swiss Army range** — batch / credential utilities:
+**AEP Swiss Army range** — batch / credential utilities:
 
 | Tool | What it does |
 |------|--------------|
