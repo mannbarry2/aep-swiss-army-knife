@@ -1,3 +1,5 @@
+![AEP Swiss Army Knife Banner](banner.png)
+
 # AEP Swiss Army Knife
 
 A small toolkit of single-file, stdlib-only command-line tools for working
