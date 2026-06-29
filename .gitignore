@@ -1,0 +1,48 @@
+# Real config -- contains bearer_token / client_secret. Use config.example.json
+# as a starting point; copy to config.json and fill in your own values.
+config.json
+
+# Generated query exports (per-tenant SQL + the mega Markdown file).
+sql/
+
+# Downloaded failed-batch payloads from batch_fetcher.
+failed_batches/
+
+# Schedule audit exports (contain per-tenant sandbox + schedule details).
+batch_schedules_*.csv
+batch_schedules_*.xlsx
+
+# Batch evaluation timing exports from batch_eval_timing.py (per-tenant job data).
+output/
+
+# Credential bank for credential_validator.py / hot-swap testing. Only the example template
+# is tracked; real per-tenant creds stay local.
+creds/*.json
+!creds/example.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# Claude Code: personal/local permission allowlist (shared settings.json is tracked).
+.claude/settings.local.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Windows / Office cruft
+desktop.ini
+~$*
+
+# Local scratch: Adobe Luma demo/sample data (incl. an embedded git repo)
+Luma Test data/

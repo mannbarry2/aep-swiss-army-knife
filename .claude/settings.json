@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('batch_fetcher.py',encoding='utf-8'\\).read\\(\\)\\); print\\('OK batch_fetcher.py'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('failed_batch_report.py',encoding='utf-8'\\).read\\(\\)\\); print\\('OK failed_batch_report.py'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('babelfish_query_fetcher.py'\\).read\\(\\)\\); print\\('ok'\\)\")"
+    ]
+  }
+}

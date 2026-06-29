@@ -1,0 +1,125 @@
+---
+title: 2. Connection 5G Streaming ERD
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#ffffff'
+    primaryBorderColor: '#666666'
+    primaryTextColor: '#000000'
+    lineColor: '#333333'
+    fontFamily: 'Arial, sans-serif'
+    titleColor: '#C8102E'
+---
+erDiagram
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟠 ORDERS" : "customerID"
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟠 ECOMMERCE_CHECKOUT" : "customerID"
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟠 PRODUCT_PAGE_VIEW" : "CustomerID (identityMap)"
+    "🟢 CUSTOMER_ACCOUNT" }o--|| "🔵 PLAN" : "Plan ID FK"
+    "🔵 STORE" ||--o{ "🟢 CUSTOMER_ACCOUNT" : "Source (Store, Web)"
+    "🔵 STORE" ||--o{ "🟠 ORDERS" : "storeID"
+    "🔵 PRODUCT" ||--o{ "🟠 ORDERS" : "productOrders[].productID"
+    "🔵 PRODUCT" ||--o{ "🟠 PRODUCT_PAGE_VIEW" : "productListItems[].SKU"
+    "🔵 PRODUCT" ||--o{ "🟠 ECOMMERCE_CHECKOUT" : "productListItems[].productID"
+    "🔵 PRODUCT" }o--|| "🔵 PRODUCT_TYPE" : "Product Type FK"
+
+    "🔵 STORE" {
+        string Store_ID PK
+        string Store_Name
+        date Store_Inauguration_Date
+        string Store_Street
+        string Store_City
+        string Store_State
+        string Store_Zip_Code
+        time Store_Open_Time
+        time Store_Close_Time
+    }
+
+    "🔵 PLAN" {
+        string Plan_ID PK
+        string Plan_Type "Mobile"
+        string Plan_Name "Basic | Ultimate | Pro"
+        float Monthly_Line_Cost
+        string Monthly_Data_Allowance
+        bool Unlimited_Talk
+        bool Unlimited_Text
+        bool Unlimited_Data
+    }
+
+    "🔵 PRODUCT" {
+        string Product_ID PK
+        string Product_Type FK
+        string Make
+        string Model
+        bool _5G_Compatible
+        int Release_Year
+        float Price
+    }
+
+    "🔵 PRODUCT_TYPE" {
+        string Product_Type PK
+        string Product_Type_Name
+    }
+
+    "🟢 CUSTOMER_ACCOUNT" {
+        string Customer_ID PK
+        string First_Name
+        string Last_Name
+        string Email
+        string Mobile_Phone
+        date Birth_Date
+        bool Email_Optin
+        bool SMS_Optin
+        datetime Account_Create_Date
+        datetime Account_End_Date
+        string Plan_ID FK
+        datetime Create_Date
+        datetime Last_Modified
+        string Source "Store | Web"
+        string _class "XDM Individual Profile"
+    }
+
+    "🟠 ORDERS" {
+        string orderID PK
+        datetime orderDate
+        float orderTotal
+        string orderStatus "placed"
+        datetime lastOrderStatusUpdate
+        object payments "type, amount, currency, txnID"
+        string customerID FK
+        string email
+        string shippingDestination "store | home"
+        string storeID FK
+        object shippingAddress
+        string shippingMethod "standard | expedited | overnight"
+        float shippingAmount
+        object billingAddress
+        object plan "Plan_ID"
+        string source "web | store"
+        array productOrders "productID, make, model, quantity, price, currency"
+        string _class "XDM ExperienceEvent (streaming JSON)"
+    }
+
+    "🟠 PRODUCT_PAGE_VIEW" {
+        object commerce "productViews.value"
+        object web "webPageDetails.name"
+        array productListItems "SKU, name, priceTotal, currencyCode"
+        object xdm_identityMap "ECID + CustomerID"
+        string _class "XDM ExperienceEvent (streaming JSON)"
+    }
+
+    "🟠 ECOMMERCE_CHECKOUT" {
+        datetime checkoutDate
+        string customerID FK
+        string email
+        string purchaseID PK
+        string orderStatus "placed"
+        object shipping "method, amount, street, city, state, postalCode"
+        array productListItems "productID, model, priceTotal, quantity, currencyCode"
+        string _class "XDM ExperienceEvent (streaming JSON)"
+    }
+
+    "📋 LEGEND" {
+        string 🟢_Individual_Profile "P"
+        string 🟠_Experience_Event "E"
+        string 🔵_Lookup "L"
+    }

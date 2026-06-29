@@ -1,0 +1,21 @@
+# Optional dependencies for tools that produce richer output.
+# The stdlib-only tools need nothing here; install only if you use a tool
+# that lists a dependency below.
+#
+#   pip install -r requirements.txt
+#
+# openpyxl -- tabbed .xlsx workbooks (audit_batch_schedules_v2.py writes one
+#             worksheet per sandbox plus a Summary tab; data_dictionary_v3.py
+#             writes one tab per schema).
+openpyxl>=3.1
+# pyarrow  -- only for `data_dictionary_v3.py --data-dict`. Reads the Snappy-Parquet
+#             batch files sampled via Data Access to compute field coverage and
+#             top-5 values. Not needed for the schema/ERD export itself.
+pyarrow>=14
+# tzdata   -- required alongside pyarrow on Windows / any Python without a
+#             system tz database: event Parquet has UTC timestamp columns and
+#             pyarrow's to_pylist() raises ZoneInfoNotFoundError('UTC') without
+#             it. Pure-python, tiny.
+tzdata
+# python-docx -- only used to regenerate "Data Dictionary v3 - Overview.docx".
+python-docx>=1.1

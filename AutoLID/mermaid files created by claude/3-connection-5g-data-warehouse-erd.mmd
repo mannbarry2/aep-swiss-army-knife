@@ -1,0 +1,161 @@
+---
+title: 3. Connection 5G Data Warehouse ERD
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#ffffff'
+    primaryBorderColor: '#666666'
+    primaryTextColor: '#000000'
+    lineColor: '#333333'
+    fontFamily: 'Arial, sans-serif'
+    titleColor: '#C8102E'
+---
+erDiagram
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟠 ORDER" : "Customer ID"
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟢 CUSTOMER_LINE" : "Customer ID"
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟢 CUSTOMER_ADDRESSES" : "Customer ID"
+    "🟢 CUSTOMER_ACCOUNT" ||--o{ "🟠 BILLING_STATEMENT" : "Customer ID"
+    "🟢 CUSTOMER_ACCOUNT" }o--|| "🔵 PLAN" : "Plan ID FK"
+    "🔵 STORE" ||--o{ "🟠 ORDER" : "Store ID FK"
+    "🔵 PLAN" ||--o{ "🟠 ORDER" : "Plan ID FK"
+    "🔵 PLAN" ||--o{ "🟠 BILLING_STATEMENT" : "Plan ID FK"
+    "🟠 ORDER" ||--o{ "🔵 ORDER_PRODUCT" : "Order ID"
+    "🔵 PRODUCT" ||--o{ "🔵 ORDER_PRODUCT" : "Product ID"
+    "🔵 PRODUCT" }o--|| "🔵 PRODUCT_TYPE" : "Product Type FK"
+    "🟠 BILLING_STATEMENT" ||--o{ "🔵 BILLING_DETAIL" : "Statement ID"
+    "🟢 CUSTOMER_LINE" ||--o{ "🔵 BILLING_DETAIL" : "Customer Line ID"
+
+    "🔵 STORE" {
+        string Store_ID PK
+        string Store_Name
+        date Store_Inauguration_Date
+        string Store_Street
+        string Store_City
+        string Store_State
+        string Store_Zip_Code
+        time Store_Open_Time
+        time Store_Close_Time
+    }
+
+    "🟠 ORDER" {
+        string Order_ID PK
+        datetime Order_Date
+        float Order_Total
+        string Order_Status "Placed | Cancelled | Ready for Pickup | Picked Up | Shipped | Delivered"
+        datetime Last_Order_Status_Update
+        string Payment_Type "Credit | Debit | Gift | Cash"
+        float Payment_Amount
+        string Payment_Currency_Code
+        string Payment_Transaction_ID
+        string Customer_ID FK
+        string Email
+        string Shipping_Method "Standard | Expedited | Overnight"
+        string Shipping_Destination "Home | Store"
+        string Shipping_Street_Address
+        string Shipping_City
+        string Shipping_State
+        string Shipping_Zip
+        string Billing_Street_Address
+        string Billing_City
+        string Billing_State
+        string Billing_Zip
+        string Store_ID FK
+        string Plan_ID FK
+        string _class "XDM ExperienceEvent"
+    }
+
+    "🔵 ORDER_PRODUCT" {
+        string Order_Product_ID PK
+        string Product_ID FK
+        string Order_ID FK
+        int Quantity
+        float Total
+        string Currency
+    }
+
+    "🔵 PRODUCT" {
+        string Product_ID PK
+        string Product_Type FK
+        string Make
+        string Model
+        bool _5G_Compatible
+        int Release_Year
+        float Price
+    }
+
+    "🔵 PRODUCT_TYPE" {
+        string Product_Type PK
+        string Product_Type_Name
+    }
+
+    "🟢 CUSTOMER_ACCOUNT" {
+        string Customer_ID PK
+        string First_Name
+        string Last_Name
+        string Email
+        string Mobile_Phone
+        date Birth_Date
+        bool Email_Optin
+        datetime Account_Create_Date
+        datetime Account_End_Date
+        string _class "XDM Individual Profile"
+    }
+
+    "🟢 CUSTOMER_LINE" {
+        string Customer_Line_ID PK
+        string Customer_ID FK
+        string Mobile_Phone
+        bool Active_Indicator
+        bool Primary_Line_Indicator
+        string _class "XDM Individual Profile"
+    }
+
+    "🟢 CUSTOMER_ADDRESSES" {
+        string Customer_ID FK
+        string Address_Type "Shipping | Billing"
+        string Street_Address
+        string City
+        string State
+        string Zip_Code
+        bool Primary_Indicator
+        string _class "XDM Individual Profile"
+    }
+
+    "🟠 BILLING_STATEMENT" {
+        string Statement_ID PK
+        string Customer_ID FK
+        date Statement_Date
+        date Billing_Period_Start
+        date Billing_Period_End
+        string Type "Phone | Data"
+        float Data_Usage
+        float Data_Allowance
+        string Plan_ID FK
+        float Bill_Total
+        string _class "XDM ExperienceEvent"
+    }
+
+    "🔵 BILLING_DETAIL" {
+        string Detail_Statement_ID PK
+        string Statement_ID FK
+        string Customer_Line_ID FK
+        float Amount_Charged
+        string Phone_Number
+    }
+
+    "🔵 PLAN" {
+        string Plan_ID PK
+        string Plan_Type "Mobile"
+        string Plan_Name "Basic | Ultimate | Pro"
+        float Monthly_Line_Cost
+        string Monthly_Data_Allowance
+        bool Unlimited_Talk
+        bool Unlimited_Text
+        bool Unlimited_Data
+    }
+
+    "📋 LEGEND" {
+        string 🟢_Individual_Profile "P"
+        string 🟠_Experience_Event "E"
+        string 🔵_Lookup "L"
+    }

@@ -1,0 +1,106 @@
+---
+title: 1. Luma Data Model
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#ffffff'
+    primaryBorderColor: '#666666'
+    primaryTextColor: '#000000'
+    lineColor: '#333333'
+    fontFamily: 'Arial, sans-serif'
+    titleColor: '#C8102E'
+---
+erDiagram
+    "🟢 CRM" ||--|| "🟢 LOYALTY" : "crmId"
+    "🟢 CRM" ||--o{ "🟢 TEST_PROFILES" : "crmId"
+    "🟢 CRM" ||--o{ "🟠 WEB_EVENTS" : "crmId -> lumaCrmId"
+    "🟢 LOYALTY" ||--o{ "🟠 OFFLINE_PURCHASES" : "loyaltyId"
+    "🔵 PRODUCT_CATALOG" ||--o{ "🟠 INVENTORY_EVENTS" : "SKU"
+    "🔵 PRODUCT_CATALOG" ||--o{ "🟠 OFFLINE_PURCHASES" : "SKU"
+    "🔵 PRODUCT_CATALOG" ||--o{ "🟠 WEB_EVENTS" : "SKU"
+
+    "🟢 CRM" {
+        string crmId PK "identity"
+        string firstName
+        string lastName
+        string gender
+        int birthYear
+        string personalEmail
+        string mobilePhone
+        string homeAddress
+        string _class "XDM Individual Profile"
+        int _records "1000"
+    }
+
+    "🟢 LOYALTY" {
+        string loyaltyId PK "identity"
+        string crmId FK "identity"
+        string firstName
+        string lastName
+        int points
+        string tier "gold|silver|bronze|platinum"
+        date joinDate
+        string _class "XDM Individual Profile"
+        int _records "1000"
+    }
+
+    "🟢 TEST_PROFILES" {
+        string crmId PK "identity"
+        string personalEmail
+        bool testProfile "True"
+        string _class "XDM Individual Profile"
+        int _records "3"
+        string _purpose "AJO testing"
+    }
+
+    "🔵 PRODUCT_CATALOG" {
+        string SKU PK
+        string name
+        string category "men|women|gear"
+        string color
+        string size
+        float price
+        string description
+        string imageUrl
+        string url
+        int stockQuantity
+        string _class "Custom product class"
+        int _records "101"
+    }
+
+    "🟠 OFFLINE_PURCHASES" {
+        string _id PK
+        string loyaltyId FK "identity"
+        string purchaseID
+        float priceTotal "GBP 10-400"
+        array productListItems "SKU + quantity"
+        datetime timestamp "Nov 2022"
+        string _class "XDM ExperienceEvent"
+        int _records "1000"
+    }
+
+    "🟠 INVENTORY_EVENTS" {
+        string _id PK
+        string SKU FK
+        string stockEventType "restock|outOfStock"
+        datetime timestamp "Nov 2022"
+        string _class "Custom business event"
+        int _records "1000"
+    }
+
+    "🟠 WEB_EVENTS" {
+        string _id PK
+        string ECID FK "primary identity"
+        string lumaCrmId FK "authenticated identity"
+        string eventType "productViews|saveForLaters|purchases"
+        array productListItems "SKU"
+        datetime timestamp "Nov 2022"
+        string _class "XDM ExperienceEvent"
+        int _records "1000"
+    }
+
+    "📋 LEGEND" {
+        string 🟢_Individual_Profile "P"
+        string 🟠_Experience_Event "E"
+        string 🔵_Lookup "L"
+    }

@@ -1,0 +1,35 @@
+[
+    {
+        "_lumademo": {
+            "systemIdentifier": {
+                "crmId": "f50fc95ada02fe322b0d649af6f96e08"
+            }
+        },
+        "personalEmail": {
+            "address": "stanleigh.stooke@emailsim.io"
+        },
+        "testProfile": "True"
+    },
+    {
+        "_lumademo": {
+            "systemIdentifier": {
+                "crmId": "0543cd2a5433f5b791f3216a43871e9b"
+            }
+        },
+        "personalEmail": {
+            "address": "leora.dietsche@emailsim.io"
+        },
+        "testProfile": "True"
+    },
+    {
+        "_lumademo": {
+            "systemIdentifier": {
+                "crmId": "4d5578926d08463837ecfa3d16411e4b"
+            }
+        },
+        "personalEmail": {
+            "address": "louise.petti@emailsim.io"
+        },
+        "testProfile": "True"
+    }
+] 

@@ -1,0 +1,36 @@
+{
+    "_comment_1":    "===== babelfish_query_renamer config =====",
+    "_organization": "<friendly org descriptor, e.g. acme-insurance / widget-co>",
+    "_org_id_note":  "Adobe doesn't expose org names via API. Hard-code the org_id<->label mapping in babelfish_query_renamer.py (ORG_LABELS).",
+    "_usage":        "Copy this file to config.json and fill in your own values. Keep one config.json per Adobe org. Underscored keys are comments and ignored by the loader.",
+
+    "bearer_token": "",
+    "client_id": "<your-adobe-ims-client-id>",
+    "client_secret": "<your-adobe-ims-client-secret>",
+    "org_id": "<your-org-id>@AdobeOrg",
+    "oauth_url": "https://ims-na1.adobelogin.com/ims/token",
+    "scopes": "AdobeID,openid,read_organizations,additional_info.projectedProductContext,session",
+    "sandbox": "all",
+    "sandbox_names": ["prod"],
+    "_org_labels_note": "Optional. Maps real org_id -> friendly folder label for sql/<label>/. Kept here (gitignored) so real org IDs stay out of version control.",
+    "org_labels": {
+        "<your-org-id>@AdobeOrg": "acme-insurance"
+    },
+    "my_user_ids": [
+        {
+            "id": "<paste your userId once discovered via the picker>",
+            "label": "<friendly label, e.g. primary>"
+        }
+    ],
+
+    "_anthropic_note": "Optional. If anthropic_api_key is set, Claude is used to suggest names from the SQL itself. Leave empty to fall back to the local heuristic.",
+    "anthropic_api_key": "",
+    "anthropic_model": "claude-opus-4-7",
+    "naming_config": {
+        "style": "kebab-case",
+        "max_length": 60,
+        "instructions": "<optional extra naming rules, e.g. 'Always include the primary dataset name. Prefer noun-verb format like users-count or events-by-day.'>",
+        "ai_suffix": " [babelfish]",
+        "ai_foreign_suffix": " [babelfish system]"
+    }
+}
