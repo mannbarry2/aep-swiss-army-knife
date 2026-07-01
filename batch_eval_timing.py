@@ -17,8 +17,24 @@ IMS, then:
      creation time (title, created, tags, id).
   3. Summarises the rate of audience creation (how many per month).
   4. Pages through ALL batch segment jobs (/segment/jobs) and reports how long
-     each evaluation took -- the direct answer to "why is batch slow?".
-  5. Exports every job to ./output/batch_eval_timing_<sandbox>_<stamp>.csv.
+     each evaluation took -- the direct answer to "why is batch slow?". Each job
+     row/CSV also carries the NAME(S) of the segment(s) it evaluated (resolved
+     via /segment/definitions, so SYSTEM segments get a name too), the schedule
+     time it fired at, and the scheduleId -- so the export can be filtered by
+     audience name or grouped by schedule.
+  5. Exports every job to ./output/batch_eval_timing_<sandbox>_<stamp>.csv
+     (job_id, status, audience_names, segment_ids, schedule_id, source,
+     scheduled_utc, ended_utc, duration, num_segments).
+
+Single-audience probe (--audience): instead of the estate-wide report, point it
+at ONE audience -- by id, by name substring, or picked from a filtered menu --
+and it prints a "timing card": its createEpoch, last-modified, current count and
+count-snapshot time, the last batch job to run in the sandbox, its FEEDERS (the
+dependency segments it's built on, each with method/count/last-evaluated and an
+EMPTY/STALE flag), and a plain stuck / not-stuck VERDICT. Answers "is this
+specific audience constipated, or just new?" -- and, via the feeders, "is it
+empty because a feeder isn't populated?". A dependent can only be as fresh and
+full as its feeders, so a feeder sitting at 0 is the first place to look.
 
 Read-only: it never creates, edits or deletes anything in AEP.
 
@@ -30,6 +46,18 @@ Usage:
     python batch_eval_timing.py --sandbox=stage # override sandbox
     python batch_eval_timing.py --jobs=50       # cap to 50 jobs (default: all)
     python batch_eval_timing.py --all-methods   # don't filter to batch-only
+    python batch_eval_timing.py prod --audience  # probe ONE audience: is it stuck?
+    python batch_eval_timing.py prod --audience=00000000-0000-0000-0000-000000000000
+    python batch_eval_timing.py prod --audience="MY_AUDIENCE_NAME"
+    python batch_eval_timing.py prod --schedules  # dump the scheduled-segmentation config
+
+Schedules mode (--schedules): GET /config/schedules and print every sandbox
+schedule -- id, state, cron/trigger time, and (for the batch_segmentation entry)
+whether it targets ALL segments ['*'] or a specific list (ids resolved to names).
+This is the direct answer to "is the estate really on the 4am schedule, or is it
+materialised later by an api-triggered job?" -- if the schedule is active, at
+04:00, and targets ALL, yet audiences only refresh hours later, the scheduled run
+isn't what evaluates the estate. Writes output/schedules_<sandbox>_<stamp>.csv.
 """
 
 from __future__ import annotations
@@ -50,8 +78,8 @@ from pathlib import Path
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "batch_eval_timing"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-06-24"
+SCRIPT_VERSION = "1.2.0"
+SCRIPT_DATE = "2026-07-01"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -61,6 +89,17 @@ OUTPUT_DIR = SCRIPT_DIR / "output"
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 AUDIENCES_URL = "https://platform.adobe.io/data/core/ups/audiences"
 SEGMENT_JOBS_URL = "https://platform.adobe.io/data/core/ups/segment/jobs"
+# Segment-definition detail. A batch job's segments[].segmentId is a segment-
+# definition id (== audienceId), but that id space is a SUPERSET of the friendly
+# /audiences list: it also carries SYSTEM segments (e.g. 'email-unsubscribers')
+# that never appear in /audiences. We resolve job segment ids to names here so a
+# system segment doesn't show up as a bare id.
+SEGMENT_DEFS_URL = "https://platform.adobe.io/data/core/ups/segment/definitions"
+# Scheduled-segmentation config. The sandbox-level schedules that decide WHEN
+# (and WHICH) batch audiences are evaluated. The batch_segmentation entry here is
+# the "does the 4am run cover the whole estate?" answer -- properties.segments is
+# ['*'] for the whole estate, or a specific id list for a subset.
+CONFIG_SCHEDULES_URL = "https://platform.adobe.io/data/core/ups/config/schedules"
 
 DEFAULT_SANDBOX = "dev"
 # Statuses that represent a batch evaluation that actually ran to completion.
@@ -68,6 +107,12 @@ DEFAULT_SANDBOX = "dev"
 # job's "end" timestamp is when it was abandoned (sometimes months later), not
 # how long an evaluation takes, and those outliers wreck the time buckets.
 COMPLETED_STATUSES = {"SUCCEEDED", "PROCESSED"}
+# Job statuses used by the single-audience "is it stuck?" probe.
+RUNNING_STATUSES = {"PROCESSING", "QUEUED", "QUEUEING", "NEW",
+                    "RUNNING", "SCHEDULED", "STARTED"}
+FAILED_STATUSES = {"FAILED", "ERROR", "KILLED", "CANCELLED", "CANCELED"}
+# Profile-count fields AEP has exposed on the audience object / its detail.
+COUNT_KEYS = ("profileCount", "totalProfiles", "profiles", "count", "totalRows")
 PAGE_LIMIT = 100
 JOBS_PAGE_LIMIT = 100
 # Safety backstop so a runaway cursor can't loop forever. ~50k jobs.
@@ -423,6 +468,56 @@ def fetch_segment_jobs(headers, max_jobs=None) -> list[dict]:
     return out
 
 
+def job_schedule_id(job: dict) -> str:
+    """The scheduleId that triggered this job (properties.scheduleId). Jobs kicked
+    off by the batch scheduler carry one; ad-hoc/manual runs usually don't. Lets
+    you group every job that came from the same scheduled evaluation."""
+    props = job.get("properties")
+    if isinstance(props, dict):
+        return str(props.get("scheduleId") or "")
+    return ""
+
+
+def make_name_resolver(headers, audiences: list[dict]):
+    """Return resolve(segment_id) -> friendly name for the ids a batch job
+    references. Seeds a cache from the audiences we already fetched (id -> name)
+    then lazily GETs /segment/definitions/<id> for anything missing -- that's how
+    SYSTEM segments (absent from /audiences) get a name instead of a bare id.
+    Both hits and misses are cached, so each id is fetched at most once."""
+    cache: dict[str, str] = {}
+    for a in audiences:
+        aid = a.get("id") or a.get("audienceId")
+        if aid and a.get("name"):
+            cache[str(aid)] = a["name"]
+
+    def resolve(sid) -> str:
+        key = str(sid)
+        if key in cache:
+            return cache[key]
+        name = ""
+        try:
+            body = http(f"{SEGMENT_DEFS_URL}/{urllib.parse.quote(key, safe='')}",
+                        headers=headers, timeout=30)
+            name = (json.loads(body) or {}).get("name") or ""
+        except Exception:
+            name = ""            # deleted/inaccessible -> fall back to the id
+        cache[key] = name
+        return name
+
+    return resolve
+
+
+def job_audience_names(job: dict, resolve) -> list[str]:
+    """Friendly names of the segment(s) a job evaluated, resolved from its
+    segment ids. An unresolved id (deleted segment / no access) shows as its
+    short id in parentheses so the row is never blank."""
+    names = []
+    for sid in sorted(job_segment_ids(job)):
+        nm = resolve(sid)
+        names.append(nm or f"({sid[:8]}..)")
+    return names
+
+
 def job_times(job: dict) -> tuple[datetime | None, datetime | None]:
     """Resolve (started, ended) for a segment job across the field names AEP
     has used. Falls back to created/updated when explicit start/complete
@@ -440,20 +535,27 @@ def job_times(job: dict) -> tuple[datetime | None, datetime | None]:
     return started, ended
 
 
-def print_segment_jobs(jobs: list[dict], max_rows: int = 40) -> None:
+def print_segment_jobs(jobs: list[dict], resolve=None, max_rows: int = 40) -> None:
     """Per-job table: status + how long the batch evaluation took. The full set
     can be large, so only the most recent `max_rows` are printed -- but the
-    timing summary underneath is computed over EVERY job (the CSV has them all)."""
+    timing summary underneath is computed over EVERY job (the CSV has them all).
+
+    The SCHEDULED column is the scheduler fire time (creationTime) -- for a
+    scheduler-triggered job that IS its schedule time. NAME(S) resolves the
+    segment ids the job evaluated to friendly names via `resolve` (falls back to
+    the id when no resolver is given)."""
     if not jobs:
         logger.info("No batch segment jobs returned (none recently, or no access).")
         return
-    bar = ANSI["cyan"] + "=" * 110 + ANSI["reset"]
+    resolve = resolve or (lambda s: "")
+    bar = ANSI["cyan"] + "=" * 140 + ANSI["reset"]
     print()
     print(bar)
     print(ANSI["bold"] +
-          f"  {'STARTED (UTC)':<21}{'STATUS':<12}{'DURATION':<12}{'#SEG':<6}JOB ID" +
+          f"  {'SCHEDULED (UTC)':<21}{'STATUS':<12}{'DURATION':<12}"
+          f"{'NAME(S)':<48}JOB ID" +
           ANSI["reset"])
-    print(ANSI["cyan"] + "-" * 110 + ANSI["reset"])
+    print(ANSI["cyan"] + "-" * 140 + ANSI["reset"])
     # Timing is measured over completed evaluations only; rows shown are most
     # recent first. Non-completed jobs (KILLED/FAILED) still appear in the
     # table but never feed the stats/chart -- their "end" is an abandonment
@@ -473,8 +575,13 @@ def print_segment_jobs(jobs: list[dict], max_rows: int = 40) -> None:
                 skipped += 1
         if idx >= max_rows:
             continue
-        segs = j.get("segments") or j.get("segmentDefinitions") or j.get("batchSegments") or []
-        nseg = len(segs) if isinstance(segs, list) else "?"
+        names = job_audience_names(j, resolve)
+        # Show the first name (+N more) so a multi-segment job stays one line;
+        # the CSV lists every name in full.
+        label = names[0] if names else "?"
+        if len(names) > 1:
+            label = f"{label} (+{len(names) - 1})"
+        label = label[:46]
         jid = j.get("id") or "?"
         scolor = (ANSI["green"] if status in ("SUCCEEDED", "PROCESSED")
                   else ANSI["red"] if status in ("FAILED", "ERROR")
@@ -482,7 +589,7 @@ def print_segment_jobs(jobs: list[dict], max_rows: int = 40) -> None:
         print(f"  {ANSI['dim']}{fmt_dt(started):<21}{ANSI['reset']}"
               f"{scolor}{status:<12}{ANSI['reset']}"
               f"{ANSI['bold']}{fmt_dur(dur):<12}{ANSI['reset']}"
-              f"{str(nseg):<6}"
+              f"{ANSI['yellow']}{label:<48}{ANSI['reset']}"
               f"{ANSI['dim']}{jid}{ANSI['reset']}")
     if len(rows) > max_rows:
         print(f"  {ANSI['dim']}... {len(rows) - max_rows} more job(s) "
@@ -546,13 +653,18 @@ def print_duration_histogram(durations: list[float], bins: int = 10) -> None:
                   f"{n:>4} jobs{marker}")
 
 
-def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str) -> Path:
+def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str,
+                           resolve=None) -> Path:
     """Write every job to output/batch_eval_timing_<sandbox>_<stamp>.csv with
-    one row per job and its evaluation duration. Returns the path written."""
+    one row per job: its evaluation duration PLUS the segment name(s) it ran and
+    the schedule that triggered it, so the sheet can be filtered by audience name
+    or grouped by schedule. Returns the path written."""
+    resolve = resolve or (lambda s: "")
     OUTPUT_DIR.mkdir(exist_ok=True)
     path = OUTPUT_DIR / f"batch_eval_timing_{sandbox}_{stamp}.csv"
     cols = [
-        "job_id", "status", "started_utc", "ended_utc",
+        "job_id", "status", "audience_names", "segment_ids",
+        "schedule_id", "source", "scheduled_utc", "ended_utc",
         "duration_seconds", "duration_human", "num_segments",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -561,18 +673,617 @@ def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str) -> Path:
         for j in jobs:
             started, ended = job_times(j)
             dur = (ended - started).total_seconds() if started and ended else None
-            segs = j.get("segments") or j.get("segmentDefinitions") or j.get("batchSegments") or []
-            nseg = len(segs) if isinstance(segs, list) else ""
+            ids = sorted(job_segment_ids(j))
+            names = job_audience_names(j, resolve)
             w.writerow([
                 j.get("id") or "",
                 j.get("status") or "",
+                " | ".join(names),
+                " | ".join(ids),
+                job_schedule_id(j),
+                j.get("source") or "",
                 started.isoformat() if started else "",
                 ended.isoformat() if ended else "",
                 f"{dur:.0f}" if dur is not None and dur >= 0 else "",
                 fmt_dur(dur) if dur is not None and dur >= 0 else "",
-                nseg,
+                len(ids),
             ])
     return path
+
+
+# ----------------------------------------------------------------------------
+# Scheduled-segmentation config -- "is the estate really on the 4am schedule?"
+# ----------------------------------------------------------------------------
+# This is the direct test behind "audiences built overnight aren't there in the
+# morning": the sandbox has ONE batch_segmentation schedule that's meant to
+# evaluate the estate. If it's active, at 04:00, and targets ['*'] but audiences
+# still only refresh hours later in an api-triggered job, then the scheduled run
+# isn't what actually materialises the estate.
+def fetch_schedules(headers) -> list[dict]:
+    """GET the sandbox scheduled-segmentation config. Returns the list of
+    schedule objects (batch_segmentation, export, delta, system jobs, ...)."""
+    try:
+        body = http(CONFIG_SCHEDULES_URL, headers=headers)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        logger.error(f"Schedule config fetch failed: HTTP {e.code} {detail}")
+        return []
+    except Exception as e:
+        logger.error(f"Schedule config fetch failed: {type(e).__name__}: {e}")
+        return []
+    data = json.loads(body) or {}
+    if isinstance(data, list):
+        return data
+    return data.get("children") or data.get("schedules") or []
+
+
+def cron_time_utc(cron: str) -> str:
+    """Pull an HH:MM (UTC) out of a cron that pins a single daily time. Handles
+    Quartz 6-7 field ('sec min hour dom mon dow [year]') and 5-field standard
+    ('min hour dom mon dow'). Returns the raw cron when it's recurring/sub-daily
+    (minute or hour not a plain number)."""
+    if not isinstance(cron, str) or not cron.strip():
+        return "-"
+    parts = cron.split()
+    if len(parts) >= 6:
+        minute, hour = parts[1], parts[2]
+    elif len(parts) == 5:
+        minute, hour = parts[0], parts[1]
+    else:
+        return cron
+    if minute.isdigit() and hour.isdigit():
+        return f"{int(hour):02d}:{int(minute):02d}"
+    return cron
+
+
+def schedule_targets(sched: dict, resolve):
+    """Describe what a schedule evaluates. For a batch_segmentation schedule,
+    properties.segments is ['*'] (the whole estate) or a specific id list which
+    we resolve to names. Non-segmentation schedules (export/delta/system) don't
+    target segments. Returns (summary, detail_names)."""
+    props = sched.get("properties") or {}
+    segs = props.get("segments")
+    if segs in ("*", ["*"]):
+        return "ALL segments (*)", ""
+    if isinstance(segs, list) and segs:
+        names = [resolve(s) or f"({str(s)[:8]}..)" for s in segs]
+        return f"{len(segs)} specific segment(s)", " | ".join(names)
+    if segs is not None:
+        return str(segs), ""
+    return "(n/a - not a segmentation schedule)", ""
+
+
+def schedule_updated(sched: dict) -> datetime | None:
+    for key in ("updateEpoch", "updateTime", "updated"):
+        dt = to_dt(sched.get(key))
+        if dt:
+            return dt
+    return None
+
+
+def print_schedules(scheds: list[dict], resolve) -> None:
+    """Table of the sandbox schedules, batch_segmentation highlighted -- it's the
+    one that answers 'does the 4am run cover the whole estate?'."""
+    if not scheds:
+        logger.info("No schedules returned (none configured, or no access).")
+        return
+    bar = ANSI["cyan"] + "=" * 132 + ANSI["reset"]
+    print()
+    print(bar)
+    print(ANSI["bold"] +
+          f"  {'STATE':<10}{'TYPE':<22}{'TIME(UTC)':<12}{'CRON':<18}"
+          f"{'TARGETS':<28}SCHEDULE ID" + ANSI["reset"])
+    print(ANSI["cyan"] + "-" * 132 + ANSI["reset"])
+    for s in scheds:
+        state = s.get("state") or "?"
+        stype = (s.get("type") or "?")[:20]
+        cron = (s.get("schedule") or "").strip()
+        thms = cron_time_utc(cron)
+        summary, detail = schedule_targets(s, resolve)
+        sid = s.get("id") or "?"
+        # The batch_segmentation schedule is the one people mean by "the 4am run".
+        is_seg = s.get("type") == "batch_segmentation"
+        scolor = ANSI["green"] if state == "active" else ANSI["dim"]
+        tcolor = ANSI["yellow"] + ANSI["bold"] if is_seg else ANSI["dim"]
+        print(f"  {scolor}{state:<10}{ANSI['reset']}"
+              f"{tcolor}{stype:<22}{ANSI['reset']}"
+              f"{thms:<12}{cron[:16]:<18}"
+              f"{summary:<28}{ANSI['dim']}{sid}{ANSI['reset']}")
+        if detail:
+            print(f"  {'':<10}{ANSI['dim']}-> {detail[:118]}{ANSI['reset']}")
+    print(bar)
+    # Spell out the estate schedule explicitly.
+    seg = [s for s in scheds if s.get("type") == "batch_segmentation"]
+    if seg:
+        for s in seg:
+            summary, _ = schedule_targets(s, resolve)
+            print(f"  {ANSI['bold']}Estate batch_segmentation schedule:{ANSI['reset']} "
+                  f"state={s.get('state')}, time={cron_time_utc((s.get('schedule') or '').strip())} UTC, "
+                  f"targets={summary}")
+        print(f"  {ANSI['dim']}(If this is active/at 04:00/targets ALL yet audiences "
+              f"only refresh hours later in an api job, the scheduled run isn't what "
+              f"materialises the estate.){ANSI['reset']}")
+    else:
+        print(f"  {ANSI['yellow']}No batch_segmentation schedule found -- the estate "
+              f"has no scheduled evaluation configured.{ANSI['reset']}")
+
+
+def write_schedules_csv(scheds: list[dict], sandbox: str, stamp: str,
+                        resolve) -> Path:
+    """Write output/schedules_<sandbox>_<stamp>.csv -- one row per schedule with
+    state, cron/time, what it targets (all vs named segments), and audit fields."""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    path = OUTPUT_DIR / f"schedules_{sandbox}_{stamp}.csv"
+    cols = ["schedule_id", "name", "type", "state", "cron", "trigger_time_utc",
+            "targets", "target_names", "created_by", "update_time_utc"]
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for s in scheds:
+            cron = (s.get("schedule") or "").strip()
+            summary, detail = schedule_targets(s, resolve)
+            updated = schedule_updated(s)
+            w.writerow([
+                s.get("id") or "",
+                s.get("name") or "",
+                s.get("type") or "",
+                s.get("state") or "",
+                cron,
+                cron_time_utc(cron),
+                summary,
+                detail,
+                s.get("createdBy") or s.get("owner") or "",
+                updated.isoformat() if updated else "",
+            ])
+    return path
+
+
+def run_schedules(headers, sandbox) -> None:
+    """--schedules mode: dump the sandbox scheduled-segmentation config and write
+    a CSV. Answers whether the estate's daily evaluation is really on a schedule."""
+    logger.info("Fetching scheduled-segmentation config (/config/schedules)...")
+    scheds = fetch_schedules(headers)
+    if not scheds:
+        return
+    # Resolver with no seed list -> lazily names any specific target ids.
+    resolve = make_name_resolver(headers, [])
+    print_schedules(scheds, resolve)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    csv_path = write_schedules_csv(scheds, sandbox, stamp, resolve)
+    logger.info(f"Wrote {len(scheds)} schedule(s) to {csv_path}")
+
+
+# ----------------------------------------------------------------------------
+# Single-audience probe -- "is THIS audience stuck, or just new?"
+# ----------------------------------------------------------------------------
+def human_ago(dt: datetime | None, now: datetime) -> str:
+    """Coarse '18h ago' / 'in 5m' relative to now. Deliberately low-precision --
+    it's a gut-feel signal, not a stopwatch."""
+    if not dt:
+        return "?"
+    secs = (now - dt).total_seconds()
+    future = secs < 0
+    secs = abs(secs)
+    if secs < 90:
+        out = f"{int(secs)}s"
+    elif secs < 5400:
+        out = f"{int(secs // 60)}m"
+    elif secs < 172800:
+        out = f"{int(secs // 3600)}h"
+    else:
+        out = f"{int(secs // 86400)}d"
+    return f"in {out}" if future else f"{out} ago"
+
+
+def audience_modified(aud: dict) -> datetime | None:
+    for key in ("updateEpoch", "updateTime", "modifiedAt", "lastModified", "updated"):
+        dt = to_dt(aud.get(key))
+        if dt:
+            return dt
+    return None
+
+
+def raw_create_epoch(aud: dict):
+    """The literal createEpoch value (ms) for display alongside the parsed date --
+    it's the number the user actually asked to see."""
+    for key in ("createEpoch", "creationTime"):
+        v = aud.get(key)
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+    return None
+
+
+def dig_count(obj) -> int | None:
+    """Find a plausible profile-count integer, probing the nests AEP has used
+    (the confirmed current shape is metrics.data.totalProfiles)."""
+    if not isinstance(obj, dict):
+        return None
+    for k in COUNT_KEYS:
+        v = obj.get(k)
+        if isinstance(v, (int, float)) and v >= 0:
+            return int(v)
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+    for nest in ("metrics", "_metrics", "lifecycleMetrics", "audienceMetrics", "data"):
+        sub = obj.get(nest)
+        if isinstance(sub, dict):
+            c = dig_count(sub)
+            if c is not None:
+                return c
+    return None
+
+
+def count_snapshot(aud: dict) -> datetime | None:
+    """When the profile count last refreshed (metrics.updateEpoch). This is the
+    authoritative 'when was THIS audience last evaluated' signal -- 'never'
+    plus a 0 count on an old audience is the constipated case."""
+    metrics = aud.get("metrics")
+    if isinstance(metrics, dict):
+        dt = to_dt(metrics.get("updateEpoch"))
+        if dt:
+            return dt
+        data = metrics.get("data")
+        if isinstance(data, dict):
+            return to_dt(data.get("updateEpoch"))
+    return None
+
+
+def fetch_audience_detail(headers, aid) -> dict:
+    """GET one audience's full object (the list payload can be thinner than the
+    per-id detail -- metrics/createEpoch live more reliably here)."""
+    if not aid:
+        return {}
+    try:
+        body = http(f"{AUDIENCES_URL}/{urllib.parse.quote(str(aid), safe='')}",
+                    headers=headers, timeout=30)
+    except urllib.error.HTTPError as e:
+        logger.warning(f"Audience detail fetch failed: HTTP {e.code} "
+                       f"{e.read().decode(errors='replace')[:200]}")
+        return {}
+    except Exception as e:
+        logger.warning(f"Audience detail fetch failed: {type(e).__name__}: {e}")
+        return {}
+    try:
+        return json.loads(body) or {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def fetch_definition(headers, sid) -> dict:
+    """GET one segment-definition's full object. Unlike /audiences this also
+    returns SYSTEM segments and feeders that never surface in the friendly list,
+    so it's what we use to resolve a dependency (feeder) id to its details."""
+    if not sid:
+        return {}
+    try:
+        body = http(f"{SEGMENT_DEFS_URL}/{urllib.parse.quote(str(sid), safe='')}",
+                    headers=headers, timeout=30)
+        return json.loads(body) or {}
+    except Exception:
+        return {}
+
+
+def resolve_feeders(headers, aud: dict) -> list[dict]:
+    """An audience's `dependencies` are the feeder segments it's built on
+    (audience-of-audiences). Resolve each to the facts that reveal a lagging /
+    broken feeder: name, evaluation method, current count, and when that count
+    last refreshed. A feeder sitting at 0 (or never evaluated) is the classic
+    reason a dependent audience comes back empty."""
+    deps = aud.get("dependencies") or []
+    out: list[dict] = []
+    for did in deps:
+        d = fetch_definition(headers, did)
+        out.append({
+            "id": str(did),
+            "name": d.get("name") if d else None,
+            "method": evaluation_method(d) if d else "?",
+            "count": dig_count(d),
+            "snapshot": count_snapshot(d),
+        })
+    return out
+
+
+def job_segment_ids(job: dict) -> set[str]:
+    """Audience/segment ids a segment job evaluated, across the shapes AEP uses.
+    The scheduled batch job often lists none in the list payload (it evaluates
+    every batch segment at once); when that's so we fall back to the sandbox-wide
+    last job as the 'last evaluation opportunity'."""
+    ids: set[str] = set()
+    for key in ("segments", "segmentDefinitions", "batchSegments", "segmentIds"):
+        v = job.get(key)
+        if isinstance(v, list):
+            for s in v:
+                if isinstance(s, dict):
+                    sid = s.get("segmentId") or s.get("id") or s.get("segmentDefinitionId")
+                    if sid:
+                        ids.add(str(sid))
+                elif s:
+                    ids.add(str(s))
+    sid = job.get("segmentId")
+    if sid:
+        ids.add(str(sid))
+    return ids
+
+
+def analyse_jobs_for(jobs: list[dict], aid: str):
+    """Return (sandbox_last_success, this_audience_last_success, running, failures)
+    from the fetched job set. 'running' and 'failures' only count jobs that
+    explicitly reference this audience id."""
+    sandbox_last = None
+    per_last = None
+    running = False
+    failures = []
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    for j in jobs:
+        status = (j.get("status") or "").upper()
+        started, ended = job_times(j)
+        when = ended or started
+        mine = str(aid) in job_segment_ids(j)
+        if status in COMPLETED_STATUSES and when:
+            if not sandbox_last or when > sandbox_last:
+                sandbox_last = when
+            if mine and (not per_last or when > per_last):
+                per_last = when
+        if mine and status in RUNNING_STATUSES:
+            running = True
+        if mine and status in FAILED_STATUSES:
+            failures.append((when, status, j.get("id")))
+    failures.sort(key=lambda x: x[0] or floor, reverse=True)
+    return sandbox_last, per_last, running, failures
+
+
+def _failure_line(failures, now) -> str:
+    when, status, _jid = failures[0]
+    extra = f" (+{len(failures) - 1} more)" if len(failures) > 1 else ""
+    return (f"WARNING: {len(failures)} failed job(s) reference this audience -- "
+            f"latest {status} at {fmt_dt(when)} ({human_ago(when, now)}){extra}.")
+
+
+def build_verdict(method, created, snapshot, count, sandbox_last, running,
+                  failures, now):
+    """The whole point of the probe: turn the timestamps into a plain verdict.
+    Returns (label, ansi_colour_key, [detail lines])."""
+    if method == "streaming":
+        if count and count > 0:
+            return ("HEALTHY", "green",
+                    [f"{count:,} profiles qualify (streaming / continuous eval)."])
+        return ("STREAMING -- N/A", "yellow",
+                ["Streaming audience: evaluated continuously, NOT by the batch job.",
+                 "0 means nobody currently qualifies (or none have streamed in since "
+                 "creation). Not a batch-timing / stuck issue."])
+    if method == "edge":
+        return ("EDGE -- N/A", "yellow",
+                ["Edge/synchronous audience: evaluated on-device at request time.",
+                 "A batch count of 0 is expected and not meaningful here."])
+    # ---- batch ----
+    if count and count > 0:
+        return ("HEALTHY", "green",
+                [f"{count:,} profiles as of the last evaluation "
+                 f"({fmt_dt(snapshot)}, {human_ago(snapshot, now)})."
+                 if snapshot else f"{count:,} profiles."])
+    if running:
+        return ("RUNNING NOW", "yellow",
+                ["A batch job referencing this audience is in progress right now -- "
+                 "the count may be about to change. Re-check when it finishes."])
+    if snapshot is not None:
+        lines = [f"It HAS been evaluated (count refreshed {fmt_dt(snapshot)}, "
+                 f"{human_ago(snapshot, now)}) and came back 0.",
+                 "So it is NOT stuck in the pipeline -- the definition genuinely "
+                 "matches nobody. Check the PQL, the merge policy, or whether the "
+                 "source data has landed."]
+        if failures:
+            lines.append(_failure_line(failures, now))
+        return ("EVALUATED-EMPTY", "yellow", lines)
+    if created and sandbox_last and created > sandbox_last:
+        return ("NEW -- NOT STUCK", "green",
+                [f"Created {human_ago(created, now)}; no batch job has completed since "
+                 f"(last sandbox job: {fmt_dt(sandbox_last)}).",
+                 "A 0 count is expected for a brand-new batch audience -- it will "
+                 "populate on the next scheduled batch evaluation."])
+    if created and sandbox_last and created <= sandbox_last:
+        lines = [f"Created {human_ago(created, now)}, and batch job(s) HAVE completed "
+                 f"since (last: {fmt_dt(sandbox_last)}) -- yet this audience has never "
+                 f"produced a count snapshot.",
+                 "That's the constipated case: it should have been evaluated by now but "
+                 "wasn't. Likely a definition error, exclusion from the scheduled job, "
+                 "or failing jobs."]
+        if failures:
+            lines.append(_failure_line(failures, now))
+        return ("STUCK?", "red", lines)
+    return ("UNKNOWN", "yellow",
+            ["Not enough job history to judge -- no completed batch job found in the "
+             "fetched set. Re-run with --jobs=all, or check /segment/jobs access."])
+
+
+def print_feeders(feeders: list[dict], now: datetime) -> None:
+    """List the target audience's feeder (dependency) segments and flag the ones
+    that would starve it: empty or never-evaluated. This is the direct test of
+    the 'a feeder isn't working / ran late' hypothesis."""
+    if not feeders:
+        return
+    C = ANSI
+    print(C["cyan"] + "-" * 78 + C["reset"])
+    print(f"  {C['bold']}Feeders ({len(feeders)} dependenc"
+          f"{'y' if len(feeders) == 1 else 'ies'}){C['reset']}  "
+          f"{C['dim']}the segments this audience is built on{C['reset']}")
+    suspects = 0
+    for f in feeders:
+        name = f["name"] or f"({f['id'][:8]}..)"
+        count = f["count"]
+        snap = f["snapshot"]
+        empty = not count  # 0 or None
+        never = snap is None
+        if empty or never:
+            suspects += 1
+        mark = (f"{C['red']}<- EMPTY/STALE{C['reset']}"
+                if (empty or never) else f"{C['green']}ok{C['reset']}")
+        cnt = f"{count:,}" if isinstance(count, int) else "?"
+        when = (f"{fmt_dt(snap)} ({human_ago(snap, now)})" if snap
+                else "never evaluated")
+        print(f"     {C['yellow']}{name[:40]:<40}{C['reset']} "
+              f"{C['dim']}{f['method']:<9}{C['reset']} "
+              f"{C['bold']}{cnt:>12}{C['reset']}  "
+              f"{C['dim']}{when:<28}{C['reset']} {mark}")
+    if suspects:
+        print(f"  {C['red']}{C['bold']}{suspects} feeder(s) look empty or "
+              f"un-evaluated{C['reset']} -- if this audience is empty, start here: "
+              f"a dependent can only be as fresh/full as its feeders.")
+
+
+def print_timing_card(aud: dict, detail: dict, jobs: list[dict],
+                      feeders: list[dict] | None = None) -> None:
+    now = datetime.now(timezone.utc)
+    # The per-id detail is richer than the list object; overlay it where present.
+    merged = dict(aud)
+    merged.update({k: v for k, v in (detail or {}).items() if v is not None})
+
+    name = merged.get("name") or "(unnamed)"
+    aid = merged.get("id") or merged.get("audienceId") or "?"
+    method = evaluation_method(merged)
+    created = audience_created(merged)
+    modified = audience_modified(merged)
+    snapshot = count_snapshot(merged)
+    count = dig_count(merged)
+    raw_ep = raw_create_epoch(merged)
+    lifecycle = merged.get("lifecycleState") or merged.get("lifecycle") or "?"
+    tags = ", ".join(audience_tags(merged)) or "None"
+
+    sandbox_last, per_last, running, failures = analyse_jobs_for(jobs, aid)
+    label, color, lines = build_verdict(method, created, snapshot, count,
+                                        sandbox_last, running, failures, now)
+
+    C = ANSI
+    bar = C["cyan"] + "=" * 78 + C["reset"]
+
+    def row(k, v):
+        print(f"  {C['bold']}{k:<16}{C['reset']}{v}")
+
+    print()
+    print(bar)
+    print(f"  {C['bold']}Audience timing card{C['reset']}  "
+          f"{C['dim']}(is this one stuck, or just new?){C['reset']}")
+    print(bar)
+    row("Name", f"{C['yellow']}{name}{C['reset']}")
+    row("ID", f"{C['dim']}{aid}{C['reset']}")
+    row("Evaluation", method)
+    row("Lifecycle", lifecycle)
+    ep_str = f"   {C['dim']}(createEpoch {raw_ep}){C['reset']}" if raw_ep else ""
+    c_ago = f"   {C['cyan']}<- {human_ago(created, now)}{C['reset']}" if created else ""
+    row("Created", f"{fmt_dt(created)}{ep_str}{c_ago}")
+    m_ago = f"   {C['cyan']}<- {human_ago(modified, now)}{C['reset']}" if modified else ""
+    row("Last modified", f"{fmt_dt(modified)}{m_ago}")
+    cnt = f"{count:,}" if isinstance(count, int) else "?"
+    snap = (f"   {C['dim']}(refreshed {fmt_dt(snapshot)}, {human_ago(snapshot, now)})"
+            f"{C['reset']}" if snapshot else f"   {C['dim']}(never refreshed){C['reset']}")
+    row("Profile count", f"{C['bold']}{cnt}{C['reset']}{snap}")
+    row("Tags", tags)
+    print(C["cyan"] + "-" * 78 + C["reset"])
+    sb = (f"{fmt_dt(sandbox_last)}   {C['dim']}(sandbox-wide, "
+          f"{human_ago(sandbox_last, now)}){C['reset']}" if sandbox_last
+          else "(none found in fetched jobs)")
+    row("Last batch job", sb)
+    if per_last:
+        row("This aud. last", f"{fmt_dt(per_last)}   {C['dim']}"
+            f"({human_ago(per_last, now)}){C['reset']}")
+    print_feeders(feeders or [], now)
+    print(C["cyan"] + "-" * 78 + C["reset"])
+    vcolor = C.get(color, "")
+    print(f"  {C['bold']}{'Verdict':<16}{C['reset']}{vcolor}{C['bold']}{label}{C['reset']}")
+    for ln in lines:
+        print(f"  {'':<16}{ln}")
+    print(bar)
+
+
+def _looks_like_id(s: str) -> bool:
+    s = (s or "").strip()
+    return len(s) >= 16 and all(c in "0123456789abcdefABCDEF-" for c in s)
+
+
+def pick_from_list(items: list[dict], limit: int = 50) -> dict | None:
+    show = items[:limit]
+    for i, a in enumerate(show, 1):
+        name = (a.get("name") or "(unnamed)")[:50]
+        method = evaluation_method(a)
+        aid = a.get("id") or a.get("audienceId") or "?"
+        print(f"  {ANSI['bold']}{i:>3}{ANSI['reset']}  "
+              f"{name:<52}{ANSI['dim']}{method:<10}{aid}{ANSI['reset']}")
+    if len(items) > limit:
+        print(f"  {ANSI['dim']}... {len(items) - limit} more; narrow your "
+              f"filter.{ANSI['reset']}")
+    raw = input("Pick a number (blank to cancel): ").strip()
+    if raw.isdigit() and 1 <= int(raw) <= len(show):
+        return show[int(raw) - 1]
+    return None
+
+
+def pick_audience(audiences: list[dict]) -> dict | None:
+    """Interactive filter-then-pick over the audience list."""
+    while True:
+        term = input("\nFilter audiences by name/id substring "
+                     "(blank = show all, q = quit): ").strip()
+        if term.lower() == "q":
+            return None
+        low = term.lower()
+        matches = ([a for a in audiences
+                    if low in (a.get("name") or "").lower()
+                    or low in str(a.get("id") or a.get("audienceId") or "").lower()]
+                   if term else list(audiences))
+        if not matches:
+            print("  no matches; try again.")
+            continue
+        matches.sort(key=lambda a: (a.get("name") or "").lower())
+        chosen = pick_from_list(matches)
+        if chosen:
+            return chosen
+
+
+def resolve_target_audience(audiences, selector, headers) -> dict | None:
+    """Find the one audience to probe: exact id (in the list or by direct GET),
+    then unique name/id substring, else an interactive picker."""
+    if selector:
+        sel = selector.strip()
+        for a in audiences:
+            if str(a.get("id") or a.get("audienceId") or "") == sel:
+                return a
+        if _looks_like_id(sel):
+            d = fetch_audience_detail(headers, sel)
+            if d and (d.get("id") or d.get("audienceId")):
+                return d
+        low = sel.lower()
+        matches = [a for a in audiences
+                   if low in (a.get("name") or "").lower()
+                   or low in str(a.get("id") or a.get("audienceId") or "").lower()]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            logger.error(f"No audience matches {selector!r} (by id or name).")
+            return None
+        logger.info(f"{len(matches)} audiences match {selector!r}; pick one:")
+        return pick_from_list(sorted(matches, key=lambda a: (a.get("name") or "").lower()))
+    return pick_audience(audiences)
+
+
+def run_probe(headers, audiences, selector, jobs_cap) -> None:
+    target = resolve_target_audience(audiences, selector, headers)
+    if not target:
+        logger.info("No audience selected.")
+        return
+    aid = target.get("id") or target.get("audienceId") or ""
+    detail = {}
+    if aid:
+        logger.info(f"Fetching detail for audience {aid} ...")
+        detail = fetch_audience_detail(headers, aid)
+    scope = f"up to {jobs_cap}" if jobs_cap else "ALL"
+    logger.info(f"Fetching {scope} batch segment job(s) to locate the last "
+                f"evaluation...")
+    jobs = fetch_segment_jobs(headers, jobs_cap)
+    # Feeders come from the richer per-id detail (the list object omits them).
+    feeders = resolve_feeders(headers, detail or target)
+    if feeders:
+        logger.info(f"Resolving {len(feeders)} feeder (dependency) segment(s)...")
+    print_timing_card(target, detail, jobs, feeders)
 
 
 # ----------------------------------------------------------------------------
@@ -580,7 +1291,8 @@ def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str) -> Path:
 # ----------------------------------------------------------------------------
 def parse_args(argv):
     # jobs=None means "all jobs" (paginate everything); --jobs=N caps the total.
-    opts = {"sandbox": None, "jobs": None, "all_methods": False, "name": None}
+    opts = {"sandbox": None, "jobs": None, "all_methods": False, "name": None,
+            "audience_mode": False, "audience_sel": None, "schedules_mode": False}
     for a in argv:
         if a.startswith("--sandbox="):
             opts["sandbox"] = a.split("=", 1)[1].strip() or None
@@ -595,6 +1307,13 @@ def parse_args(argv):
                     pass
         elif a in ("--all-methods", "--all"):
             opts["all_methods"] = True
+        elif a in ("--schedules", "--schedule"):
+            opts["schedules_mode"] = True
+        elif a == "--audience":
+            opts["audience_mode"] = True
+        elif a.startswith("--audience=") or a.startswith("--id="):
+            opts["audience_mode"] = True
+            opts["audience_sel"] = a.split("=", 1)[1].strip() or None
         elif a.startswith("-"):
             continue
         else:
@@ -661,11 +1380,28 @@ def main():
     logger.info("IMS authenticated.")
     headers = aep_headers(token, conf, sandbox)
 
+    # Schedules mode short-circuits the estate report: dump the scheduled-
+    # segmentation config (does the 4am run really cover the whole estate?),
+    # write a CSV, then stop. No need to list audiences first.
+    if opts["schedules_mode"]:
+        run_schedules(headers, sandbox)
+        print()
+        logger.info("Done.")
+        return
+
     # 1) List audiences.
     logger.info(f"Listing audiences in sandbox '{sandbox}'...")
     audiences = fetch_audiences(headers)
     if not audiences:
         logger.warning("No audiences returned (empty sandbox, or no access).")
+        return
+
+    # Single-audience probe short-circuits the estate report: pick one audience
+    # and print its stuck / not-stuck timing card, then stop.
+    if opts["audience_mode"]:
+        run_probe(headers, audiences, opts["audience_sel"], opts["jobs"])
+        print()
+        logger.info("Done.")
         return
 
     # Method breakdown across everything we found.
@@ -692,12 +1428,15 @@ def main():
     scope = f"up to {opts['jobs']}" if opts["jobs"] else "ALL"
     logger.info(f"Fetching {scope} batch segment job(s) (paged)...")
     jobs = fetch_segment_jobs(headers, opts["jobs"])
-    print_segment_jobs(jobs)
+    # Resolver turns each job's segment ids into names (seeded from the audiences
+    # already fetched, with a lazy /segment/definitions lookup for system ones).
+    resolve = make_name_resolver(headers, audiences)
+    print_segment_jobs(jobs, resolve)
 
     # 5) Export the full set to CSV for offline analysis.
     if jobs:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        csv_path = write_segment_jobs_csv(jobs, sandbox, stamp)
+        csv_path = write_segment_jobs_csv(jobs, sandbox, stamp, resolve)
         logger.info(f"Wrote {len(jobs)} job(s) to {csv_path}")
 
     print()
