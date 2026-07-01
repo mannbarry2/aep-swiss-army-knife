@@ -50,6 +50,18 @@ Usage:
     python batch_eval_timing.py prod --audience=00000000-0000-0000-0000-000000000000
     python batch_eval_timing.py prod --audience="MY_AUDIENCE_NAME"
     python batch_eval_timing.py prod --schedules  # dump the scheduled-segmentation config
+    python batch_eval_timing.py prod --verify-run --date=2026-07-01 --ids=id1,id2
+    python batch_eval_timing.py prod --verify-run --job=<jobId> --ids-file=ids.txt
+
+Verify-run mode (--verify-run): prove whether a specific job evaluated a set of
+audiences. Give it --job=<jobId> or --date=YYYY-MM-DD (finds that day's scheduler
+run) plus --ids=/--ids-file=. It reports PRESENT/ABSENT per audience AND the count
+that job computed for it. The manifest is metrics.segmentedProfileCounter (the
+scheduler job's segments[] holds only a trigger entry -- the counter holds the
+1600+ segments it actually evaluated). This settles "did the 04:00 run evaluate it,
+or only a later api job?": if PRESENT in the 04:00 scheduled run, evaluation
+happened then and a later count change is a metric/display lag, not an eval lag.
+Writes output/verify_run_<sandbox>_<stamp>.csv.
 
 Schedules mode (--schedules): GET /config/schedules and print every sandbox
 schedule -- id, state, cron/trigger time, and (for the batch_segmentation entry)
@@ -71,7 +83,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ----------------------------------------------------------------------------
@@ -854,6 +866,170 @@ def run_schedules(headers, sandbox) -> None:
 
 
 # ----------------------------------------------------------------------------
+# Verify-run -- "did THIS job actually evaluate these audiences?"
+# ----------------------------------------------------------------------------
+# The subtlety that makes this necessary: a job's segments[] is NOT the list of
+# what it evaluated -- the daily scheduler job carries just a single trigger entry
+# there while actually evaluating the whole estate. The AUTHORITATIVE manifest is
+# metrics.segmentedProfileCounter (segmentId -> profile count computed this run),
+# which for the 04:00 run holds 1600+ segments. So "was audience X evaluated by
+# the 04:00 job?" is answered by that counter, not by segments[].
+def fetch_job(headers, job_id) -> dict:
+    """GET one segment job's full payload by id (richer than the list entry)."""
+    if not job_id:
+        return {}
+    try:
+        body = http(f"{SEGMENT_JOBS_URL}/{urllib.parse.quote(str(job_id), safe='')}",
+                    headers=headers, timeout=60)
+        return json.loads(body) or {}
+    except urllib.error.HTTPError as e:
+        logger.error(f"Job fetch failed: HTTP {e.code} "
+                     f"{e.read().decode(errors='replace')[:200]}")
+        return {}
+    except Exception as e:
+        logger.error(f"Job fetch failed: {type(e).__name__}: {e}")
+        return {}
+
+
+def job_evaluated_manifest(job: dict) -> dict:
+    """Every segment the job ACTUALLY evaluated, mapped to the profile count it
+    produced. Primary source is metrics.segmentedProfileCounter; segments[] ids
+    are folded in (as count None) so a trigger-only entry is still reflected."""
+    out: dict[str, int | None] = {}
+    mc = (job.get("metrics") or {}).get("segmentedProfileCounter")
+    if isinstance(mc, dict):
+        for k, v in mc.items():
+            out[str(k)] = v if isinstance(v, int) else None
+    for sid in job_segment_ids(job):
+        out.setdefault(str(sid), None)
+    return out
+
+
+def find_scheduler_job(jobs: list[dict], date_str: str) -> dict | None:
+    """Find the scheduled batch_segmentation job that ran on date_str (UTC).
+    Prefers source='scheduler'; returns the earliest if several ran that day."""
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        logger.error(f"Bad --date {date_str!r}; use YYYY-MM-DD.")
+        return None
+    lo, hi = day, day + timedelta(days=1)
+    cands = []
+    for j in jobs:
+        ct = to_dt(j.get("creationTime"))
+        if ct and lo <= ct < hi and j.get("source") == "scheduler":
+            cands.append((ct, j))
+    if not cands:
+        logger.error(f"No scheduler job found on {date_str} "
+                     f"(source='scheduler'). Try --job=<id>.")
+        return None
+    cands.sort(key=lambda x: x[0])
+    if len(cands) > 1:
+        logger.info(f"{len(cands)} scheduler job(s) on {date_str}; using the "
+                    f"earliest ({fmt_dt(cands[0][0])}).")
+    return cands[0][1]
+
+
+def print_verify(job: dict, ids: list[str], resolve) -> None:
+    manifest = job_evaluated_manifest(job)
+    started, ended = job_times(job)
+    dur = (ended - started).total_seconds() if started and ended else None
+    seg_only = len(job_segment_ids(job))
+    C = ANSI
+    bar = C["cyan"] + "=" * 104 + C["reset"]
+    print()
+    print(bar)
+    print(f"  {C['bold']}Verify run{C['reset']}  "
+          f"{C['dim']}did this job actually evaluate these audiences?{C['reset']}")
+    print(bar)
+    print(f"  {C['bold']}Job{C['reset']}        {job.get('id')}")
+    print(f"  {C['bold']}Source{C['reset']}     {job.get('source')}    "
+          f"schedule {job_schedule_id(job) or '(none)'}")
+    print(f"  {C['bold']}Fired{C['reset']}      {fmt_dt(started)} UTC")
+    print(f"  {C['bold']}Ran{C['reset']}        {fmt_dt(started)} -> {fmt_dt(ended)}"
+          f"   ({fmt_dur(dur)})")
+    print(f"  {C['bold']}Status{C['reset']}     {job.get('status')}")
+    print(f"  {C['bold']}Evaluated{C['reset']}  {C['bold']}{len(manifest)}{C['reset']} "
+          f"segment(s) in this run   {C['dim']}(from metrics.segmentedProfileCounter; "
+          f"segments[] alone lists only {seg_only}){C['reset']}")
+    print(C["cyan"] + "-" * 104 + C["reset"])
+    present = 0
+    for i in ids:
+        key = str(i)
+        in_it = key in manifest
+        if in_it:
+            present += 1
+        cnt = manifest.get(key)
+        name = (resolve(i) or "(unknown)")[:44]
+        mark = (f"{C['green']}{C['bold']}PRESENT{C['reset']}" if in_it
+                else f"{C['red']}{C['bold']}ABSENT {C['reset']}")
+        cnt_s = f"{cnt:,}" if isinstance(cnt, int) else ("-" if in_it else "")
+        print(f"  {mark}  {C['yellow']}{name:<44}{C['reset']} "
+              f"{C['dim']}{i}{C['reset']}  {C['bold']}{cnt_s:>12}{C['reset']}")
+    print(bar)
+    verdict = (f"{C['green']}{C['bold']}{present}/{len(ids)} were evaluated by this job"
+               if present == len(ids) else
+               f"{C['yellow']}{C['bold']}{present}/{len(ids)} present, "
+               f"{len(ids) - present} absent")
+    print(f"  {verdict}{C['reset']}")
+    if present == len(ids) and job.get("source") == "scheduler":
+        print(f"  {C['dim']}=> evaluation happened in this scheduled run; if the UI "
+              f"count updated later, that's a metric/display lag, not an eval lag."
+              f"{C['reset']}")
+
+
+def write_verify_csv(job: dict, ids: list[str], resolve,
+                     sandbox: str, stamp: str) -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    manifest = job_evaluated_manifest(job)
+    started, _ = job_times(job)
+    path = OUTPUT_DIR / f"verify_run_{sandbox}_{stamp}.csv"
+    cols = ["audience_id", "audience_name", "present", "count_in_job",
+            "job_id", "job_source", "schedule_id", "job_fired_utc", "job_status"]
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for i in ids:
+            key = str(i)
+            in_it = key in manifest
+            cnt = manifest.get(key)
+            w.writerow([
+                i, resolve(i), "present" if in_it else "absent",
+                cnt if isinstance(cnt, int) else "",
+                job.get("id") or "", job.get("source") or "",
+                job_schedule_id(job),
+                started.isoformat() if started else "",
+                job.get("status") or "",
+            ])
+    return path
+
+
+def run_verify(headers, sandbox, job_sel, date_sel, ids) -> None:
+    if not ids:
+        logger.error("--verify-run needs audience ids: --ids=id1,id2,... "
+                     "(or --ids-file=path).")
+        return
+    if job_sel:
+        logger.info(f"Fetching job {job_sel} ...")
+        job = fetch_job(headers, job_sel)
+    elif date_sel:
+        logger.info(f"Fetching all jobs to find the scheduler run on {date_sel} ...")
+        jobs = fetch_segment_jobs(headers, None)
+        found = find_scheduler_job(jobs, date_sel)
+        job = fetch_job(headers, found.get("id")) if found else {}
+    else:
+        logger.error("--verify-run needs --job=<id> or --date=YYYY-MM-DD.")
+        return
+    if not job:
+        return
+    resolve = make_name_resolver(headers, [])
+    print_verify(job, ids, resolve)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    csv_path = write_verify_csv(job, ids, resolve, sandbox, stamp)
+    logger.info(f"Wrote verification of {len(ids)} audience(s) to {csv_path}")
+
+
+# ----------------------------------------------------------------------------
 # Single-audience probe -- "is THIS audience stuck, or just new?"
 # ----------------------------------------------------------------------------
 def human_ago(dt: datetime | None, now: datetime) -> str:
@@ -1292,7 +1468,8 @@ def run_probe(headers, audiences, selector, jobs_cap) -> None:
 def parse_args(argv):
     # jobs=None means "all jobs" (paginate everything); --jobs=N caps the total.
     opts = {"sandbox": None, "jobs": None, "all_methods": False, "name": None,
-            "audience_mode": False, "audience_sel": None, "schedules_mode": False}
+            "audience_mode": False, "audience_sel": None, "schedules_mode": False,
+            "verify_mode": False, "job_sel": None, "date_sel": None, "ids": []}
     for a in argv:
         if a.startswith("--sandbox="):
             opts["sandbox"] = a.split("=", 1)[1].strip() or None
@@ -1309,6 +1486,22 @@ def parse_args(argv):
             opts["all_methods"] = True
         elif a in ("--schedules", "--schedule"):
             opts["schedules_mode"] = True
+        elif a in ("--verify-run", "--verify"):
+            opts["verify_mode"] = True
+        elif a.startswith("--job="):
+            opts["job_sel"] = a.split("=", 1)[1].strip() or None
+        elif a.startswith("--date="):
+            opts["date_sel"] = a.split("=", 1)[1].strip() or None
+        elif a.startswith("--ids="):
+            opts["ids"] = [x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()]
+        elif a.startswith("--ids-file="):
+            fp = a.split("=", 1)[1].strip()
+            try:
+                text = Path(fp).read_text(encoding="utf-8")
+                opts["ids"] = [ln.strip() for ln in text.replace(",", "\n").splitlines()
+                               if ln.strip()]
+            except OSError as e:
+                logger.error(f"Could not read --ids-file {fp!r}: {e}")
         elif a == "--audience":
             opts["audience_mode"] = True
         elif a.startswith("--audience=") or a.startswith("--id="):
@@ -1385,6 +1578,14 @@ def main():
     # write a CSV, then stop. No need to list audiences first.
     if opts["schedules_mode"]:
         run_schedules(headers, sandbox)
+        print()
+        logger.info("Done.")
+        return
+
+    # Verify-run mode: prove whether a given job (or the scheduler job on a date)
+    # evaluated a set of audiences, using the job's real manifest.
+    if opts["verify_mode"]:
+        run_verify(headers, sandbox, opts["job_sel"], opts["date_sel"], opts["ids"])
         print()
         logger.info("Done.")
         return
