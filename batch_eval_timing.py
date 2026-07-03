@@ -52,6 +52,16 @@ Usage:
     python batch_eval_timing.py prod --schedules  # dump the scheduled-segmentation config
     python batch_eval_timing.py prod --verify-run --date=2026-07-01 --ids=id1,id2
     python batch_eval_timing.py prod --verify-run --job=<jobId> --ids-file=ids.txt
+    python batch_eval_timing.py prod --fae-audit --from=2026-01-01 --to=2026-07-01
+
+FAE audit mode (--fae-audit): inventory Flexible Audience Evaluation runs
+(source='api', i.e. on-demand rather than the daily scheduler) over --from/--to
+(default: year-to-date). Per run: triggered time (UTC+BST), audiences evaluated
+(ids resolved to names), and the run-of-day number; plus per-day consumption vs
+the 2/day/sandbox cap and year-to-date vs the 50/year prod cap. NOTE: neither
+/segment/jobs nor the AEP Audit API records the triggering USER, so per-user
+attribution isn't possible -- consumption is reported by day/run and the gap is
+flagged. Writes output/fae_audit_<sandbox>_<stamp>.csv.
 
 Verify-run mode (--verify-run): prove whether a specific job evaluated a set of
 audiences. Give it --job=<jobId> or --date=YYYY-MM-DD (finds that day's scheduler
@@ -490,6 +500,39 @@ def job_schedule_id(job: dict) -> str:
     return ""
 
 
+# BST = UTC+1 (UK local; DST not modelled -- close enough for a morning check).
+_BST = timezone(timedelta(hours=1))
+
+
+def fmt_utc_bst(dt: datetime | None) -> str:
+    """'YYYY-MM-DD HH:MM:SS UTC / HH:MM BST' -- the stakeholder thinks in local
+    time, so every trigger timestamp is shown both ways."""
+    if not dt:
+        return ""
+    return (f"{dt.strftime('%Y-%m-%d %H:%M:%S')} UTC / "
+            f"{dt.astimezone(_BST).strftime('%H:%M')} BST")
+
+
+def job_created_by(job: dict) -> str:
+    """Who fired the job. IMPORTANT: /segment/jobs does NOT record a user identity
+    (no createdBy/owner/user field anywhere in the payload), and FAE runs are not
+    logged in the AEP Audit API either -- so the true actor is not recoverable.
+    We return the only honest signal the job carries: its source. 'scheduler' is
+    the system daily run; 'api' is a Flexible Audience Evaluation / API-triggered
+    run whose triggering user is not attributable from available data."""
+    src = job.get("source")
+    if src == "scheduler":
+        return "system (scheduler)"
+    if src == "api":
+        return "api/FAE (user not recorded)"
+    return src or "?"
+
+
+def job_created_by_short(job: dict) -> str:
+    return {"scheduler": "system", "api": "api/FAE"}.get(job.get("source"),
+                                                         job.get("source") or "?")
+
+
 def make_name_resolver(headers, audiences: list[dict]):
     """Return resolve(segment_id) -> friendly name for the ids a batch job
     references. Seeds a cache from the audiences we already fetched (id -> name)
@@ -564,10 +607,10 @@ def print_segment_jobs(jobs: list[dict], resolve=None, max_rows: int = 40) -> No
     print()
     print(bar)
     print(ANSI["bold"] +
-          f"  {'SCHEDULED (UTC)':<21}{'STATUS':<12}{'DURATION':<12}"
-          f"{'NAME(S)':<48}JOB ID" +
+          f"  {'TRIGGERED (UTC)':<21}{'BY':<10}{'STATUS':<12}{'DURATION':<12}"
+          f"{'NAME(S)':<46}JOB ID" +
           ANSI["reset"])
-    print(ANSI["cyan"] + "-" * 140 + ANSI["reset"])
+    print(ANSI["cyan"] + "-" * 148 + ANSI["reset"])
     # Timing is measured over completed evaluations only; rows shown are most
     # recent first. Non-completed jobs (KILLED/FAILED) still appear in the
     # table but never feed the stats/chart -- their "end" is an abandonment
@@ -593,15 +636,18 @@ def print_segment_jobs(jobs: list[dict], resolve=None, max_rows: int = 40) -> No
         label = names[0] if names else "?"
         if len(names) > 1:
             label = f"{label} (+{len(names) - 1})"
-        label = label[:46]
+        label = label[:44]
         jid = j.get("id") or "?"
+        by = job_created_by_short(j)
         scolor = (ANSI["green"] if status in ("SUCCEEDED", "PROCESSED")
                   else ANSI["red"] if status in ("FAILED", "ERROR")
                   else ANSI["yellow"])
+        bycolor = ANSI["magenta"] if j.get("source") == "api" else ANSI["dim"]
         print(f"  {ANSI['dim']}{fmt_dt(started):<21}{ANSI['reset']}"
+              f"{bycolor}{by:<10}{ANSI['reset']}"
               f"{scolor}{status:<12}{ANSI['reset']}"
               f"{ANSI['bold']}{fmt_dur(dur):<12}{ANSI['reset']}"
-              f"{ANSI['yellow']}{label:<48}{ANSI['reset']}"
+              f"{ANSI['yellow']}{label:<46}{ANSI['reset']}"
               f"{ANSI['dim']}{jid}{ANSI['reset']}")
     if len(rows) > max_rows:
         print(f"  {ANSI['dim']}... {len(rows) - max_rows} more job(s) "
@@ -676,7 +722,8 @@ def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str,
     path = OUTPUT_DIR / f"batch_eval_timing_{sandbox}_{stamp}.csv"
     cols = [
         "job_id", "status", "audience_names", "segment_ids",
-        "schedule_id", "source", "scheduled_utc", "ended_utc",
+        "schedule_id", "source", "created_by", "triggered_utc",
+        "scheduled_utc", "ended_utc",
         "duration_seconds", "duration_human", "num_segments",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -687,6 +734,7 @@ def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str,
             dur = (ended - started).total_seconds() if started and ended else None
             ids = sorted(job_segment_ids(j))
             names = job_audience_names(j, resolve)
+            triggered = to_dt(j.get("creationTime")) or started
             w.writerow([
                 j.get("id") or "",
                 j.get("status") or "",
@@ -694,6 +742,8 @@ def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str,
                 " | ".join(ids),
                 job_schedule_id(j),
                 j.get("source") or "",
+                job_created_by(j),
+                fmt_utc_bst(triggered),
                 started.isoformat() if started else "",
                 ended.isoformat() if ended else "",
                 f"{dur:.0f}" if dur is not None and dur >= 0 else "",
@@ -1027,6 +1077,158 @@ def run_verify(headers, sandbox, job_sel, date_sel, ids) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     csv_path = write_verify_csv(job, ids, resolve, sandbox, stamp)
     logger.info(f"Wrote verification of {len(ids)} audience(s) to {csv_path}")
+
+
+# ----------------------------------------------------------------------------
+# FAE audit -- "who is burning Flexible Audience Evaluation runs, and when?"
+# ----------------------------------------------------------------------------
+# FAE = the on-demand / API-triggered batch evaluation (source='api'), as opposed
+# to the daily scheduler run. It's quota'd (2/day/sandbox, 50/year in prod), so
+# teams want to see consumption. HONESTY NOTE: neither /segment/jobs nor the AEP
+# Audit API records WHICH USER fired a run, so true per-user attribution is not
+# possible from available data -- we report per-day/per-year consumption and the
+# audiences each run evaluated, and flag the user gap rather than invent a name.
+FAE_QUOTA_PER_DAY = 2
+FAE_QUOTA_PER_YEAR_PROD = 50
+
+
+def _parse_ymd(s: str) -> datetime | None:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def run_fae_audit(headers, sandbox, date_from, date_to) -> None:
+    now = datetime.now(timezone.utc)
+    lo = _parse_ymd(date_from) if date_from else now.replace(
+        month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    hi_day = _parse_ymd(date_to) if date_to else now
+    if lo is None or hi_day is None:
+        logger.error("Bad --from/--to; use YYYY-MM-DD.")
+        return
+    hi = hi_day + timedelta(days=1)   # inclusive of the --to day
+    logger.info(f"FAE audit window: {lo:%Y-%m-%d} .. {hi_day:%Y-%m-%d} (UTC). "
+                f"Paging all segment jobs...")
+    jobs = fetch_segment_jobs(headers, None)
+    resolve = make_name_resolver(headers, [])
+
+    # FAE runs = source='api' within the window.
+    fae = []
+    for j in jobs:
+        if j.get("source") != "api":
+            continue
+        ct = to_dt(j.get("creationTime"))
+        if ct and lo <= ct < hi:
+            fae.append((ct, j))
+    fae.sort(key=lambda x: x[0])
+
+    # Resolve audiences evaluated per run (full payload -> segmentedProfileCounter).
+    per_day: Counter = Counter()
+    rows = []
+    for ct, j in fae:
+        full = fetch_job(headers, j.get("id"))
+        names = [resolve(sid) or f"({sid[:8]}..)"
+                 for sid in sorted(job_evaluated_manifest(full).keys())]
+        ids = sorted(job_evaluated_manifest(full).keys())
+        started, ended = job_times(full)
+        dur = (ended - started).total_seconds() if started and ended else None
+        day = ct.strftime("%Y-%m-%d")
+        per_day[day] += 1
+        rows.append({
+            "triggered": ct, "day": day, "run_of_day": per_day[day],
+            "job_id": j.get("id"), "status": full.get("status"),
+            "names": names, "ids": ids, "dur": dur,
+        })
+
+    # Year-to-date prod consumption (all api jobs this calendar year).
+    ytd = sum(1 for j in jobs if j.get("source") == "api"
+              and (to_dt(j.get("creationTime")) or datetime.min.replace(tzinfo=timezone.utc))
+              >= now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0))
+
+    _print_fae(rows, per_day, ytd, lo, hi_day)
+    stamp = now.strftime("%Y%m%d_%H%M%S")
+    csv_path = _write_fae_csv(rows, sandbox, stamp)
+    logger.info(f"Wrote {len(rows)} FAE run(s) to {csv_path}")
+
+
+def _print_fae(rows, per_day, ytd, lo, hi_day) -> None:
+    C = ANSI
+    bar = C["cyan"] + "=" * 140 + C["reset"]
+    print()
+    print(bar)
+    print(f"  {C['bold']}FAE audit{C['reset']}  "
+          f"{C['dim']}Flexible Audience Evaluation (source=api) runs, "
+          f"{lo:%Y-%m-%d}..{hi_day:%Y-%m-%d}{C['reset']}")
+    print(bar)
+    print(C["yellow"] + C["bold"] +
+          "  NOTE: neither /segment/jobs nor the AEP Audit API records the "
+          "triggering USER, so 'who' is not attributable -- consumption is by "
+          "day/run only." + C["reset"])
+    print(C["cyan"] + "-" * 140 + C["reset"])
+    if not rows:
+        print("  No FAE (api) runs in this window.")
+        print(bar)
+        return
+    print(C["bold"] +
+          f"  {'TRIGGERED (UTC / BST)':<34}{'RUN#':<6}{'STATUS':<11}"
+          f"{'DUR':<10}AUDIENCE(S) EVALUATED" + C["reset"])
+    print(C["cyan"] + "-" * 140 + C["reset"])
+    for r in rows:
+        auds = ", ".join(r["names"])[:60] or "-"
+        over = r["run_of_day"] > FAE_QUOTA_PER_DAY
+        rc = C["red"] + C["bold"] if over else C["dim"]
+        print(f"  {C['dim']}{fmt_utc_bst(r['triggered']):<34}{C['reset']}"
+              f"{rc}{r['run_of_day']:<6}{C['reset']}"
+              f"{r['status'] or '?':<11}{fmt_dur(r['dur']):<10}"
+              f"{C['yellow']}{auds}{C['reset']}")
+    print(bar)
+    # Per-day consumption vs quota.
+    print(f"  {C['bold']}Daily consumption vs quota "
+          f"({FAE_QUOTA_PER_DAY}/day/sandbox){C['reset']}")
+    for day in sorted(per_day):
+        n = per_day[day]
+        flag = (f"  {C['red']}{C['bold']}<- OVER quota{C['reset']}"
+                if n > FAE_QUOTA_PER_DAY else "")
+        color = C["red"] if n > FAE_QUOTA_PER_DAY else C["green"]
+        print(f"     {C['dim']}{day}{C['reset']}  {color}{n}{C['reset']}/"
+              f"{FAE_QUOTA_PER_DAY}{flag}")
+    over_days = sum(1 for d in per_day if per_day[d] > FAE_QUOTA_PER_DAY)
+    print(C["cyan"] + "-" * 140 + C["reset"])
+    print(f"  {C['bold']}Totals{C['reset']}  "
+          f"{len(rows)} FAE run(s) in window; "
+          f"{over_days} day(s) over the {FAE_QUOTA_PER_DAY}/day cap.")
+    yc = C["red"] if ytd > FAE_QUOTA_PER_YEAR_PROD else C["green"]
+    print(f"  {C['bold']}Year-to-date (prod quota {FAE_QUOTA_PER_YEAR_PROD}/yr):"
+          f"{C['reset']}  {yc}{ytd}{C['reset']}/{FAE_QUOTA_PER_YEAR_PROD} "
+          f"api run(s) so far this calendar year"
+          + (f"  {C['red']}{C['bold']}<- OVER annual quota{C['reset']}"
+             if ytd > FAE_QUOTA_PER_YEAR_PROD else ""))
+    print(bar)
+
+
+def _write_fae_csv(rows, sandbox, stamp) -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    path = OUTPUT_DIR / f"fae_audit_{sandbox}_{stamp}.csv"
+    cols = ["triggered_utc", "triggered_date", "run_of_day", "over_daily_quota",
+            "created_by", "job_id", "status", "num_audiences",
+            "audiences_evaluated", "segment_ids", "duration_human"]
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([
+                fmt_utc_bst(r["triggered"]),
+                r["day"], r["run_of_day"],
+                "yes" if r["run_of_day"] > FAE_QUOTA_PER_DAY else "",
+                "api/FAE (user not recorded)",
+                r["job_id"], r["status"] or "",
+                len(r["ids"]),
+                " | ".join(r["names"]),
+                " | ".join(r["ids"]),
+                fmt_dur(r["dur"]) if r["dur"] is not None else "",
+            ])
+    return path
 
 
 # ----------------------------------------------------------------------------
@@ -1469,7 +1671,8 @@ def parse_args(argv):
     # jobs=None means "all jobs" (paginate everything); --jobs=N caps the total.
     opts = {"sandbox": None, "jobs": None, "all_methods": False, "name": None,
             "audience_mode": False, "audience_sel": None, "schedules_mode": False,
-            "verify_mode": False, "job_sel": None, "date_sel": None, "ids": []}
+            "verify_mode": False, "job_sel": None, "date_sel": None, "ids": [],
+            "fae_mode": False, "date_from": None, "date_to": None}
     for a in argv:
         if a.startswith("--sandbox="):
             opts["sandbox"] = a.split("=", 1)[1].strip() or None
@@ -1488,6 +1691,12 @@ def parse_args(argv):
             opts["schedules_mode"] = True
         elif a in ("--verify-run", "--verify"):
             opts["verify_mode"] = True
+        elif a in ("--fae-audit", "--fae"):
+            opts["fae_mode"] = True
+        elif a.startswith("--from="):
+            opts["date_from"] = a.split("=", 1)[1].strip() or None
+        elif a.startswith("--to="):
+            opts["date_to"] = a.split("=", 1)[1].strip() or None
         elif a.startswith("--job="):
             opts["job_sel"] = a.split("=", 1)[1].strip() or None
         elif a.startswith("--date="):
@@ -1586,6 +1795,14 @@ def main():
     # evaluated a set of audiences, using the job's real manifest.
     if opts["verify_mode"]:
         run_verify(headers, sandbox, opts["job_sel"], opts["date_sel"], opts["ids"])
+        print()
+        logger.info("Done.")
+        return
+
+    # FAE audit: inventory api-triggered (Flexible Audience Evaluation) runs over
+    # a date range and tally consumption against quota.
+    if opts["fae_mode"]:
+        run_fae_audit(headers, sandbox, opts["date_from"], opts["date_to"])
         print()
         logger.info("Done.")
         return
