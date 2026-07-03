@@ -28,9 +28,13 @@ NOTE ON EXPIRY: the audiences API exposes no absolute expiry date for Data
 Distiller audiences -- only a TTL (`ttlInDays`, default 30). Data Distiller
 audience data lapses `ttlInDays` after its last refresh, so the report DERIVES
     dataExpiryDate = lastRefresh + ttlInDays
-where lastRefresh is the most recent of the profile-metrics update, the
-record-export update, and the audience's last-modified time. An audience that
-keeps refreshing never approaches expiry; one whose refresh stalls counts down.
+where lastRefresh is the Audience-Portal halo force-refresh timestamp (parsed
+from the audience's `audience_portal_halo_force_refresh_timestamp` tag), falling
+back to the last-modified / creation time when that tag is absent. The
+profile-metrics epochs are deliberately NOT used: they recompute daily for every
+audience and would peg everything at a full TTL, hiding the countdown. An
+audience that keeps being refreshed never approaches expiry; one whose refresh
+stalls counts down.
 The original brief's GET /core/ais/external-audiences is not a readable list
 endpoint (the AIS service only accepts POST/create there), so /core/ups/audiences
 is the authoritative read source -- the same one the other tools in this repo use.
@@ -763,21 +767,48 @@ def _ttl_days(aud: dict) -> int:
     return n if n > 0 else DEFAULT_TTL_DAYS
 
 
+_HALO_REFRESH_RE = re.compile(
+    r"audience_portal_halo_force_refresh_timestamp:(\d+)")
+
+
+def _halo_refresh(aud: dict) -> datetime | None:
+    """The last Audience-Portal force-refresh time, parsed from the
+    `audience_portal_halo_force_refresh_timestamp:<ms>` housekeeping tag. This
+    is the truest "the audience data was actually rebuilt" signal the object
+    carries, and unlike the metrics epochs it genuinely varies per audience."""
+    raw = aud.get("tags")
+    if isinstance(raw, list):
+        for tg in raw:
+            match = _HALO_REFRESH_RE.match(str(tg))
+            if match:
+                return _parse_dt(int(match.group(1)))
+    return None
+
+
 def _last_refresh(aud: dict) -> datetime | None:
-    """The most recent evidence that the audience's data was refreshed -- the
-    latest of the profile-metrics update, the record-export update, and the
-    audience's own last-modified time. This anchors the derived expiry."""
-    candidates: list[datetime] = []
-    for section in ("metrics", "recordMetrics"):
-        obj = aud.get(section)
-        if isinstance(obj, dict):
-            dt = _parse_dt(obj.get("updateEpoch"))
-            if dt:
-                candidates.append(dt)
-    dt = _parse_dt(_first(aud, ("updateEpoch", "updateTime")))
-    if dt:
-        candidates.append(dt)
-    return max(candidates) if candidates else None
+    """Best estimate of when the audience DATA was last refreshed, used to
+    anchor the derived expiry.
+
+    Priority:
+      1. The Audience-Portal halo force-refresh timestamp tag -- the real
+         rebuild time (present on portal-managed audiences, incl. keep-alive).
+      2. Otherwise the audience's last-modified / creation time.
+
+    The profile-metrics and record-export `updateEpoch`s are deliberately NOT
+    used: they are recomputed daily for every audience regardless of whether the
+    membership changed, so anchoring on them pegs every audience at a full TTL
+    and hides the very countdown this report exists to show.
+
+    Limitation: an audience refreshed purely by a scheduled Data Distiller query
+    (new batches into its backing dataset) carries no refresh signal on the
+    audience object, so it falls back to (2) and can read as more-expired than
+    it really is. Portal/keep-alive audiences -- the ones that matter here -- do
+    carry the halo timestamp, so they are anchored correctly."""
+    refresh = _halo_refresh(aud)
+    if refresh:
+        return refresh
+    return _parse_dt(_first(aud, ("updateEpoch", "updateTime", "createEpoch",
+                                  "creationTime")))
 
 
 def _derived_expiry(aud: dict) -> tuple[datetime | None, datetime | None, int]:

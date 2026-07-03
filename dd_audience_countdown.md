@@ -35,16 +35,27 @@ daysRemaining  = dataExpiryDate − today   (whole UTC calendar days)
   the Data Distiller product **default of 30 days** is used. (In practice most
   audiences don't carry the field, and a stored `0` is treated as "unset" →
   default, so an unconfigured audience isn't falsely flagged as expiring today.)
-- **`lastRefresh`** — the most recent of the audience's profile-metrics update,
-  its record-export (Halo) update, and its own last-modified time. This is the
-  best available "the data was touched" signal.
+- **`lastRefresh`** — the Audience-Portal **halo force-refresh timestamp**,
+  parsed from the audience's `audience_portal_halo_force_refresh_timestamp` tag
+  (the real "the audience data was rebuilt" time). When that tag is absent it
+  falls back to the audience's last-modified / creation time.
 
-**What this means in practice:** an audience that keeps refreshing (its metrics
-update each day) always sits at roughly a full TTL out and is *not* flagged. An
-audience whose refresh **stalls** stops moving its `lastRefresh`, so its
-`daysRemaining` counts down — and *that* is the thing the report surfaces. On a
-healthy, actively-refreshed estate you should expect most rows to sit near the
-full TTL; a row dropping toward zero is the signal.
+  > The profile-metrics epochs (`metrics.updateEpoch`, `recordMetrics.updateEpoch`)
+  > are **deliberately not used**: they recompute **daily for every audience**
+  > regardless of whether the membership changed, so anchoring on them pegged
+  > every audience at a flat full TTL and hid the countdown entirely. The halo
+  > timestamp genuinely varies per audience.
+  >
+  > **Limitation:** an audience refreshed purely by a *scheduled Data Distiller
+  > query* (new batches into its backing dataset) carries no refresh signal on
+  > the audience object, so it falls back to last-modified and can read as
+  > more-expired than it is. Portal-managed / keep-alive audiences — the ones
+  > that matter — do carry the halo timestamp and are anchored correctly.
+
+**What this means in practice:** an audience that keeps being force-refreshed
+sits near a full TTL out and is *not* flagged. One whose refresh **stalls** stops
+moving its `lastRefresh`, so its `daysRemaining` counts down — and *that* is what
+the report surfaces.
 
 Every derived expiry is **auditable in the output**: the `Created`,
 `Last Refresh`, and `TTL (days)` columns show exactly what the estimate was
@@ -148,7 +159,7 @@ expiry actually matters.
 |---------------|------------|
 | Name / ID | `name` / `audienceId` (falls back to `id`) |
 | Created | `createEpoch` (epoch **seconds**) / `creationTime` |
-| Last Refresh | latest of `metrics.updateEpoch`, `recordMetrics.updateEpoch`, `updateEpoch` |
+| Last Refresh | `audience_portal_halo_force_refresh_timestamp` tag; else `updateEpoch` / `createEpoch` |
 | TTL (days) | `ttlInDays` if positive, else default `30` |
 | Data Expiry (est) | derived: Last Refresh + TTL |
 | Profile Count | `metrics.data.totalProfiles` (then record count, then flatter fallbacks) |
