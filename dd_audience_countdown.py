@@ -10,13 +10,25 @@ READ-ONLY: this tool only ever issues GET requests. It never creates, renames,
 extends, deletes, or otherwise mutates anything in AEP. No PUT/POST/PATCH/DELETE
 anywhere.
 
-It reads the AEP audiences API (GET /core/ais/external-audiences), paginates the
-full list, keeps only audiences whose origin/source is Data Distiller, and for
-each one captures:
-    name, id, createdDate, dataExpiryDate, daysRemaining (calculated),
-    profileCount, tags, lifecycleState
+It reads the AEP Real-Time Customer Profile audiences API
+(GET /core/ups/audiences), paginates the full list, keeps only audiences whose
+origin is Data Distiller (originName == "DATA_DISTILLER" / namespace "DDA"), and
+for each one captures:
+    name, id, createdDate, lastRefresh, ttlDays, dataExpiryDate,
+    daysRemaining (calculated), profileCount, tags, lifecycleState
 plus a "keepAlive" flag (TRUE when the tags contain "keep-alive",
 case-insensitive).
+
+NOTE ON EXPIRY: the audiences API exposes no absolute expiry date for Data
+Distiller audiences -- only a TTL (`ttlInDays`, default 30). Data Distiller
+audience data lapses `ttlInDays` after its last refresh, so the report DERIVES
+    dataExpiryDate = lastRefresh + ttlInDays
+where lastRefresh is the most recent of the profile-metrics update, the
+record-export update, and the audience's last-modified time. An audience that
+keeps refreshing never approaches expiry; one whose refresh stalls counts down.
+The original brief's GET /core/ais/external-audiences is not a readable list
+endpoint (the AIS service only accepts POST/create there), so /core/ups/audiences
+is the authoritative read source -- the same one the other tools in this repo use.
 
 VDI-friendly for the fetch/auth path (stdlib only). The XLSX export needs
 openpyxl; without it a CSV fallback is written instead and the run still
@@ -29,11 +41,16 @@ On a normal run it prompts you to:
     2. Pick which sandbox(es) to scan.
 Both can be supplied on the command line to run unattended (see Usage).
 
+Before it queries the tenant it always asks for confirmation -- the default is
+NO, so nothing hits the tenant unless you explicitly say yes. Pass --yes/-y to
+skip that prompt for unattended runs.
+
 Usage:
     python dd_audience_countdown.py                  # interactive menus
     python dd_audience_countdown.py acme-insurance    # cred set by name (stem)
     python dd_audience_countdown.py acme --sandbox prod
     python dd_audience_countdown.py --all             # every cred set in ./creds/
+    python dd_audience_countdown.py acme --yes        # skip the confirm prompt
 
 Output (to the standard ./output/ folder, which is gitignored):
     output/dd_audience_countdown_<tenant>_<UTCstamp>.xlsx
@@ -192,7 +209,16 @@ SCRIPT_VERSION = "1.0.0"
 SCRIPT_DATE    = "2026-07-03"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
-AUDIENCES_URL = ("https://platform.adobe.io/data/core/ais/external-audiences")
+# The Real-Time Customer Profile audiences API (`/core/ups/audiences`) lists
+# EVERY audience in the sandbox -- segment-definition audiences, custom uploads,
+# CJA, audience orchestration, AND Data Distiller audiences. We page it in full
+# and keep only the Data Distiller ones (originName == "DATA_DISTILLER").
+#
+# The `/core/ais/external-audiences` path in the original brief is not a
+# readable list endpoint -- the AIS ("Audience Import Service") routes only
+# accept POST (create) and 404/405 on a GET list -- so `/core/ups/audiences` is
+# the authoritative read source. The other tools in this repo use it too.
+AUDIENCES_URL = ("https://platform.adobe.io/data/core/ups/audiences")
 SANDBOX_URL   = ("https://platform.adobe.io/data/foundation/"
                  "sandbox-management/sandboxes")
 PAGE_LIMIT    = 100
@@ -200,6 +226,14 @@ PAGE_LIMIT    = 100
 # Data-expiry thresholds for the conditional formatting / summary counts.
 RED_THRESHOLD   = 7    # daysRemaining <= 7  -> red
 AMBER_THRESHOLD = 14   # daysRemaining <= 14 -> amber
+
+# Data Distiller audiences carry a TTL (`ttlInDays`) but the audiences API does
+# NOT expose an absolute expiry date. Their data lapses `ttlInDays` after the
+# last refresh, so we DERIVE the expiry as (last refresh + TTL). An audience
+# that keeps refreshing daily never approaches expiry; one whose refresh stalls
+# counts down -- which is exactly the thing worth flagging. `ttlInDays` is
+# frequently absent on the object; DDA's product default is 30 days.
+DEFAULT_TTL_DAYS = 30
 
 # Adobe doesn't expose org names via API, so we map org_id -> a friendly label
 # to namespace the output filename so two orgs don't collide. Real
@@ -487,11 +521,13 @@ def select_sandboxes(flags: dict) -> list[str]:
 # templateId resolver).
 
 # Keys that, across API versions, have listed the audience array in the body.
-_LIST_KEYS = ("children", "audiences", "externalAudiences", "content",
-              "items", "results")
+# `/core/ups/audiences` uses `children`; older deployments used `segments`.
+_LIST_KEYS = ("children", "segments", "audiences", "content", "items")
 # Origin/source fields consulted to decide "is this a Data Distiller audience".
-_ORIGIN_KEYS = ("origin", "originName", "source", "sourceName", "dataSource",
-                "audienceSource", "audienceType", "type")
+# On `/core/ups/audiences` the field is `originName` with the exact literal
+# "DATA_DISTILLER", and Data Distiller audiences also carry namespace "DDA".
+_ORIGIN_KEYS = ("originName", "origin", "source", "sourceName", "dataSource")
+_DD_ORIGIN_VALUES = {"data_distiller", "dda", "data distiller"}
 _NO_ACCESS_SANDBOXES: list[str] = []  # populated by fetch_audiences_in_sandbox
 
 
@@ -515,24 +551,26 @@ def _audience_list(body: dict) -> list[dict]:
 
 
 def _profile_count(aud: dict):
-    """Best-effort profile count. Checked top-level first, then a couple of
-    nested shapes the API has used (metrics object / metrics list)."""
-    v = _first(aud, ("profileCount", "profileEstimate", "totalProfiles",
-                     "count"))
-    if v is not None:
-        return v
+    """Best-effort profile count. On `/core/ups/audiences` the live count lives
+    at `metrics.data.totalProfiles`; we check that first, then the record-export
+    count, then a few flatter shapes older deployments used."""
     metrics = aud.get("metrics")
     if isinstance(metrics, dict):
+        data = metrics.get("data")
+        if isinstance(data, dict):
+            for key in ("totalProfiles", "profileCount", "count"):
+                if data.get(key) is not None:
+                    return data[key]
         mv = _first(metrics, ("profileCount", "totalProfiles", "count"))
         if mv is not None:
             return mv
-    if isinstance(metrics, list):
-        for m in metrics:
-            if isinstance(m, dict) and str(m.get("name", "")).lower() in (
-                    "profilecount", "totalprofiles", "profiles"):
-                if m.get("value") is not None:
-                    return m["value"]
-    return None
+    rec = aud.get("recordMetrics")
+    if isinstance(rec, dict):
+        data = rec.get("data")
+        if isinstance(data, dict) and data.get("recordCount") is not None:
+            return data["recordCount"]
+    return _first(aud, ("profileCount", "profileEstimate", "totalProfiles",
+                        "count"))
 
 
 def _tags(aud: dict) -> list[str]:
@@ -571,21 +609,23 @@ def _has_keep_alive(tags: list[str]) -> bool:
 
 
 def _is_data_distiller(aud: dict) -> bool:
-    """TRUE when any origin/source field indicates the audience was authored by
-    Data Distiller (case-insensitive substring 'distiller')."""
+    """TRUE when the audience originates from Data Distiller. Matches the
+    `originName`/origin literal ("DATA_DISTILLER") or the "DDA" namespace, and
+    falls back to a substring test so any 'distiller' spelling still counts."""
+    if str(aud.get("namespace", "")).strip().lower() == "dda":
+        return True
     for k in _ORIGIN_KEYS:
         v = aud.get(k)
-        if isinstance(v, str) and "distiller" in v.lower():
-            return True
-        if isinstance(v, dict):
-            for vv in v.values():
-                if isinstance(vv, str) and "distiller" in vv.lower():
-                    return True
+        if isinstance(v, str):
+            norm = v.strip().lower()
+            if norm in _DD_ORIGIN_VALUES or "distiller" in norm:
+                return True
     return False
 
 
 def _origin_label(aud: dict) -> str:
-    """The origin/source string we matched on -- for logging/console only."""
+    """The origin/source string we matched on -- for the report's Origin column
+    (e.g. "DATA_DISTILLER")."""
     for k in _ORIGIN_KEYS:
         v = aud.get(k)
         if isinstance(v, str) and v.strip():
@@ -636,20 +676,61 @@ def _fmt_dt(dt: datetime | None) -> str:
 
 def _days_remaining(expiry: datetime | None):
     """Whole calendar days from today (UTC) until the expiry date. Negative
-    when already expired; None when the audience has no expiry date."""
+    when already expired; None when the expiry is unknown."""
     if expiry is None:
         return None
     return (expiry.date() - datetime.now(timezone.utc).date()).days
 
 
+def _ttl_days(aud: dict) -> int:
+    """The audience's effective data TTL in days. Uses `ttlInDays` when it is a
+    positive number, otherwise the Data Distiller product default. A 0 (or
+    absent) TTL is treated as 'unset' -> default, rather than as a genuine
+    0-day retention, so an unconfigured audience is not falsely flagged as
+    expiring today."""
+    v = _first(aud, ("ttlInDays", "ttl", "dataTtlInDays"))
+    try:
+        n = int(v) if v is not None else 0
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else DEFAULT_TTL_DAYS
+
+
+def _last_refresh(aud: dict) -> datetime | None:
+    """The most recent evidence that the audience's data was refreshed -- the
+    latest of the profile-metrics update, the record-export update, and the
+    audience's own last-modified time. This anchors the derived expiry."""
+    candidates: list[datetime] = []
+    for section in ("metrics", "recordMetrics"):
+        obj = aud.get(section)
+        if isinstance(obj, dict):
+            dt = _parse_dt(obj.get("updateEpoch"))
+            if dt:
+                candidates.append(dt)
+    dt = _parse_dt(_first(aud, ("updateEpoch", "updateTime")))
+    if dt:
+        candidates.append(dt)
+    return max(candidates) if candidates else None
+
+
+def _derived_expiry(aud: dict) -> tuple[datetime | None, datetime | None, int]:
+    """Return (expiry, last_refresh, ttl_days). Expiry = last_refresh + TTL;
+    None when there is no refresh timestamp to anchor it to. The audiences API
+    exposes no absolute expiry date for Data Distiller audiences, so this is a
+    derivation -- see the module docstring."""
+    from datetime import timedelta
+    ttl = _ttl_days(aud)
+    refresh = _last_refresh(aud)
+    expiry = refresh + timedelta(days=ttl) if refresh else None
+    return expiry, refresh, ttl
+
+
 def build_audience_row(aud: dict, sandbox: str) -> dict:
     """Extract the reporting fields from one raw audience object into the flat
     row shape the exporter and summary consume."""
-    created = _parse_dt(_first(aud, ("createdDate", "createTime", "created",
-                                     "createEpoch", "createdAt")))
-    expiry  = _parse_dt(_first(aud, ("dataExpiryDate", "expirationDate",
-                                     "validUntil", "expiryDate", "ttlDate",
-                                     "expiresAt")))
+    created = _parse_dt(_first(aud, ("createEpoch", "creationTime",
+                                     "createdDate", "createTime", "created")))
+    expiry, refresh, ttl = _derived_expiry(aud)
     tags = _tags(aud)
     return {
         "sandbox":        sandbox,
@@ -658,11 +739,13 @@ def build_audience_row(aud: dict, sandbox: str) -> dict:
         "id":             _first(aud, ("audienceId", "id", "sid",
                                        "externalAudienceId"), default=""),
         "createdDate":    _fmt_dt(created),
+        "lastRefresh":    _fmt_dt(refresh),
+        "ttlDays":        ttl,
         "dataExpiryDate": _fmt_dt(expiry),
         "daysRemaining":  _days_remaining(expiry),
         "profileCount":   _profile_count(aud),
-        "lifecycleState": _first(aud, ("lifecycleState", "state", "status"),
-                                 default=""),
+        "lifecycleState": _first(aud, ("lifecycleState", "lifecycle", "state",
+                                       "status"), default=""),
         "keepAlive":      _has_keep_alive(tags),
         "tags":           ", ".join(tags),
         "origin":         _origin_label(aud),
@@ -733,17 +816,19 @@ def fetch_all_audiences(sandboxes: list[str]) -> list[dict]:
 # ----------------------------------------------------------------------------
 # Column order for both the XLSX and the CSV fallback. (key, header, width).
 _COLUMNS = [
-    ("sandbox",        "Sandbox",         12),
-    ("name",           "Name",            42),
-    ("id",             "ID",              38),
-    ("createdDate",    "Created",         12),
-    ("dataExpiryDate", "Data Expiry",     12),
-    ("daysRemaining",  "Days Remaining",  15),
-    ("profileCount",   "Profile Count",   14),
-    ("lifecycleState", "Lifecycle State", 16),
-    ("keepAlive",      "Keep-Alive",      11),
-    ("tags",           "Tags",            40),
-    ("origin",         "Origin",          20),
+    ("sandbox",        "Sandbox",           12),
+    ("name",           "Name",              42),
+    ("id",             "ID",                38),
+    ("createdDate",    "Created",           12),
+    ("lastRefresh",    "Last Refresh",      13),
+    ("ttlDays",        "TTL (days)",        11),
+    ("dataExpiryDate", "Data Expiry (est)", 17),
+    ("daysRemaining",  "Days Remaining",    15),
+    ("profileCount",   "Profile Count",     14),
+    ("lifecycleState", "Lifecycle State",   16),
+    ("keepAlive",      "Keep-Alive",        11),
+    ("tags",           "Tags",              40),
+    ("origin",         "Origin",            16),
 ]
 
 _XLSX_HEADER_BG = "1F4E78"    # dark blue header band (matches sibling tools)
@@ -813,7 +898,8 @@ def write_xlsx(rows: list[dict]) -> Path | None:
             if key == "keepAlive":
                 val = "TRUE" if val else ""
             cell = ws.cell(ridx, cidx, val)
-            if key in ("daysRemaining", "profileCount", "keepAlive"):
+            if key in ("daysRemaining", "profileCount", "keepAlive",
+                       "ttlDays"):
                 cell.alignment = center
         # Conditional formatting on the daysRemaining cell.
         dr = row["daysRemaining"]
@@ -878,6 +964,29 @@ def print_console_summary(rows: list[dict]) -> None:
     print(bar)
 
 
+def confirm_run(flags: dict) -> bool:
+    """Safety gate asked once per credential set, BEFORE anything touches the
+    tenant. The run is read-only (GETs only, no writes back to AEP), but we
+    still ask first and the default is NO -- pressing Enter, or any answer that
+    is not an explicit yes, aborts this credential set.
+
+    --yes/-y bypasses the prompt for unattended runs. When not interactive and
+    --yes was not given, we default to NO and skip."""
+    if flags.get("yes"):
+        logger.info(f"--yes given; proceeding with '{TENANT}'.")
+        return True
+    if not _interactive():
+        logger.warning(f"Not interactive and --yes not given -- skipping "
+                       f"'{TENANT}' (default is no).")
+        return False
+    ans = input(f"\nQuery tenant '{TENANT}' now? Read-only -- no changes are "
+                f"made to the tenant. [y/N]: ").strip().lower()
+    if ans in ("y", "yes"):
+        return True
+    logger.info(f"Not confirmed -- skipping '{TENANT}'.")
+    return False
+
+
 def run_for_cred(path: Path, flags: dict) -> None:
     """Run the full read-only fetch + report pipeline for one credential set."""
     try:
@@ -888,6 +997,11 @@ def run_for_cred(path: Path, flags: dict) -> None:
     apply_config(conf, path)
 
     print_banner()
+
+    # 0. Confirm before touching the tenant. Default NO.
+    if not confirm_run(flags):
+        return
+
     logger.info(f"{SCRIPT_NAME} starting for '{TENANT}' "
                 f"(read-only -- no writes back to AEP).")
 
@@ -929,14 +1043,17 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
     stems (filename without .json, spaces or hyphens both accepted). Flags:
         --all / -a        select every credential set in ./creds/
         --sandbox NAME    scan only NAME (repeatable) -- skips the sandbox menu
+        --yes / -y        skip the "query tenant?" confirmation (default is no)
     """
-    flags: dict = {"all": False, "sandboxes": []}
+    flags: dict = {"all": False, "sandboxes": [], "yes": False}
     names: list[str] = []
     i = 0
     while i < len(argv):
         a = argv[i]
         if a in ("--all", "-a"):
             flags["all"] = True
+        elif a in ("--yes", "-y"):
+            flags["yes"] = True
         elif a in ("--sandbox", "--sandboxes", "-s"):
             if i + 1 < len(argv):
                 flags["sandboxes"].append(argv[i + 1])
