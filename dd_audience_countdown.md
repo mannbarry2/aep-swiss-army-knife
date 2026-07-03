@@ -87,6 +87,7 @@ truthful, it's a one-line change in `_last_refresh()`.
    py -3 dd_audience_countdown.py prod            # pick creds/prod.json by filename stem
    py -3 dd_audience_countdown.py "my creds" --sandbox=prod
    py -3 dd_audience_countdown.py --all           # every credential set in ./creds/
+   py -3 dd_audience_countdown.py prod --keep-alive-only  # only keep-alive-tagged
    py -3 dd_audience_countdown.py prod --yes      # skip the confirmation prompt
    ```
 
@@ -119,11 +120,27 @@ safety catch.)
 3. For each one captures: **name, id, createdDate, lastRefresh, ttlDays,
    dataExpiryDate** (derived), **daysRemaining** (calculated), **profileCount,
    lifecycleState, tags**, and **origin**.
-4. Adds a **keepAlive** flag — `TRUE` when the tags contain `keep-alive`
-   (case-insensitive; `keep_alive` / `Keep Alive` also count).
+4. Adds a **keepAlive** flag — `TRUE` when the audience carries the
+   `KEEP_ALIVE` tag (case-insensitive; `keep-alive` / `keep_alive` all count).
 5. **Sorts ascending by daysRemaining** (the most urgent at the top; anything
    with no derivable refresh time sorts last).
 6. Writes the report and prints a console summary.
+
+### Tags are stored as IDs — resolved via the Unified Tags API
+
+Audiences store their tags as **tag-ID (UUID) references**, not names — the
+`KEEP_ALIVE` chip you see in the Audience Portal is a UUID on the audience
+object. So the tool first calls the org-level **Unified Tags API**
+(`GET https://experience.adobe.io/unifiedtags/tags`, a different host) to build a
+`{tagId: name}` map, then resolves each audience's tag UUIDs to names. Without
+this step keep-alive detection silently finds nothing. Internal
+`audience_portal_*` housekeeping markers are dropped from the Tags column. If the
+Unified Tags call fails the tool carries on and falls back to matching literal
+tag strings (a warning is logged).
+
+Use **`--keep-alive-only`** to narrow the report to just the audiences that carry
+the keep-alive tag — the ones meant to persist, and therefore the ones whose
+expiry actually matters.
 
 ### Field sources (from the `/core/ups/audiences` object)
 
@@ -136,7 +153,8 @@ safety catch.)
 | Data Expiry (est) | derived: Last Refresh + TTL |
 | Profile Count | `metrics.data.totalProfiles` (then record count, then flatter fallbacks) |
 | Lifecycle State | `lifecycleState` / `lifecycle` |
-| Tags | `tags` (+ `labels`), flattened to strings |
+| Tags | `tags` UUIDs resolved to names via the Unified Tags API; `audience_portal_*` markers hidden |
+| Keep-Alive | `TRUE` when a resolved tag is `KEEP_ALIVE` |
 | Origin | `originName` (e.g. `DATA_DISTILLER`) |
 
 ### Output
@@ -192,6 +210,7 @@ safety catch.)
 | `<stem>` | Credential file stem in `./creds/` (positional; spaces/hyphens tolerated) |
 | `--all` / `-a` | Run for every credential set in `./creds/` |
 | `--sandbox=<name>` / `-s <name>` | Scan only this sandbox (repeatable); skips the sandbox menu |
+| `--keep-alive-only` | Keep only audiences carrying the `KEEP_ALIVE` tag |
 | `--yes` / `-y` | Skip the "query tenant?" confirmation (default is no) |
 
 With no positional name and no `--all`, an interactive credential menu is shown

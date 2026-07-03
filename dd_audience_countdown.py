@@ -16,8 +16,13 @@ origin is Data Distiller (originName == "DATA_DISTILLER" / namespace "DDA"), and
 for each one captures:
     name, id, createdDate, lastRefresh, ttlDays, dataExpiryDate,
     daysRemaining (calculated), profileCount, tags, lifecycleState
-plus a "keepAlive" flag (TRUE when the tags contain "keep-alive",
-case-insensitive).
+plus a "keepAlive" flag (TRUE when the audience carries the KEEP_ALIVE tag).
+
+Audiences store their tags as tag-ID (UUID) references, so the tool first builds
+an org tag ID->name map from the Unified Tags API
+(GET https://experience.adobe.io/unifiedtags/tags) and resolves them -- without
+that, the KEEP_ALIVE tag (stored as a UUID) is invisible. Pass --keep-alive-only
+to report just the keep-alive-tagged audiences (the ones meant to persist).
 
 NOTE ON EXPIRY: the audiences API exposes no absolute expiry date for Data
 Distiller audiences -- only a TTL (`ttlInDays`, default 30). Data Distiller
@@ -50,6 +55,7 @@ Usage:
     python dd_audience_countdown.py acme-insurance    # cred set by name (stem)
     python dd_audience_countdown.py acme --sandbox prod
     python dd_audience_countdown.py --all             # every cred set in ./creds/
+    python dd_audience_countdown.py acme --keep-alive-only  # only keep-alive tag
     python dd_audience_countdown.py acme --yes        # skip the confirm prompt
 
 Output (to the standard ./output/ folder, which is gitignored):
@@ -221,6 +227,11 @@ SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUDIENCES_URL = ("https://platform.adobe.io/data/core/ups/audiences")
 SANDBOX_URL   = ("https://platform.adobe.io/data/foundation/"
                  "sandbox-management/sandboxes")
+# Unified Tags API (note the different host). Audiences carry their tags as bare
+# tag-ID (UUID) references, NOT names -- e.g. the "KEEP_ALIVE" chip shown in the
+# Audience Portal is stored on the audience as a UUID. This org-level API maps
+# tag ID -> name so keepAlive detection and the Tags column resolve correctly.
+UNIFIED_TAGS_URL = ("https://experience.adobe.io/unifiedtags/tags")
 PAGE_LIMIT    = 100
 
 # Data-expiry thresholds for the conditional formatting / summary counts.
@@ -530,6 +541,51 @@ _ORIGIN_KEYS = ("originName", "origin", "source", "sourceName", "dataSource")
 _DD_ORIGIN_VALUES = {"data_distiller", "dda", "data distiller"}
 _NO_ACCESS_SANDBOXES: list[str] = []  # populated by fetch_audiences_in_sandbox
 
+# {tagId: tagName} resolved once per credential set from the Unified Tags API.
+_TAG_NAMES: dict[str, str] = {}
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+# Internal housekeeping markers AEP writes into an audience's tag list -- not
+# user-applied tags, so we hide them from the Tags column.
+_HOUSEKEEPING_TAG_PREFIXES = ("audience_portal_",)
+
+
+def fetch_tag_names() -> dict:
+    """Build an org-wide {tagId: tagName} map from the Unified Tags API.
+
+    Tags are org-level (not sandbox-scoped), so this is fetched once per
+    credential set without a sandbox header. On any failure it returns {} and
+    tag UUIDs are simply left unresolved -- keepAlive detection then falls back
+    to matching literal tag strings."""
+    headers = auth_headers(sandbox="")
+    headers.pop("x-sandbox-name", None)
+    names: dict[str, str] = {}
+    start = None
+    page = 0
+    while True:
+        page += 1
+        params = {"limit": PAGE_LIMIT}
+        if start:
+            params["start"] = start
+        status, text = http_request("GET", UNIFIED_TAGS_URL, headers,
+                                    params=params)
+        if status < 200 or status >= 300:
+            logger.warning(f"Unified Tags API returned HTTP {status}; tag IDs "
+                           f"won't be resolved to names (keep-alive tags stored "
+                           f"as IDs may be missed).")
+            break
+        body = json.loads(text)
+        batch = body.get("tags") or []
+        for tg in batch:
+            if tg.get("id"):
+                names[tg["id"]] = tg.get("name") or tg["id"]
+        next_cursor = (body.get("_page") or {}).get("next")
+        if not batch or len(batch) < PAGE_LIMIT or not next_cursor:
+            break
+        start = next_cursor
+    logger.info(f"Resolved {len(names)} tag name(s) from the Unified Tags API.")
+    return names
+
 
 def _first(d: dict, keys, default=None):
     """Return the first present, non-empty value among `keys` in dict `d`."""
@@ -575,9 +631,14 @@ def _profile_count(aud: dict):
 
 def _tags(aud: dict) -> list[str]:
     """Flatten whatever the audience carries as tags/labels into a list of
-    strings, so both display and the keep-alive test have a single shape to
-    work with. Handles list-of-strings, list-of-dicts, a dict map, or a
-    comma-separated string."""
+    display strings, so both display and the keep-alive test have a single shape
+    to work with. Handles list-of-strings, list-of-dicts, a dict map, or a
+    comma-separated string.
+
+    Bare tag-ID (UUID) references are resolved to their tag name via the
+    Unified Tags map (`_TAG_NAMES`) -- this is how "KEEP_ALIVE" is recovered,
+    since audiences store it as a UUID. Internal `audience_portal_*`
+    housekeeping markers are dropped -- they are not user-applied tags."""
     raw = _first(aud, ("tags", "labels", "audienceTags"), default=[])
     out: list[str] = []
     if isinstance(raw, str):
@@ -594,7 +655,13 @@ def _tags(aud: dict) -> list[str]:
                                       default=item)))
             else:
                 out.append(str(item))
-    return [t for t in (s.strip() for s in out) if t]
+
+    resolved: list[str] = []
+    for t in (s.strip() for s in out):
+        if not t or t.startswith(_HOUSEKEEPING_TAG_PREFIXES):
+            continue
+        resolved.append(_TAG_NAMES.get(t, t) if _UUID_RE.match(t) else t)
+    return resolved
 
 
 def _has_keep_alive(tags: list[str]) -> bool:
@@ -1005,29 +1072,44 @@ def run_for_cred(path: Path, flags: dict) -> None:
     logger.info(f"{SCRIPT_NAME} starting for '{TENANT}' "
                 f"(read-only -- no writes back to AEP).")
 
-    # 1. Choose which sandbox(es) to scan (CLI flag, prompt, or all).
+    # 1. Resolve the org's tag ID -> name map up front, so the UUID tag
+    #    references on audiences (e.g. KEEP_ALIVE) resolve to names.
+    global _TAG_NAMES
+    _TAG_NAMES = fetch_tag_names()
+
+    # 2. Choose which sandbox(es) to scan (CLI flag, prompt, or all).
     sandboxes = select_sandboxes(flags)
 
-    # 2. Fetch every external audience from every accessible sandbox.
+    # 3. Fetch every external audience from every accessible sandbox.
     audiences = fetch_all_audiences(sandboxes)
 
-    # 3. Filter to Data Distiller origin only.
+    # 4. Filter to Data Distiller origin only.
     dd = [a for a in audiences if _is_data_distiller(a)]
     logger.info(f"Data Distiller audiences: {len(dd)} of {len(audiences)} "
                 f"external audience(s).")
 
-    # 4. Flatten to report rows and sort ascending by daysRemaining.
+    # 5. Flatten to report rows and sort ascending by daysRemaining.
     rows = [build_audience_row(a, a.get("_sandbox", "?")) for a in dd]
+
+    # 5b. Optional --keep-alive-only: keep just the audiences meant to persist
+    #     (those carrying the keep-alive tag), which are the ones whose expiry
+    #     actually matters.
+    if flags.get("keep_alive_only"):
+        before = len(rows)
+        rows = [r for r in rows if r["keepAlive"]]
+        logger.info(f"--keep-alive-only: {len(rows)} of {before} Data Distiller "
+                    f"audience(s) carry the keep-alive tag.")
+
     rows.sort(key=_sort_key)
 
-    # 5. Console summary (always).
+    # 6. Console summary (always).
     print_console_summary(rows)
 
     if not rows:
-        logger.info("No Data Distiller audiences found -- nothing to export.")
+        logger.info("No matching Data Distiller audiences -- nothing to export.")
         return
 
-    # 6. Write the XLSX (conditional formatting), or a CSV fallback.
+    # 7. Write the XLSX (conditional formatting), or a CSV fallback.
     xlsx_path = write_xlsx(rows)
     if xlsx_path:
         logger.info(f"XLSX: {xlsx_path.relative_to(SCRIPT_DIR)} "
@@ -1042,10 +1124,12 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
     """Split argv into (flags, names). Positional names are credential-set
     stems (filename without .json, spaces or hyphens both accepted). Flags:
         --all / -a        select every credential set in ./creds/
-        --sandbox NAME    scan only NAME (repeatable) -- skips the sandbox menu
-        --yes / -y        skip the "query tenant?" confirmation (default is no)
+        --sandbox NAME     scan only NAME (repeatable) -- skips the sandbox menu
+        --keep-alive-only  keep only audiences carrying the keep-alive tag
+        --yes / -y         skip the "query tenant?" confirmation (default is no)
     """
-    flags: dict = {"all": False, "sandboxes": [], "yes": False}
+    flags: dict = {"all": False, "sandboxes": [], "yes": False,
+                   "keep_alive_only": False}
     names: list[str] = []
     i = 0
     while i < len(argv):
@@ -1054,6 +1138,8 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
             flags["all"] = True
         elif a in ("--yes", "-y"):
             flags["yes"] = True
+        elif a in ("--keep-alive-only", "--keepalive-only", "--keep-alive"):
+            flags["keep_alive_only"] = True
         elif a in ("--sandbox", "--sandboxes", "-s"):
             if i + 1 < len(argv):
                 flags["sandboxes"].append(argv[i + 1])
