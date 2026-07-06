@@ -24,16 +24,26 @@ Usage:
     python babelfish_query_fetcher.py acme-insurance   # cred set by name (stem)
     python babelfish_query_fetcher.py acme-alpha --sandbox prod
     python babelfish_query_fetcher.py --all           # every cred set in ./creds/
+    python babelfish_query_fetcher.py acme --scheduled-only   # only scheduled queries
+    python babelfish_query_fetcher.py acme --dd-audiences     # only audience-authoring queries
+
+Optional filters (combinable; default -- no flags -- is unchanged):
+    --scheduled-only   Keep only templates that have a schedule in Query
+                       Service (GET /query/schedules, matched on templateId).
+    --dd-audiences     Keep only templates whose SQL creates or populates an
+                       audience (CREATE AUDIENCE ... / INSERT INTO <audience>).
+                       Each kept query gains an "Audience: <name>" metadata
+                       line in the mega Markdown file.
 
 The creds JSONs are gitignored -- never commit them. They contain the
-client_secret, which is a credential. A `sql\\` folder (also gitignored) is
-created next to the script for the SQL exports, with one subfolder per
-tenant and per sandbox.
+client_secret, which is a credential. An `output\\sql\\` folder (also
+gitignored) is created next to the script for the SQL exports, with one
+subfolder per tenant and per sandbox.
 
 Output:
-    sql/<tenant>/<sandbox>/<name>.sql   one file per template
-    sql/<tenant>/_snapshot.json         this run's full list (per tenant)
-    sql/all_queries_mega_file.md        every tenant, assembled from snapshots
+    output/sql/<tenant>/<sandbox>/<name>.sql   one file per template
+    output/sql/<tenant>/_snapshot.json         this run's full list (per tenant)
+    output/sql/all_queries_mega_file.md        every tenant, from snapshots
 """
 
 from __future__ import annotations
@@ -190,7 +200,7 @@ def apply_config(conf: dict, path: Path) -> None:
     MY_USER_IDS   = _normalize_user_ids(conf.get("my_user_ids") or [])
     _LABELS_BY_ID = {e["id"]: e["label"] for e in MY_USER_IDS}
     TENANT        = tenant_for_org(ORG_ID)
-    SQL_DIR       = SCRIPT_DIR / "sql" / TENANT
+    SQL_DIR       = SCRIPT_DIR / "output" / "sql" / TENANT
     _CACHED_TOKEN = None
 
 # ============================================================================
@@ -202,6 +212,7 @@ SCRIPT_DATE    = "2026-05-18"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 TEMPLATES_URL = "https://platform.adobe.io/data/foundation/query/query-templates"
+SCHEDULES_URL = "https://platform.adobe.io/data/foundation/query/schedules"
 SANDBOX_URL   = "https://platform.adobe.io/data/foundation/sandbox-management/sandboxes"
 PAGE_LIMIT    = 50
 
@@ -486,6 +497,46 @@ def looks_like_valid_sql(sql: str) -> bool:
     return first in _SQL_FIRST_WORDS
 
 
+# --dd-audiences matchers. Audience-authoring SQL either declares an audience
+# explicitly (CREATE AUDIENCE <name>) or writes rows into an existing one via
+# INSERT INTO <audience_name>. The INSERT arm deliberately excludes writes that
+# target a dataset (the negative lookahead) so ordinary dataset loads don't get
+# mistaken for audiences. Both patterns are case-insensitive. The trailing
+# capture group grabs the identifier so we can annotate the export with it.
+# A SQL identifier: a double-quoted / backticked / bracketed name (which may
+# contain spaces), or a bare dotted token.
+_IDENT = r'(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z0-9_.-]+)'
+_RE_CREATE_AUDIENCE = re.compile(
+    r"\bCREATE\s+AUDIENCE\b\s*(" + _IDENT + r")?", re.IGNORECASE)
+_RE_INSERT_AUDIENCE = re.compile(
+    r"\bINSERT\s+INTO\s+(?!.*dataset)(" + _IDENT + r")", re.IGNORECASE)
+
+
+def _clean_ident(tok: str) -> str:
+    """Tidy a captured SQL identifier for display -- drop surrounding quoting
+    (`"`, backticks, brackets) and any trailing punctuation."""
+    return (tok or "").strip().strip('`"[]').rstrip(";,()").strip()
+
+
+def audience_name(sql: str) -> str | None:
+    """Return the audience name if this SQL creates or populates an audience,
+    otherwise None.
+
+    Recognises `CREATE AUDIENCE <name>` and `INSERT INTO <audience_name>`
+    (the latter only when it is not writing to a dataset). Matching is
+    case-insensitive. Used by --dd-audiences both to filter the export and to
+    emit the "Audience: <name>" metadata line in the mega Markdown file."""
+    if not sql:
+        return None
+    m = _RE_CREATE_AUDIENCE.search(sql)
+    if m:
+        return _clean_ident(m.group(1)) or "(unnamed)"
+    m = _RE_INSERT_AUDIENCE.search(sql)
+    if m:
+        return _clean_ident(m.group(1)) or "(unnamed)"
+    return None
+
+
 def _now_iso() -> str:
     """Local time with timezone offset, second precision -- e.g.
     '2026-05-18T14:00:00+01:00'. Goes into snapshot + mega-file headers."""
@@ -493,31 +544,42 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def write_tenant_snapshot(templates: list[dict], dest_dir: Path) -> Path:
+def write_tenant_snapshot(templates: list[dict], dest_dir: Path,
+                          annotate_audiences: bool = False) -> Path:
     """Persist this run's full template list (every sandbox, every owner) to a
     JSON snapshot at dest_dir/_snapshot.json. The cross-tenant mega writer
     reads these from each tenant's folder so a single file can span every
-    Adobe org you've ever run against."""
+    Adobe org you've ever run against.
+
+    When annotate_audiences is set (--dd-audiences), each entry also carries an
+    "audience" key with the resolved audience name, so the mega Markdown writer
+    can emit an "Audience: <name>" line without re-parsing. The key is omitted
+    otherwise, keeping the default snapshot -- and downstream output -- byte-for
+    -byte unchanged."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     snapshot_path = dest_dir / "_snapshot.json"
+
+    def _entry(t: dict) -> dict:
+        entry = {
+            "id":       t.get("id", ""),
+            "name":     t.get("name", "") or "(unnamed)",
+            "sandbox":  t.get("_sandbox", "?"),
+            "userId":   t.get("userId", ""),
+            "created":  t.get("created", ""),
+            "updated":  t.get("updated", ""),
+            "sql":      t.get("sql", "") or "",
+        }
+        if annotate_audiences:
+            entry["audience"] = audience_name(t.get("sql", "") or "") or ""
+        return entry
+
     snapshot = {
         "tenant":        TENANT,
         "org_id":        ORG_ID,
         "generated_at":  _now_iso(),
         "script":        f"{SCRIPT_NAME} v{SCRIPT_VERSION}",
         "sandboxes":     sorted({t.get("_sandbox", "?") for t in templates}),
-        "templates": [
-            {
-                "id":       t.get("id", ""),
-                "name":     t.get("name", "") or "(unnamed)",
-                "sandbox":  t.get("_sandbox", "?"),
-                "userId":   t.get("userId", ""),
-                "created":  t.get("created", ""),
-                "updated":  t.get("updated", ""),
-                "sql":      t.get("sql", "") or "",
-            }
-            for t in templates
-        ],
+        "templates":     [_entry(t) for t in templates],
     }
     snapshot_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
     return snapshot_path
@@ -583,6 +645,11 @@ def write_cross_tenant_mega_markdown(sql_root: Path) -> Path:
                 lines.append(f"- ID: `{tid}`")
                 lines.append(f"- Created: {created}")
                 lines.append(f"- Updated: {updated}")
+                # Present only on --dd-audiences snapshots; absent otherwise so
+                # the default output format stays exactly as it was.
+                audience = t.get("audience")
+                if audience:
+                    lines.append(f"- Audience: {audience}")
                 lines.append("")
                 lines.append("```sql")
                 lines.append(sql)
@@ -785,6 +852,75 @@ def fetch_templates_in_sandbox(sandbox: str) -> list[dict]:
     return out
 
 
+def _schedule_template_id(sched: dict) -> str:
+    """Pull the referenced query-template ID out of one schedule object.
+
+    Tolerates the shapes the QS /schedules API has used: a top-level
+    templateId/queryTemplateId, or one nested under the schedule's `query`."""
+    for key in ("templateId", "queryTemplateId"):
+        if sched.get(key):
+            return sched[key]
+    query = sched.get("query") or {}
+    for key in ("templateId", "queryTemplateId", "id"):
+        if query.get(key):
+            return query[key]
+    return ""
+
+
+def fetch_schedule_template_ids_in_sandbox(sandbox: str) -> set[str]:
+    """Return the set of template IDs that have at least one schedule in a
+    single sandbox (QS /schedules API).
+
+    Mirrors fetch_templates_in_sandbox's paging and error handling: a 403 means
+    the token has no schedule access in this sandbox -- expected, not fatal, so
+    we warn and return what we have."""
+    logger.info(f"Sandbox '{sandbox}': listing query schedules...")
+    headers = auth_headers(sandbox=sandbox)
+    ids: set[str] = set()
+    start = None
+    page = 0
+    while True:
+        page += 1
+        params = {"limit": PAGE_LIMIT, "orderby": "-created"}
+        if start:
+            params["start"] = start
+        status, text = http_request("GET", SCHEDULES_URL, headers, params=params)
+        if status == 401:
+            logger.error("401 Unauthorized - token expired/invalid.")
+            sys.exit(1)
+        if status == 403:
+            logger.warning(f"  no Query Service schedule access in sandbox "
+                           f"'{sandbox}' (token lacks the right scope/role here).")
+            return ids
+        if status < 200 or status >= 300:
+            logger.error(f"  schedules page {page}: HTTP {status} {text[:200]}")
+            break
+        body = json.loads(text)
+        batch = body.get("schedules", [])
+        for sched in batch:
+            tid = _schedule_template_id(sched)
+            if tid:
+                ids.add(tid)
+        logger.info(f"  page {page}: {len(batch)} schedule(s) "
+                    f"(scheduled templateIds so far {len(ids)}).")
+        next_cursor = (body.get("_page") or {}).get("next")
+        if not batch or len(batch) < PAGE_LIMIT or not next_cursor:
+            break
+        start = next_cursor
+    logger.info(f"  sandbox '{sandbox}' schedules done - "
+                f"{len(ids)} scheduled template(s).")
+    return ids
+
+
+def fetch_scheduled_template_ids(sandboxes: list[str]) -> set[str]:
+    """Collect, across the given sandboxes, the IDs of every template that has
+    an associated Query Service schedule. Used by --scheduled-only."""
+    ids: set[str] = set()
+    for sb in sandboxes:
+        ids |= fetch_schedule_template_ids_in_sandbox(sb)
+    return ids
+
+
 def discover_sandboxes() -> list[str]:
     """Resolve which sandboxes to scan.
 
@@ -915,6 +1051,22 @@ def run_for_cred(path: Path, flags: dict) -> None:
         logger.info(f"Excluded {len(system)} system-owned template(s): {owners}")
         logger.info(f"{len(templates)} human-authored template(s) remain.")
 
+    # 2c. Optional, combinable filters. Each narrows `templates` in place; with
+    #     no flags both are skipped and behaviour is unchanged.
+    if flags.get("scheduled_only"):
+        scheduled_ids = fetch_scheduled_template_ids(sandboxes)
+        before = len(templates)
+        templates = [t for t in templates if t.get("id") in scheduled_ids]
+        logger.info(f"--scheduled-only: {len(templates)} of {before} "
+                    f"template(s) have a schedule.")
+
+    if flags.get("dd_audiences"):
+        before = len(templates)
+        templates = [t for t in templates
+                     if audience_name(t.get("sql", "") or "")]
+        logger.info(f"--dd-audiences: {len(templates)} of {before} "
+                    f"template(s) create or populate an audience.")
+
     # 3. Print the summary table.
     rows = []
     for t in templates:
@@ -949,7 +1101,8 @@ def run_for_cred(path: Path, flags: dict) -> None:
     #    by reading every tenant's snapshot. This way one file accumulates every
     #    org you've run against (one label per tenant) instead of a per-tenant
     #    file each time.
-    snap_path = write_tenant_snapshot(templates, SQL_DIR)
+    snap_path = write_tenant_snapshot(
+        templates, SQL_DIR, annotate_audiences=flags.get("dd_audiences", False))
     logger.info(f"Snapshot: {snap_path.relative_to(SQL_DIR.parent.parent)} "
                 f"({len(templates)} templates from {len(sandboxes)} sandbox(es))")
 
@@ -967,8 +1120,13 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
     stems (filename without .json, spaces or hyphens both accepted). Flags:
         --all / -a        select every credential set in ./creds/
         --sandbox NAME    fetch only NAME (repeatable) -- skips the sandbox menu
+        --scheduled-only  keep only templates that have a QS schedule
+        --dd-audiences    keep only audience-authoring templates (and annotate
+                          them with "Audience: <name>" in the mega Markdown)
+    --scheduled-only and --dd-audiences are combinable (applied as AND).
     """
-    flags: dict = {"all": False, "sandboxes": []}
+    flags: dict = {"all": False, "sandboxes": [],
+                   "scheduled_only": False, "dd_audiences": False}
     names: list[str] = []
     i = 0
     while i < len(argv):
@@ -981,6 +1139,10 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
                 i += 1
         elif a.startswith("--sandbox="):
             flags["sandboxes"].append(a.split("=", 1)[1])
+        elif a == "--scheduled-only":
+            flags["scheduled_only"] = True
+        elif a == "--dd-audiences":
+            flags["dd_audiences"] = True
         elif a.startswith("-"):
             logger.warning(f"Ignoring unknown flag: {a}")
         else:
