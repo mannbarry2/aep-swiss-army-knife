@@ -15,7 +15,8 @@ tabbed workbook, this tool does ONE schema, end to end:
      identity + relationship), dial into its dataset(s) and grab ONE real
      example value per field.
   5. Print a one-pager to the console AND write a single-sheet workbook:
-        output/Schema - <Client> - <SchemaName> - <YYYY-MM-DD>.xlsx
+        output/Schema Extract - <Client> - <Sandbox> - <YYYY-MM-DD HHMMSS>.xlsx
+     (the time in the name means re-running never overwrites a prior export)
 
 The output is marked STRICTLY CONFIDENTIAL -- it carries real sampled values.
 
@@ -1163,7 +1164,7 @@ def run_datasets(token, conf, sandboxes, names, rows, client, list_only=False):
         logger.warning("No datasets extracted; nothing to write.")
         return
 
-    datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d %H%M%S")
     label = infos[0]["sandbox"] if len({i["sandbox"] for i in infos}) == 1 else ""
     xlsx_path = write_workbook(infos, client, datestr, label=label)
     if xlsx_path:
@@ -1205,7 +1206,7 @@ def run_schema_interactive(token, conf, sandbox_arg, rows, client):
         datasets_count=counts.get(sid, 0), descriptors=descriptors,
         id_to_title=id_to_title, rows=rows, have_pyarrow=_have_pyarrow())
     print_one_pager(info)
-    datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d %H%M%S")
     xlsx_path = write_workbook([info], client, datestr, label=sandbox_title)
     if xlsx_path:
         logger.info(f"XLSX written: {xlsx_path}")
