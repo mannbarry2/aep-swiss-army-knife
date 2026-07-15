@@ -18,8 +18,9 @@ silently fails, so this tool answers one question fast:
 
      Do NOT be tempted back to Catalog's ?unifiedProfile=enabled:true query
      filter. Catalog takes it, returns 200, and ignores it -- you get every
-     dataset in the sandbox and no way to tell. That bug reported 749
-     "profile-enabled" datasets against a UI showing 23.
+     dataset in the sandbox and no way to tell. That bug reported every
+     dataset in the sandbox as "profile-enabled" -- an order of magnitude
+     more than the UI showed.
 
      Enablement is a TOGGLE, and it is the only thing the guardrail counts. It
      is NOT the same question as "is this schema built on the Profile class" --
@@ -296,9 +297,9 @@ def get_profile_datasets(token, conf, sandbox, profile_only=True,
     That filter is a trap. Catalog accepts it, returns 200, and -- at least for
     this org -- ignores it, handing back every dataset in the sandbox. A filter
     that is silently ignored is indistinguishable from a filter that matched
-    everything, so the first version of this script reported 749 "profile-enabled"
-    datasets against a UI that showed 23. Reading the tag is the only answer we
-    can actually verify."""
+    everything, so the first version of this script reported every dataset in the
+    sandbox as profile-enabled. Reading the tag is the only answer we can
+    actually verify."""
     out = _page_datasets(token, conf, sandbox, server_filter=False)
 
     total = len(out)
@@ -409,7 +410,7 @@ def is_profile_enabled(ds: dict) -> bool:
     This is the ONLY thing the Profile guardrail counts. A dataset can be built
     on the XDM Individual Profile class and still not be enabled -- class and
     enablement are different questions, and conflating them is what produced
-    the 749."""
+    the original over-count."""
     tags = ds.get("tags") or {}
     values = tags.get("unifiedProfile") or []
     if isinstance(values, str):          # Catalog is inconsistent about this
@@ -618,7 +619,7 @@ def census(token, conf, sandbox, profile_only=True, exclude_system=False):
 def print_debug_table(rows, sandbox_label):
     """Everything the filter and the classifier decided, per dataset, so a human
     can eyeball what got included and why. This is the view that would have
-    caught the 749 in about ten seconds."""
+    caught the original over-count in about ten seconds."""
     print()
     print(ANSI["magenta"] + "=" * 130 + ANSI["reset"])
     print(f"  {ANSI['bold']}DEBUG -- every dataset counted as profile-enabled"

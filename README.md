@@ -331,6 +331,29 @@ python batch_eval_timing.py                 # interactive: pick a credential set
 python batch_eval_timing.py my-tenant       # pick by stem
 ```
 
+## dataset_census.py
+
+Counts the **profile-enabled datasets** in a sandbox and groups them by the XDM
+base class behind each one — the fast answer to "how close am I to the
+per-class Profile enablement guardrail?". Pick a credential set and a sandbox
+(`--sandbox=all` sweeps every sandbox); it pages the whole Catalog, resolves
+each dataset's `schemaRef` against the Schema Registry (cached — datasets share
+schemas heavily), and buckets them Profile / ExperienceEvent / Other /
+Unclassified, shouting if a guarded class is at or over the threshold.
+
+`Other` is broken down by class (ad-hoc schemas — which mint one throwaway class
+per dataset — are collapsed into a single line), and `Unclassified` says *why*:
+either the dataset carries no `schemaRef`, or the schema is an Adobe system
+schema with no `meta:class`. Read-only; `--csv` writes to `./output/`.
+
+```
+python dataset_census.py                              # interactive: creds + sandbox
+python dataset_census.py my-tenant --sandbox=prod
+python dataset_census.py my-tenant --sandbox=all --csv
+python dataset_census.py my-tenant --all-datasets     # census every dataset, not just profile-enabled
+python dataset_census.py my-tenant --limit=25 --warn=22   # your guardrail, not the default 20
+```
+
 ## data_dictionary_v3.py
 
 **Data Dictionary v3.2.** Sucks every XDM schema out of an AEP sandbox, **filters
