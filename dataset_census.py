@@ -11,7 +11,8 @@ silently fails, so this tool answers one question fast:
 
     "How many profile-enabled datasets do I have, and of which class?"
 
-  1. Authenticate against IMS (pick a credential set from ./creds/).
+  1. Authenticate against IMS (pick a credential set from the keyring vault,
+     or a plaintext creds/ folder where keyring is unavailable).
   2. Pick a sandbox (Enter = prod). --sandbox=all sweeps every sandbox.
   3. Pull ALL Catalog dataSets (paged -- not just the first 100), then keep the
      ones whose tags.unifiedProfile contains "enabled:true".
@@ -36,18 +37,23 @@ ask for --csv, which drops a file in output/.
 
 Usage:
     python dataset_census.py                          # interactive menus
-    python dataset_census.py "acme beta"              # pick creds by stem
-    python dataset_census.py "acme k" --sandbox=prod
-    python dataset_census.py "acme k" --sandbox=all --csv
-    python dataset_census.py "acme k" --all-datasets  # census EVERY dataset
-    python dataset_census.py "acme k" --limit=25 --warn=22
-    python dataset_census.py "acme k" --debug         # per-dataset include/exclude
-    python dataset_census.py "acme k" --expect=23     # tripwire vs the UI count
-    python dataset_census.py "acme k" --expect=off    # ...or silence it
+    python dataset_census.py "acme-beta"              # pick creds by service name
+    python dataset_census.py "acme-k" --sandbox=prod
+    python dataset_census.py "acme-k" --sandbox=all --csv
+    python dataset_census.py "acme-k" --all-datasets  # census EVERY dataset
+    python dataset_census.py "acme-k" --limit=25 --warn=22
+    python dataset_census.py "acme-k" --debug         # per-dataset include/exclude
+    python dataset_census.py "acme-k" --expect=23     # tripwire vs the UI count
+    python dataset_census.py "acme-k" --expect=off    # ...or silence it
 
 --debug (or DATASET_CENSUS_DEBUG=1) prints, for every dataset counted: its name,
 its raw unifiedProfile tag, the schemaRef.id, and the class we resolved. That is
 the table to read when the total disagrees with the UI.
+
+Credentials come from the OS keyring (Windows Credential Manager) via
+aep_creds, falling back to a plaintext creds/ folder only where keyring is
+unavailable; manage them with credential_validator_v2.py. Service names are the
+keys you stored -- run `credential_validator_v2.py list` to see them.
 """
 
 from __future__ import annotations
@@ -67,16 +73,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "dataset_census"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE    = "2026-07-14"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -227,19 +234,6 @@ def _err_label(e) -> str:
 
 def flatten_err(text: str, limit: int = 200) -> str:
     return " ".join((text or "").split())[:limit]
-
-
-def load_creds(path: Path):
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
 
 
 def authenticate(conf):
@@ -798,16 +792,6 @@ def write_csv(rows, client: str):
 # ----------------------------------------------------------------------------
 # Credential menu + sandbox picker  (shared house style)
 # ----------------------------------------------------------------------------
-def discover_creds():
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
 def pretty_name(stem: str) -> str:
     return stem.replace("-", " ").replace("_", " ").title()
 
@@ -829,28 +813,29 @@ def short_type(raw: str) -> str:
     return raw or "?"
 
 
-def menu(creds):
+def menu(services):
+    """House-style numbered picker over keyring service names."""
     print()
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 60 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}[{i}]{ANSI['reset']} "
-              f"{ANSI['yellow']}{pretty_name(p.stem):<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{pretty_name(name):<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(
         f"\nChoose a credential set by number "
-        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(creds)}{ANSI['reset']}), "
+        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(services)}{ANSI['reset']}), "
         "blank to quit: "
     ).strip()
     if not raw or not raw.isdigit():
         return None
     idx = int(raw)
-    if 1 <= idx <= len(creds):
-        return creds[idx - 1]
+    if 1 <= idx <= len(services):
+        return services[idx - 1]
     logger.warning(f"Choice {idx} out of range.")
     return None
 
@@ -926,19 +911,23 @@ def resolve_sandboxes_arg(arg: str, sandboxes):
 # ----------------------------------------------------------------------------
 # Run
 # ----------------------------------------------------------------------------
-def run(path: Path, sandbox_arg, *, profile_only=True, limit=DEFAULT_CLASS_LIMIT,
+def run(service: str, sandbox_arg, *, profile_only=True, limit=DEFAULT_CLASS_LIMIT,
         warn_at=DEFAULT_WARN_AT, to_csv=False, expect=EXPECTED_ENABLED,
         debug=False, exclude_system=False):
-    conf = load_creds(path)
-    client = client_label(conf, path.stem)
-    logger.info(f"Authenticating as {pretty_name(path.stem)}...")
+    try:
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
+        return
+    client = client_label(conf, service)
+    logger.info(f"Authenticating as {pretty_name(service)}...")
     try:
         tok = authenticate(conf)
     except urllib.error.HTTPError as e:
         detail = flatten_err(e.read().decode(errors="replace"))
         logger.error(f"IMS auth failed: HTTP {e.code}: {detail}")
-        logger.error("Check client_id / client_secret / scopes in "
-                     f"{path.name}, and that the credential is not expired.")
+        logger.error("Check client_id / client_secret / scopes for "
+                     f"{service!r}, and that the credential is not expired.")
         return
     except Exception as e:
         logger.error(f"IMS auth failed: {type(e).__name__}: {e}")
@@ -996,6 +985,7 @@ def print_banner() -> None:
     print(f"  {ANSI['dim']}Counts profile-enabled datasets and groups them by "
           f"XDM base class.{ANSI['reset']}")
     print(bar)
+    print(f"{ANSI['dim']}{aep_creds.source_banner()}{ANSI['reset']}")
 
 
 def main():
@@ -1051,21 +1041,21 @@ def main():
                        f"clamping warn to {limit}.")
         warn_at = limit
 
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
     if positional:
-        by_stem = {p.stem: p for p in creds}
-        chosen = by_stem.get(positional[0])
-        if not chosen:
-            logger.error(f"No credential set named {positional[0]!r} "
-                         f"(looked in {CREDS_DIR}).")
+        try:
+            chosen = aep_creds.pick_service(positional[0])
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     else:
-        chosen = menu(creds)
+        chosen = menu(services)
 
     if not chosen:
         logger.info("Nothing chosen. Exiting.")

@@ -7,13 +7,14 @@ Exports a CSV summary of every AEP batch that FAILED in the last N hours
 health snapshot; use batch_fetcher.py when you need to drill into one
 batch and download its failed-record files.
 
-VDI-friendly: stdlib only, no pip install required. Picks a credential set
-from ./creds/ (the same credential bank used by batch_fetcher.py /
-credential_validator.py / batch_eval_timing.py).
+Credentials come from the OS keyring (Windows Credential Manager) via
+aep_creds, falling back to a plaintext creds/<service>.json only where keyring
+is unavailable. Manage them with credential_validator_v2.py; run
+`credential_validator_v2.py list` to see the service names you stored.
 
 Usage:
     python failed_batch_report.py                       # interactive cred menu, last 24h
-    python failed_batch_report.py prod                  # pick creds/prod.json by stem
+    python failed_batch_report.py prod                  # pick creds by service name
     python failed_batch_report.py prod --hours=72 --sandbox=prod
 
 Generated reports are written under ./output/ (gitignored).
@@ -32,10 +33,13 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ============================================================================
 # CONFIG
 # ----------------------------------------------------------------------------
-# Credentials come from a JSON file in ./creds/ (the shared credential bank).
+# Credentials come from the OS keyring vault (via aep_creds), falling back to
+# a plaintext creds/<service>.json only where keyring is unavailable.
 # Required keys:
 #   client_id     -- Adobe IMS client ID
 #   client_secret -- IMS client_credentials secret
@@ -47,16 +51,13 @@ from pathlib import Path
 #   sandbox       -- "all" or a specific sandbox name
 #   sandbox_names -- list used when `sandbox == "all"`; "prod" wins if present
 #   region        -- AEP region header value (defaults to "GBR9")
-# Underscored keys (e.g. "_comment_1") are treated as inline documentation
-# and ignored by the loader.
 # ============================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 
 SCRIPT_NAME = "failed_batch_report"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-06-24"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE = "2026-07-24"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -139,53 +140,28 @@ def banner(conf, sandbox, hours):
 
 
 # ----------------------------------------------------------------------------
-# Credential bank (shared shape with credential_validator.py / batch_eval_timing.py)
+# Credential bank (keyring-backed via aep_creds; plaintext folder fallback)
 # ----------------------------------------------------------------------------
-def discover_creds():
-    """Return ordered list of credential JSON paths in ./creds/ (skip example)."""
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
-def load_creds(path: Path):
-    """Read a creds/<name>.json file. Underscored keys are treated as inline
-    documentation and ignored. Requires client_id / client_secret / org_id."""
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
-
-
-def menu(creds):
-    """Prompt for ONE credential set (this tool targets a single sandbox)."""
+def menu(services):
+    """Prompt for ONE credential set (this tool targets a single sandbox).
+    Takes a list of keyring service-name strings; returns the chosen name."""
     print()
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 70 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(f"\nPick a credential set by number "
                 f"({ANSI['cyan']}1{ANSI['reset']}), blank to quit: ").strip()
     if not raw:
         return None
-    if raw.isdigit() and 1 <= int(raw) <= len(creds):
-        return creds[int(raw) - 1]
+    if raw.isdigit() and 1 <= int(raw) <= len(services):
+        return services[int(raw) - 1]
     logger.warning(f"Invalid choice: {raw}")
     return None
 
@@ -328,8 +304,8 @@ def write_report(batches, sandbox, root: Path = DEFAULT_OUTPUT_ROOT):
 
 
 def parse_args(argv):
-    """Stdlib-only CLI: a positional credential name (creds/<name>.json stem)
-    plus --sandbox=NAME --hours=N."""
+    """CLI: a positional credential name (keyring service name) plus
+    --sandbox=NAME --hours=N."""
     sandbox_override = None
     hours = DEFAULT_HOURS
     name = None
@@ -344,41 +320,43 @@ def parse_args(argv):
         elif a.startswith("-"):
             continue
         elif name is None:
-            name = a  # creds stem
+            name = a  # keyring service name
     return sandbox_override, hours, name
 
 
 def main():
     sandbox_override, hours, name = parse_args(sys.argv[1:])
+    print(aep_creds.source_banner())
 
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
-    # Resolve which credential set to use: by stem on the CLI, else the menu
-    # (only when interactive). Non-interactive with no name is an error.
+    # Resolve which credential set to use: by service name on the CLI, else the
+    # menu (only when interactive). Non-interactive with no name is an error.
     if name:
-        by_stem = {p.stem: p for p in creds}
-        path = by_stem.get(name)
-        if not path:
-            logger.error(f"No credential set named {name!r} in {CREDS_DIR}")
+        try:
+            chosen = aep_creds.pick_service(name)
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     elif sys.stdin.isatty():
-        path = menu(creds)
+        chosen = menu(services)
     else:
         logger.error("No credential set given and not interactive. "
                      "Pass a credential name, e.g. `failed_batch_report prod`.")
         return
-    if not path:
+    if not chosen:
         logger.info("Nothing chosen. Exiting.")
         return
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(chosen)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {chosen!r}: {e}")
         return
 
     sandbox = sandbox_override or pick_sandbox(conf)

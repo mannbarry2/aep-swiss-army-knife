@@ -31,6 +31,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-first credential store, plaintext creds/ fallback
+
 # ============================================================================
 # CONFIG
 # ----------------------------------------------------------------------------
@@ -51,11 +53,10 @@ from pathlib import Path
 # ============================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 
 SCRIPT_NAME = "batch_fetcher"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-06-24"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE = "2026-07-24"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -139,51 +140,26 @@ def banner(conf, sandbox):
 # ----------------------------------------------------------------------------
 # Credential bank (shared shape with credential_validator.py / batch_eval_timing.py)
 # ----------------------------------------------------------------------------
-def discover_creds():
-    """Return ordered list of credential JSON paths in ./creds/ (skip example)."""
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
-def load_creds(path: Path):
-    """Read a creds/<name>.json file. Underscored keys are treated as inline
-    documentation and ignored. Requires client_id / client_secret / org_id."""
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
-
-
-def menu(creds):
-    """Prompt for ONE credential set (this tool targets a single sandbox)."""
+def menu(services):
+    """Prompt for ONE credential set (this tool targets a single sandbox).
+    Operates on keyring service-name strings (via aep_creds)."""
     print()
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 70 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(f"\nPick a credential set by number "
                 f"({ANSI['cyan']}1{ANSI['reset']}), blank to quit: ").strip()
     if not raw:
         return None
-    if raw.isdigit() and 1 <= int(raw) <= len(creds):
-        return creds[int(raw) - 1]
+    if raw.isdigit() and 1 <= int(raw) <= len(services):
+        return services[int(raw) - 1]
     logger.warning(f"Invalid choice: {raw}")
     return None
 
@@ -487,35 +463,37 @@ def parse_args(argv):
 
 def main():
     sandbox_override, name, cli_ids = parse_args(sys.argv[1:])
+    print(aep_creds.source_banner())
 
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
-    # Resolve which credential set to use: by stem on the CLI, else the menu
+    # Resolve which credential set to use: by name on the CLI, else the menu
     # (only when interactive). Non-interactive with no name is an error.
     if name:
-        by_stem = {p.stem: p for p in creds}
-        path = by_stem.get(name)
-        if not path:
-            logger.error(f"No credential set named {name!r} in {CREDS_DIR}")
+        try:
+            service = aep_creds.pick_service(name)
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     elif sys.stdin.isatty():
-        path = menu(creds)
+        service = menu(services)
     else:
         logger.error("No credential set given and not interactive. "
                      "Pass a credential name, e.g. `batch_fetcher prod`.")
         return
-    if not path:
+    if not service:
         logger.info("Nothing chosen. Exiting.")
         return
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
         return
 
     sandbox = sandbox_override or pick_sandbox(conf)

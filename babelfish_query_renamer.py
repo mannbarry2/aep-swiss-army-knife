@@ -8,23 +8,22 @@ MY_USER_IDS. Mints a fresh IMS token each run via client_credentials.
 These are the named/saved queries you see in the AEP Query Editor's
 "Templates" panel -- NOT the execution history (which lives at /queries).
 
-VDI-friendly: stdlib only, no pip install required.
-
-Credentials come from the shared credential bank in ./creds/ (the same
-<tenant>.json files credential_validator.py and babelfish_query_fetcher.py
-use). On a normal run it prompts you to pick which credential set to use
-(e.g. acme-insurance, acme alpha); the name can also be supplied on the CLI
-to run unattended (see Usage).
+Credentials come from the shared aep_creds layer: the OS keyring vault
+(Windows Credential Manager) first, falling back to a plaintext creds/ folder
+only where keyring is unavailable. On a normal run it prompts you to pick which
+credential set (service) to use (e.g. acme-insurance, acme alpha); the service
+name can also be supplied on the CLI to run unattended (see Usage). Manage the
+stored services with credential_validator_v2.py.
 
 Usage:
     python babelfish_query_renamer.py                 # interactive menu
-    python babelfish_query_renamer.py acme-insurance   # cred set by name (stem)
+    python babelfish_query_renamer.py acme-insurance   # cred set by service name
     python babelfish_query_renamer.py acme-alpha
 
-The creds JSONs are gitignored -- never commit them. They contain the
-client_secret, which is a credential. A `sql\\` folder (also gitignored) is
-created next to the script for the SQL exports, with one subfolder per tenant
-and per sandbox.
+Any creds/*.json fallback files are gitignored -- never commit them. They
+contain the client_secret, which is a credential. A `sql\\` folder (also
+gitignored) is created next to the script for the SQL exports, with one
+subfolder per tenant and per sandbox.
 """
 
 from __future__ import annotations
@@ -38,12 +37,14 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlencode
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ============================================================================
-# CONFIG -- shared credential bank (./creds/)
+# CONFIG -- shared credential bank (aep_creds: keyring first, creds/ fallback)
 # ----------------------------------------------------------------------------
-# Credentials are read from the same ./creds/<tenant>.json bank that
-# credential_validator.py uses, picked interactively (or by name on the CLI).
-# Recognised keys per credential file:
+# Credentials are resolved through aep_creds by SERVICE NAME (the key you stored
+# with credential_validator_v2.py), picked interactively (or by name on the CLI).
+# Recognised keys per credential set:
 #   client_id          -- Adobe IMS client ID
 #   client_secret      -- IMS client_credentials secret (REQUIRED -- mints a
 #                         fresh token every run)
@@ -70,41 +71,12 @@ from urllib.parse import urlencode
 # ============================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR  = SCRIPT_DIR / "creds"
 
 DEFAULT_OAUTH_URL = "https://ims-na1.adobelogin.com/ims/token"
 DEFAULT_SCOPES    = (
     "openid,AdobeID,read_organizations,"
     "additional_info.projectedProductContext,session"
 )
-
-
-def load_creds(path: Path) -> dict:
-    """Read one credential JSON from ./creds/. Strips "_"-prefixed comment keys
-    and trims whitespace from string values. Hard-requires the three keys we
-    cannot run without."""
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
-
-
-def discover_creds() -> list[Path]:
-    """Return the ordered list of credential JSONs in ./creds/ (skipping the
-    example template)."""
-    paths: list[Path] = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
 
 
 def _normalize_user_ids(raw: list) -> list[dict]:
@@ -167,7 +139,7 @@ logger = logging.getLogger(SCRIPT_NAME)
 
 # These are populated per-run by apply_config() once a credential set has been
 # chosen, rather than at import time. A run targets exactly one credential set.
-CRED_PATH: Path | None = None
+CRED_SERVICE: str    = ""
 _CFG: dict           = {}
 BEARER_TOKEN         = ""
 CLIENT_ID            = ""
@@ -187,16 +159,16 @@ TENANT               = ""
 SQL_DIR: Path | None = None
 
 
-def apply_config(conf: dict, path: Path) -> None:
+def apply_config(conf: dict, service: str) -> None:
     """Load one chosen credential set into the module-level globals every other
     function reads. Also derives the tenant label and sql/<tenant>/ output
     folder, reads the optional Anthropic naming keys, and clears any cached
     token from a previous credential set."""
-    global CRED_PATH, _CFG, BEARER_TOKEN, CLIENT_ID, CLIENT_SECRET, API_KEY
+    global CRED_SERVICE, _CFG, BEARER_TOKEN, CLIENT_ID, CLIENT_SECRET, API_KEY
     global ORG_ID, OAUTH_URL, SCOPES, SANDBOX, SANDBOX_NAMES
     global MY_USER_IDS, _LABELS_BY_ID, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
     global NAMING_CONFIG, TENANT, SQL_DIR, _CACHED_TOKEN
-    CRED_PATH     = path
+    CRED_SERVICE  = service
     _CFG          = conf
     BEARER_TOKEN  = conf.get("bearer_token", "")
     CLIENT_ID     = conf["client_id"]
@@ -219,8 +191,8 @@ def apply_config(conf: dict, path: Path) -> None:
 # ============================================================================
 
 # Script identity (shown in the startup banner).
-SCRIPT_VERSION = "0.4.0"
-SCRIPT_DATE   = "2026-05-07"
+SCRIPT_VERSION = "0.5.0"
+SCRIPT_DATE   = "2026-07-24"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 TEMPLATES_URL = "https://platform.adobe.io/data/foundation/query/query-templates"
@@ -1211,14 +1183,14 @@ def ask_rename_mode(mine: list[dict]) -> tuple[bool, bool]:
     return False, exclude_foreign
 
 
-def run_for_cred(path: Path) -> None:
+def run_for_cred(service: str) -> None:
     """Run the full fetch + rename + export pipeline for one credential set."""
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
         return
-    apply_config(conf, path)
+    apply_config(conf, service)
 
     print_banner()
     logger.info(f"{SCRIPT_NAME} starting for '{TENANT}'.")
@@ -1403,70 +1375,78 @@ def _interactive() -> bool:
         return False
 
 
-def _match_cred(name: str, creds: list[Path]) -> Path | None:
-    """Resolve a credential name from the CLI to a path. Matches on the file
-    stem, tolerating hyphen/space/underscore differences and case (so
-    'acme-alpha' finds 'acme alpha.json')."""
+def _match_service(name: str, services: list[str]) -> str | None:
+    """Resolve a credential name from the CLI to a service name. Matches on the
+    service name, tolerating hyphen/space/underscore differences and case (so
+    'acme-alpha' finds a service stored as 'acme alpha'). Falls back to a unique
+    substring match."""
     def norm(s: str) -> str:
         return s.lower().replace(" ", "").replace("-", "").replace("_", "")
     target = norm(name)
-    for p in creds:
-        if norm(p.stem) == target:
-            return p
+    for svc in services:
+        if norm(svc) == target:
+            return svc
+    subs = [svc for svc in services if target in norm(svc)]
+    if len(subs) == 1:
+        return subs[0]
     return None
 
 
-def cred_menu(creds: list[Path]) -> Path | None:
-    """Interactive single-pick picker for the credential bank. The renamer
+def cred_menu(services: list[str]) -> str | None:
+    """Interactive single-pick picker over the credential services. The renamer
     writes back to AEP, so a run targets exactly ONE credential set. Returns
-    the chosen path, or None to quit."""
+    the chosen service name, or None to quit."""
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print()
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 70 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, svc in enumerate(services, 1):
+        pretty = svc.replace("-", " ").replace("_", " ").title()
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<24}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{pretty:<24}{ANSI['reset']} "
+              f"{ANSI['dim']}{svc}{ANSI['reset']}")
     print(bar)
     raw = input("\nPick ONE set by number, blank to quit: ").strip()
     if not raw:
         return None
-    if raw.isdigit() and 1 <= int(raw) <= len(creds):
-        return creds[int(raw) - 1]
+    if raw.isdigit() and 1 <= int(raw) <= len(services):
+        return services[int(raw) - 1]
     logger.warning(f"Invalid choice: {raw}")
     return None
 
 
 def main() -> None:
-    # Positional arg (if any) is a credential-set name (filename stem). The
+    print(aep_creds.source_banner(), file=sys.stderr)
+    # Positional arg (if any) is a credential-set name (service name). The
     # renamer writes to AEP, so it targets exactly one credential set per run.
     names = [a for a in sys.argv[1:] if not a.startswith("-")]
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         sys.exit(1)
 
     if names:
-        path = _match_cred(names[0], creds)
-        if not path:
-            logger.error(f"No credential set named {names[0]!r} in {CREDS_DIR}.")
+        service = _match_service(names[0], services)
+        if not service:
+            logger.error(f"No credential set named {names[0]!r}. "
+                         f"Known services: {', '.join(services)}.")
             sys.exit(1)
     elif _interactive():
-        path = cred_menu(creds)
+        service = cred_menu(services)
     else:
         logger.error("No credential set specified and not running "
                      "interactively. Pass a credential-set name.")
         sys.exit(1)
 
-    if not path:
+    if not service:
         logger.info("Nothing chosen. Exiting.")
         return
 
-    run_for_cred(path)
+    run_for_cred(service)
 
 
 if __name__ == "__main__":

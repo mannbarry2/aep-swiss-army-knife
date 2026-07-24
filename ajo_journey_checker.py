@@ -8,8 +8,10 @@ triggered by AUDIENCE QUALIFICATION (a profile qualifying for a segment). The
 end goal is a journey -> audience table, and from it a per-audience view of
 which journeys consume each audience.
 
-Shares the credential bank, picker and console style of credential_validator:
-run with no --creds to pick interactively from ./creds/.
+Credentials come from the shared aep_creds layer: the OS keyring vault first,
+falling back to a plaintext creds/ folder where keyring is unavailable. Run
+with no --creds to pick a service interactively; manage services with
+credential_validator_v2.py.
 
 ------------------------------------------------------------------------------
 THE HYBRID CREDENTIAL (important -- this is why it works)
@@ -74,13 +76,14 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import aep_creds  # keyring-first credential store, plaintext creds/ fallback
+
 SCRIPT_NAME    = "ajo_journey_checker"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE    = "2026-06-24"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -179,16 +182,6 @@ def shorten(s, n=12):
     return s if len(s) <= n else f"{s[:n]}..."
 
 
-def load_creds(path: Path) -> dict:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {k: (v.strip() if isinstance(v, str) else v)
-            for k, v in raw.items() if not k.startswith("_")}
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
-
-
 def authenticate(conf) -> str:
     """OAuth server-to-server. ALWAYS minted fresh -- AEP/AJO permissions are
     snapshotted into the token at mint time, so a stale token never reflects a
@@ -218,29 +211,19 @@ def ajo_headers(token, api_key, org_id, sandbox):
 # ----------------------------------------------------------------------------
 # Discovery / menu - matches credential_validator.py
 # ----------------------------------------------------------------------------
-def discover_creds():
-    """Return ordered list of credential JSON paths."""
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
-def menu(creds):
-    """Single-pick credential bank (the token credential)."""
+def menu(services):
+    """Single-pick credential bank (the token credential). Operates on keyring
+    service-name strings (keyring vault + creds/ fallback, via aep_creds)."""
     print()
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 70 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(
         f"\nPick the token credential by number "
@@ -249,67 +232,66 @@ def menu(creds):
     if not raw:
         return None
     tok = raw.replace(",", " ").split()[0]
-    if tok.isdigit() and 1 <= int(tok) <= len(creds):
-        return creds[int(tok) - 1]
+    if tok.isdigit() and 1 <= int(tok) <= len(services):
+        return services[int(tok) - 1]
     logger.warning(f"Invalid choice: {tok}")
     return None
 
 
-def resolve_by_stem(creds, name):
-    by_stem = {p.stem: p for p in creds}
-    if name in by_stem:
-        return by_stem[name]
+def resolve_service(services, name):
+    """Match a --creds arg to a service name: exact, else unique substring."""
+    if name in services:
+        return name
     term = name.lower()
-    hits = [p for p in creds if term in p.stem.lower()]
+    hits = [s for s in services if term in s.lower()]
     return hits[0] if len(hits) == 1 else None
 
 
-def api_key_source(api_key, creds, org_id=None):
-    """Which credential file supplies this x-api-key? Matches the key against
+def api_key_source(api_key, services, org_id=None):
+    """Which credential set supplies this x-api-key? Matches the key against
     each set's client_id / api_key so we can name it in the header instead of
     showing a bare hex prefix. The same client_id can appear in more than one
     org, so a match in the SAME org as the token wins (avoids naming a
-    different-org set with a shared key)."""
+    different-org set with a shared key). Uses peek_creds so scanning the whole
+    bank doesn't spew a source/security line per service."""
     fallback = None
-    for p in creds:
-        try:
-            c = load_creds(p)
-        except Exception:
+    for name in services:
+        c = aep_creds.peek_creds(name)
+        if not c:
             continue
         if api_key in (c.get("client_id"), c.get("api_key")):
             if org_id and c.get("org_id") == org_id:
-                return p.stem
-            fallback = fallback or p.stem
+                return name
+            fallback = fallback or name
     return fallback
 
 
-def pick_api_key(creds, token_path):
+def pick_api_key(services, token_service):
     """Interactively choose the AJO-subscribed x-api-key (the hybrid). AJO
     checks the api-key is subscribed to the product, and that key is often a
     DIFFERENT credential than the one whose token you mint. Returns an api-key
     string, or None to fall back to the token credential's own key."""
-    others = [p for p in creds if p != token_path]
+    others = [s for s in services if s != token_service]
     print()
     print(f"  {ANSI['bold']}AJO needs an AJO-subscribed api-key{ANSI['reset']} "
           f"{ANSI['dim']}(the x-api-key; can differ from the token credential)"
           f"{ANSI['reset']}")
-    for i, p in enumerate(others, 1):
+    for i, name in enumerate(others, 1):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<20}{ANSI['reset']} "
+              f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
               f"{ANSI['dim']}use this set's api-key{ANSI['reset']}")
     raw = input(
         f"\nPick the AJO-subscribed set by number, paste a key, or Enter to use "
-        f"{ANSI['yellow']}{token_path.stem}{ANSI['reset']}'s own key: "
+        f"{ANSI['yellow']}{token_service}{ANSI['reset']}'s own key: "
     ).strip()
     if not raw:
         return None
     if raw.isdigit() and 1 <= int(raw) <= len(others):
-        try:
-            c = load_creds(others[int(raw) - 1])
-            return c.get("api_key") or c["client_id"]
-        except Exception as e:
-            logger.warning(f"Could not load that set: {e}")
-            return None
+        c = aep_creds.peek_creds(others[int(raw) - 1])
+        if c:
+            return c.get("api_key") or c.get("client_id")
+        logger.warning("Could not load that set.")
+        return None
     return raw  # treat anything else as a pasted api-key
 
 
@@ -555,26 +537,26 @@ def write_xlsx(rows, out_path, subtitle=""):
     wb.save(out_path)
 
 
-def run_checker(path, opts, creds):
+def run_checker(service, opts, services):
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print()
     print(bar)
     print(f"  {ANSI['bold']}AJO Journey Checker{ANSI['reset']}  "
-          f"{ANSI['yellow']}{path.stem}{ANSI['reset']} "
-          f"{ANSI['dim']}({path.name}){ANSI['reset']}")
+          f"{ANSI['yellow']}{service}{ANSI['reset']} "
+          f"{ANSI['dim']}({service}){ANSI['reset']}")
     print(bar)
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
         return
 
     api_key = opts["api_key"] or conf.get("api_key") or conf["client_id"]
     hybrid = api_key != conf["client_id"]
-    key_from = api_key_source(api_key, creds, conf["org_id"]) or ("pasted key" if hybrid else path.stem)
+    key_from = api_key_source(api_key, services, conf["org_id"]) or ("pasted key" if hybrid else service)
     # Spell out the two credentials by NAME so the hybrid isn't confusing.
-    print(f"  {ANSI['bold']}Token   from:{ANSI['reset']} {ANSI['yellow']}{path.stem}{ANSI['reset']} "
+    print(f"  {ANSI['bold']}Token   from:{ANSI['reset']} {ANSI['yellow']}{service}{ANSI['reset']} "
           f"{ANSI['dim']}(client {shorten(conf['client_id'])} - gives the journey permission){ANSI['reset']}")
     print(f"  {ANSI['bold']}Api-key from:{ANSI['reset']} {ANSI['yellow']}{key_from}{ANSI['reset']} "
           f"{ANSI['dim']}(key {shorten(api_key)} - must be subscribed to AJO){ANSI['reset']}"
@@ -715,10 +697,10 @@ def run_checker(path, opts, creds):
 
     if opts["xlsx"] or opts["out"]:
         stamp = datetime.now().strftime("%Y-%m-%d")
-        default = OUTPUT_DIR / (f"ajo_journeys_{path.stem.replace(' ', '_')}_"
+        default = OUTPUT_DIR / (f"ajo_journeys_{service.replace(' ', '_')}_"
                                 f"{opts['sandbox']}_{stamp}.xlsx")
         out_path = Path(opts["out"]) if opts["out"] else default
-        subtitle = f"AJO journeys - {path.stem} - {opts['sandbox']} - {stamp}"
+        subtitle = f"AJO journeys - {service} - {opts['sandbox']} - {stamp}"
         try:
             write_xlsx(rows, out_path, subtitle=subtitle)
             logger.info(f"Wrote {len(rows)} row(s) -> {out_path}")
@@ -776,22 +758,25 @@ def parse_args(argv):
 
 def main():
     print_banner()
+    print(aep_creds.source_banner())
     opts = parse_args(sys.argv[1:])
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
     if opts["creds"]:
-        path = resolve_by_stem(creds, opts["creds"])
-        if not path:
-            logger.warning(f"No credential set named {opts['creds']!r} (looked in {CREDS_DIR})")
+        service = resolve_service(services, opts["creds"])
+        if not service:
+            logger.warning(f"No credential set named {opts['creds']!r} "
+                           f"(known: {', '.join(services)})")
             return
     else:
-        path = menu(creds)
+        service = menu(services)
 
-    if not path:
+    if not service:
         logger.info("Nothing chosen. Exiting.")
         return
 
@@ -799,18 +784,15 @@ def main():
     # a DIFFERENT credential than the token (the hybrid). If none was supplied
     # and we're on a terminal, offer to pick one rather than failing with a 403.
     if not opts["api_key"] and sys.stdin.isatty():
-        try:
-            has_field = bool(load_creds(path).get("api_key"))
-        except Exception:
-            has_field = False
+        has_field = bool(aep_creds.peek_creds(service).get("api_key"))
         if not has_field:
-            opts["api_key"] = pick_api_key(creds, path)
+            opts["api_key"] = pick_api_key(services, service)
 
     # No ids and no --list from an interactive pick -> default to listing all.
     if not opts["ids"] and not opts["list"]:
         opts["list"] = True
 
-    run_checker(path, opts, creds)
+    run_checker(service, opts, services)
     print()
     logger.info("Done.")
 

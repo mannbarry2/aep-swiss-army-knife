@@ -7,7 +7,8 @@ Single Schema and Data Extractor -- a stripped-back fork of data_dictionary_v3.
 Where the full Data Dictionary sucks every schema out of a sandbox and writes a
 tabbed workbook, this tool does ONE schema, end to end:
 
-  1. Authenticate against IMS (pick a credential set from ./creds/).
+  1. Authenticate against IMS (pick a credential set from the keyring vault,
+     or a plaintext creds/ folder where keyring is unavailable).
   2. Pick a sandbox (Enter = prod).
   3. PROMPT you to pick which schema to run (only schemas that have >=1 dataset,
      so there's real data to sample; type part of a name to narrow the list).
@@ -31,9 +32,13 @@ optional -- without pyarrow you still get the field list, just no examples).
 
 Usage:
     python single_schema_extractor.py                     # interactive menus
-    python single_schema_extractor.py "acme beta"        # pick creds by stem
-    python single_schema_extractor.py "acme k" --sandbox=prod
-    python single_schema_extractor.py "acme k" --sandbox=prod --rows=100
+    python single_schema_extractor.py "acme-beta"        # pick creds by service name
+    python single_schema_extractor.py "acme-k" --sandbox=prod
+    python single_schema_extractor.py "acme-k" --sandbox=prod --rows=100
+
+Credentials come from the OS keyring (Windows Credential Manager) via
+aep_creds; manage them with credential_validator_v2.py. Service names are the
+keys you stored -- run `credential_validator_v2.py list` to see them.
 """
 
 from __future__ import annotations
@@ -49,16 +54,17 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "single_schema_extractor"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE    = "2026-07-06"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -153,19 +159,6 @@ def http(url, method="GET", headers=None, data=None, timeout=60):
 
 def flatten_err(text: str, limit: int = 200) -> str:
     return " ".join((text or "").split())[:limit]
-
-
-def load_creds(path: Path):
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
 
 
 def authenticate(conf):
@@ -661,16 +654,6 @@ def build_field_rows(sid, fields, identities, relationships, labels, id_to_title
 # ----------------------------------------------------------------------------
 # Credential menu + sandbox picker  (shared house style)
 # ----------------------------------------------------------------------------
-def discover_creds():
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
 def pretty_name(stem: str) -> str:
     return stem.replace("-", " ").replace("_", " ").title()
 
@@ -692,28 +675,29 @@ def short_type(raw: str) -> str:
     return raw or "?"
 
 
-def menu(creds):
+def menu(services):
+    """House-style numbered picker over keyring service names."""
     print()
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 60 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}[{i}]{ANSI['reset']} "
-              f"{ANSI['yellow']}{pretty_name(p.stem):<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{pretty_name(name):<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(
         f"\nChoose a credential set by number "
-        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(creds)}{ANSI['reset']}), "
+        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(services)}{ANSI['reset']}), "
         "blank to quit: "
     ).strip()
     if not raw or not raw.isdigit():
         return None
     idx = int(raw)
-    if 1 <= idx <= len(creds):
-        return creds[idx - 1]
+    if 1 <= idx <= len(services):
+        return services[idx - 1]
     logger.warning(f"Choice {idx} out of range.")
     return None
 
@@ -1213,20 +1197,20 @@ def run_schema_interactive(token, conf, sandbox_arg, rows, client):
     logger.info("Done.")
 
 
-def run(path: Path, sandbox_arg: str | None, rows: int = DEFAULT_ROWS,
+def run(service: str, sandbox_arg: str | None, rows: int = DEFAULT_ROWS,
         dataset_names=None, list_only=False):
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print()
     print(bar)
     print(f"  {ANSI['bold']}Single Schema and Data Extractor for "
-          f"{ANSI['yellow']}{pretty_name(path.stem)}{ANSI['reset']}  "
-          f"{ANSI['dim']}({path.name}){ANSI['reset']}")
+          f"{ANSI['yellow']}{pretty_name(service)}{ANSI['reset']}  "
+          f"{ANSI['dim']}({service}){ANSI['reset']}")
     print(bar)
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
         return
 
     try:
@@ -1240,7 +1224,7 @@ def run(path: Path, sandbox_arg: str | None, rows: int = DEFAULT_ROWS,
         return
     token = resp["access_token"]
     logger.info(f"IMS authenticated (org {conf['org_id']}).")
-    client = client_label(conf, path.stem)
+    client = client_label(conf, service)
 
     if dataset_names:
         ok, result = list_sandboxes(token, conf)
@@ -1304,21 +1288,21 @@ def main():
         else:
             positional.append(a)
 
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
     if positional:
-        by_stem = {p.stem: p for p in creds}
-        chosen = by_stem.get(positional[0])
-        if not chosen:
-            logger.error(f"No credential set named {positional[0]!r} "
-                         f"(looked in {CREDS_DIR}).")
+        try:
+            chosen = aep_creds.pick_service(positional[0])
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     else:
-        chosen = menu(creds)
+        chosen = menu(services)
 
     if not chosen:
         logger.info("Nothing chosen. Exiting.")

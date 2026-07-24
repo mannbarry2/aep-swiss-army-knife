@@ -12,7 +12,8 @@ example values sampled from ingested data.
 The workbook is marked STRICTLY CONFIDENTIAL: with --data-dict it contains
 real sampled customer data.
 
-Pick a credential set from ./creds/ and the tool will:
+Pick a credential set (keyring-first from the OS vault, or a plaintext creds/
+folder where keyring is unavailable) and the tool will:
   1. Authenticate against IMS (client_credentials).
   2. GET /sandboxes -- every sandbox the credential can see.
   3. Prompt you to pick which sandbox(es) to read (Enter = prod by default).
@@ -85,14 +86,19 @@ pip install -r requirements.txt).
 
 Usage:
     python data_dictionary_v3.py                       # interactive menus
-    python data_dictionary_v3.py "acme beta"          # pick creds by stem
-    python data_dictionary_v3.py "acme beta" --sandbox=prod,dev1
-    python data_dictionary_v3.py "acme beta" --sandbox=all
-    python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict       # ALL schemas
-    python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict --dd-rows=2000
-    python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict=profile  # one schema
-    python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict \
+    python data_dictionary_v3.py "acme-beta"          # pick creds by service name
+    python data_dictionary_v3.py "acme-beta" --sandbox=prod,dev1
+    python data_dictionary_v3.py "acme-beta" --sandbox=all
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict       # ALL schemas
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict --dd-rows=2000
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict=profile  # one schema
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict \
         --profile-snapshot=67dc0539eaafb02aeeb92ed7   # override snapshot dataset
+
+Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
+falling back to a plaintext creds/ folder where keyring is unavailable; manage
+them with credential_validator_v2.py. Service names are the keys you stored --
+run `credential_validator_v2.py list` to see them.
 """
 
 from __future__ import annotations
@@ -110,16 +116,17 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.2.0"
-SCRIPT_DATE    = "2026-06-29"
+SCRIPT_VERSION = "3.3.0"
+SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -292,19 +299,6 @@ def http(url, method="GET", headers=None, data=None, timeout=60):
 
 def flatten_err(text: str, limit: int = 200) -> str:
     return " ".join((text or "").split())[:limit]
-
-
-def load_creds(path: Path):
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
 
 
 def authenticate(conf):
@@ -1078,16 +1072,6 @@ def is_test(raw: dict) -> bool:
 # ----------------------------------------------------------------------------
 # Credential menu + sandbox picker
 # ----------------------------------------------------------------------------
-def discover_creds():
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
 def pretty_name(stem: str) -> str:
     return stem.replace("-", " ").replace("_", " ").title()
 
@@ -1113,28 +1097,30 @@ def short_type(raw: str) -> str:
     return raw or "?"
 
 
-def menu(creds):
+def menu(services):
+    """House-style numbered picker over keyring service names. Returns the
+    chosen service name string, or None."""
     print()
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 60 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}[{i}]{ANSI['reset']} "
-              f"{ANSI['yellow']}{pretty_name(p.stem):<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{pretty_name(name):<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(
         f"\nChoose a credential set by number "
-        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(creds)}{ANSI['reset']}), "
+        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(services)}{ANSI['reset']}), "
         "blank to quit: "
     ).strip()
     if not raw or not raw.isdigit():
         return None
     idx = int(raw)
-    if 1 <= idx <= len(creds):
-        return creds[idx - 1]
+    if 1 <= idx <= len(services):
+        return services[idx - 1]
     logger.warning(f"Choice {idx} out of range.")
     return None
 
@@ -1989,21 +1975,21 @@ def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
     return None
 
 
-def run(path: Path, sandbox_arg: str | None,
+def run(service: str, sandbox_arg: str | None,
         dd_scope: str | None = None, dd_rows: int = DD_DEFAULT_ROWS,
         profile_snapshot: str | None = None):
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print()
     print(bar)
     print(f"  {ANSI['bold']}Data Dictionary v{SCRIPT_VERSION} for "
-          f"{ANSI['yellow']}{pretty_name(path.stem)}{ANSI['reset']}  "
-          f"{ANSI['dim']}({path.name}){ANSI['reset']}")
+          f"{ANSI['yellow']}{pretty_name(service)}{ANSI['reset']}  "
+          f"{ANSI['dim']}({service}){ANSI['reset']}")
     print(bar)
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
         return
 
     try:
@@ -2075,7 +2061,7 @@ def run(path: Path, sandbox_arg: str | None,
                     f"(adds minutes).{ANSI['reset']}")
 
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    client = client_label(conf, path.stem)
+    client = client_label(conf, service)
     xlsx_path = write_xlsx(results, client, datestr)
     if xlsx_path:
         n_tabs = sum(len(r["kept"]) for r in results)
@@ -2097,6 +2083,7 @@ def print_banner() -> None:
     print(f"  {ANSI['dim']}Extracts AEP XDM schemas into a tabbed Excel data dictionary "
           f"with field coverage + sample values.{ANSI['reset']}")
     print(bar)
+    print(aep_creds.source_banner())
 
 
 def main():
@@ -2128,21 +2115,21 @@ def main():
         else:
             positional.append(a)
 
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
     if positional:
-        by_stem = {p.stem: p for p in creds}
-        chosen = by_stem.get(positional[0])
-        if not chosen:
-            logger.error(f"No credential set named {positional[0]!r} "
-                         f"(looked in {CREDS_DIR}).")
+        try:
+            chosen = aep_creds.pick_service(positional[0])
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     else:
-        chosen = menu(creds)
+        chosen = menu(services)
 
     if not chosen:
         logger.info("Nothing chosen. Exiting.")

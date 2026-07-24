@@ -6,7 +6,8 @@ Enhanced fork of audit_batch_schedules.py. Same credential picker, same
 per-sandbox GET /schedules sweep, but every schedule is now *classified* and
 *flagged for anomalies*, with a roll-up summary at the end.
 
-Pick a credential set from ./creds/ and the auditor will:
+Pick a credential set (from the OS keyring vault, or a plaintext creds/ folder
+where keyring is unavailable) and the auditor will:
   1. Authenticate against IMS (client_credentials).
   2. GET /sandboxes -- every sandbox the credential can see.
   3. Prompt you to pick which sandbox(es) to audit (one, several, or all)
@@ -33,11 +34,14 @@ Anomaly FLAGS (comma-separated when several apply):
   DISABLED   enabled = false
   LATE       SEGMENTATION whose fixed time is >= 05:00 UTC on a prod sandbox
 
-Stdlib only, VDI-friendly. No pip install required.
+Credentials come from the OS keyring (Windows Credential Manager) via
+aep_creds, falling back to a plaintext creds/<service>.json where keyring is
+unavailable; manage them with credential_validator_v2.py. Service names are the
+keys you stored -- run `credential_validator_v2.py list` to see them.
 
 Usage:
     python audit_batch_schedules_v2.py            # interactive credential menu
-    python audit_batch_schedules_v2.py prod       # pick a set by filename stem
+    python audit_batch_schedules_v2.py prod       # pick creds by service name
 """
 
 from __future__ import annotations
@@ -54,16 +58,17 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "audit_batch_schedules_v2"
-SCRIPT_VERSION = "2.0.0"
-SCRIPT_DATE = "2026-06-24"
+SCRIPT_VERSION = "2.1.0"
+SCRIPT_DATE = "2026-07-24"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -135,19 +140,6 @@ def flatten(text: str, limit: int = 180) -> str:
     """Collapse a multi-line error body (e.g. an HTML 404 page) to a single
     truncated line so it never breaks the summary table's alignment."""
     return " ".join((text or "").split())[:limit]
-
-
-def load_creds(path: Path):
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
 
 
 def authenticate(conf):
@@ -348,42 +340,34 @@ def anomaly_flags(rec: dict, sched_type: str, env: str) -> list[str]:
 # ----------------------------------------------------------------------------
 # Credential menu  (single choice, from v1)
 # ----------------------------------------------------------------------------
-def discover_creds():
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
 def pretty_name(stem: str) -> str:
     return stem.replace("-", " ").replace("_", " ").title()
 
 
-def menu(creds):
+def menu(services):
+    """House-style numbered picker over keyring service names. Returns the chosen
+    service name string, or None."""
     print()
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 60 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}[{i}]{ANSI['reset']} "
-              f"{ANSI['yellow']}{pretty_name(p.stem):<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{pretty_name(name):<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(
         f"\nChoose a credential set by number "
-        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(creds)}{ANSI['reset']}), "
+        f"({ANSI['cyan']}1{ANSI['reset']}-{ANSI['cyan']}{len(services)}{ANSI['reset']}), "
         "blank to quit: "
     ).strip()
     if not raw or not raw.isdigit():
         return None
     idx = int(raw)
-    if 1 <= idx <= len(creds):
-        return creds[idx - 1]
+    if 1 <= idx <= len(services):
+        return services[idx - 1]
     logger.warning(f"Choice {idx} out of range.")
     return None
 
@@ -620,7 +604,7 @@ def print_summary(counts, seg_prod, seg_dev, anomalies):
 # ----------------------------------------------------------------------------
 # Audit
 # ----------------------------------------------------------------------------
-def audit(path: Path):
+def audit(service: str):
     bar = ANSI["cyan"] + "=" * 72 + ANSI["reset"]
     print()
     print(bar)
@@ -629,14 +613,14 @@ def audit(path: Path):
     print(f"  {ANSI['dim']}Classify + flag anomalies across AEP batch query schedules "
           f"per sandbox{ANSI['reset']}")
     print(f"  {ANSI['bold']}Auditing schedules (v2) for "
-          f"{ANSI['yellow']}{pretty_name(path.stem)}{ANSI['reset']}  "
-          f"{ANSI['dim']}({path.name}){ANSI['reset']}")
+          f"{ANSI['yellow']}{pretty_name(service)}{ANSI['reset']}  "
+          f"{ANSI['dim']}({service}){ANSI['reset']}")
     print(bar)
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(service)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {service!r}: {e}")
         return
 
     try:
@@ -723,9 +707,9 @@ def audit(path: Path):
         "sandbox_stats": sandbox_stats,
     }
 
-    csv_path = write_csv(flat_rows, path.stem)
+    csv_path = write_csv(flat_rows, service)
     logger.info(f"CSV written:  {csv_path}")
-    xlsx_path = write_xlsx(per_sandbox, summary, path.stem)
+    xlsx_path = write_xlsx(per_sandbox, summary, service)
     if xlsx_path:
         logger.info(f"XLSX written: {xlsx_path}  "
                     f"({len(per_sandbox)} sandbox tab(s) + Summary)")
@@ -738,21 +722,23 @@ def audit(path: Path):
 # ----------------------------------------------------------------------------
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    logger.info(aep_creds.source_banner())
+
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
     if args:
-        by_stem = {p.stem: p for p in creds}
-        chosen = by_stem.get(args[0])
-        if not chosen:
-            logger.error(f"No credential set named {args[0]!r} "
-                         f"(looked in {CREDS_DIR}).")
+        try:
+            chosen = aep_creds.pick_service(args[0])
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     else:
-        chosen = menu(creds)
+        chosen = menu(services)
 
     if not chosen:
         logger.info("Nothing chosen. Exiting.")

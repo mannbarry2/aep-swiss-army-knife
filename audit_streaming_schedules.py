@@ -33,17 +33,21 @@ columns auto-fit, Arial throughout. It lands in ./output/ with the sandbox +
 timestamp in the filename. The snapshot is point-in-time, not live -- the
 snapshot date is stamped in the sheet.
 
-Stdlib only except openpyxl, which is required for the .xlsx output.
-VDI-friendly.
+openpyxl is required for the .xlsx output.
+
+Credentials come from the OS keyring (Windows Credential Manager) via
+aep_creds, falling back to a plaintext creds/<service>.json only where keyring
+is unavailable. Manage them with credential_validator_v2.py; service names are
+the keys you stored -- run `credential_validator_v2.py list` to see them.
 
 Usage:
     python audit_streaming_schedules.py                 # cred menu, prod, api
-    python audit_streaming_schedules.py prod            # creds/prod.json by stem
-    python audit_streaming_schedules.py prod --sandbox=prod
-    python audit_streaming_schedules.py prod --estimate # fill missing counts
+    python audit_streaming_schedules.py aep-prod        # pick creds by service name
+    python audit_streaming_schedules.py aep-prod --sandbox=prod
+    python audit_streaming_schedules.py aep-prod --estimate # fill missing counts
     python audit_streaming_schedules.py --no-flows      # skip destination sweep
     python audit_streaming_schedules.py --source=files \
-        --report=creds/audience_report.xlsx --list-json=creds/audiences.json
+        --report=path/to/audience_report.xlsx --list-json=path/to/audiences.json
 """
 
 from __future__ import annotations
@@ -61,16 +65,17 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "audit_streaming_schedules"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-06-24"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE = "2026-07-24"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -176,19 +181,6 @@ def http(url, method="GET", headers=None, data=None, timeout=60):
         return r.read()
 
 
-def load_creds(path: Path):
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
-
-
 def authenticate(conf):
     payload = urllib.parse.urlencode({
         "grant_type": "client_credentials",
@@ -215,35 +207,27 @@ def aep_headers(token, conf, sandbox):
     }
 
 
-def discover_creds():
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
-def menu(creds):
-    """Prompt for ONE credential set (this tool targets a single sandbox)."""
+def menu(services):
+    """Prompt for ONE credential set (this tool targets a single sandbox).
+    `services` is a list of keyring service-name strings; returns the chosen
+    name or None."""
     print()
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 70 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(f"\nPick a credential set by number "
                 f"({ANSI['cyan']}1{ANSI['reset']}), blank to quit: ").strip()
     if not raw:
         return None
-    if raw.isdigit() and 1 <= int(raw) <= len(creds):
-        return creds[int(raw) - 1]
+    if raw.isdigit() and 1 <= int(raw) <= len(services):
+        return services[int(raw) - 1]
     logger.warning(f"Invalid choice: {raw}")
     return None
 
@@ -1112,26 +1096,28 @@ def print_console_summary(rows, summary):
 # Modes
 # ----------------------------------------------------------------------------
 def run_api(opts) -> "tuple[list[dict], str, str] | None":
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return None
     if opts["name"]:
-        path = {p.stem: p for p in creds}.get(opts["name"])
-        if not path:
-            logger.error(f"No credential set named {opts['name']!r} in {CREDS_DIR}")
+        try:
+            chosen = aep_creds.pick_service(opts["name"])
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return None
     else:
-        path = menu(creds)
-    if not path:
+        chosen = menu(services)
+    if not chosen:
         logger.info("Nothing chosen. Exiting.")
         return None
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(chosen)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {chosen!r}: {e}")
         return None
 
     sandbox = opts["sandbox"] or conf.get("sandbox") or DEFAULT_SANDBOX
@@ -1266,6 +1252,7 @@ def run_files(opts) -> "tuple[list[dict], str, str] | None":
 def main():
     opts = parse_args(sys.argv[1:])
     outdir = Path(opts["output"]) if opts["output"] else OUTPUT_DIR
+    logger.info(aep_creds.source_banner())
 
     if opts["source"] == "files":
         result = run_files(opts)

@@ -51,6 +51,18 @@ Commands
 
     delete    Remove all entries for a service after a y/n confirm.
 
+    sweep     Discover EVERY credential service in the vault (the cred-index
+              registry PLUS a live Windows Credential Manager scan for keyring's
+              `key@service` entries), check which of the 5 core keys each holds
+              and -- for the ones with the keys IMS needs -- attempt a token
+              mint (throttled 1/sec). Prints a service | keys | OK/FAIL/
+              INCOMPLETE table. Read-only; values masked; makes no changes.
+                  credential_validator_v2.py sweep   # exit 0 if all pass, 1 if any fail
+
+    purge     Run a sweep, then for each FAILED or INCOMPLETE service offer to
+              delete all its keys (y/N, then type the service name to confirm).
+              --dry-run previews the targets without changing anything.
+
 Exit codes (so other scripts can use this as a pre-flight check)
     0  ok / token minted     1  auth failure     2  config missing
 
@@ -68,6 +80,7 @@ import json
 import logging
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,6 +88,7 @@ try:
     import requests
     import keyring
     import keyring.errors
+    import aep_creds  # shared keyring layer (single source of truth)
     _DEPS_OK = True
     _DEPS_ERR = ""
 except ImportError as _e:  # pragma: no cover - reported cleanly in main()
@@ -85,13 +99,11 @@ except ImportError as _e:  # pragma: no cover - reported cleanly in main()
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "credential_validator_v2"
-SCRIPT_VERSION = "2.0.0"
-SCRIPT_DATE    = "2026-07-15"
+SCRIPT_VERSION = "2.2.0"
+SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# Legacy plaintext creds, used ONLY for one-off migration into keyring.
-CREDS_DIR  = SCRIPT_DIR / "creds"
 
 # IMS OAuth Server-to-Server (client_credentials) token endpoint.
 IMS_TOKEN_V3_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
@@ -102,23 +114,19 @@ PLATFORM         = "https://platform.adobe.io"
 SANDBOX_LIST_URL = f"{PLATFORM}/data/foundation/sandbox-management/sandboxes"
 QUERIES_URL      = f"{PLATFORM}/data/foundation/query/queries"
 
-DEFAULT_SCOPES = (
-    "openid,AdobeID,read_organizations,"
-    "additional_info.projectedProductContext,session"
-)
-
-# keyring service that stores the list of known credential services, so we can
-# offer discovery / `validate --all` (keyring can't enumerate services).
-REGISTRY_SERVICE = "aep-cred-index"
-REGISTRY_KEY     = "services"
-
-DEFAULT_SERVICE = "aep-prod"
-
-# All fields we ever persist per service. Required ones are needed to mint a
-# token; the rest are optional (api_key defaults to client_id, etc.).
-REQUIRED_KEYS = ["client_id", "client_secret", "org_id"]
-OPTIONAL_KEYS = ["tech_account_id", "scopes", "api_key", "oauth_url", "sandbox"]
-ALL_KEYS      = REQUIRED_KEYS + OPTIONAL_KEYS
+# Field model, registry, scopes, and the legacy creds/ dir all come from the
+# shared aep_creds layer so there's ONE source of truth. Names kept local so the
+# existing call sites below are unchanged. (aep_creds is imported above; on a
+# deps-missing box _DEPS_OK is False and main() reports before any use.)
+if _DEPS_OK:
+    DEFAULT_SCOPES   = aep_creds.DEFAULT_SCOPES
+    REGISTRY_SERVICE = aep_creds.REGISTRY_SERVICE
+    REGISTRY_KEY     = aep_creds.REGISTRY_KEY
+    DEFAULT_SERVICE  = aep_creds.DEFAULT_SERVICE
+    REQUIRED_KEYS    = aep_creds.REQUIRED_KEYS
+    OPTIONAL_KEYS    = aep_creds.OPTIONAL_KEYS
+    ALL_KEYS         = aep_creds.ALL_KEYS
+    CREDS_DIR        = aep_creds.CREDS_DIR   # legacy plaintext dir, for migrate
 
 # Interactive `store` prompts. (label, required). oauth_url is intentionally
 # not prompted -- it defaults to IMS token/v3; import-json still preserves it.
@@ -253,58 +261,31 @@ def is_placeholder(value: str) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# Keyring layer
-# ----------------------------------------------------------------------------
-def kr_set(service: str, key: str, value: str) -> None:
-    keyring.set_password(service, key, value)
-
-
-def kr_get(service: str, key: str) -> str | None:
-    return keyring.get_password(service, key)
-
-
-def kr_del(service: str, key: str) -> bool:
-    """Delete one entry. Returns True if it existed and was removed."""
-    try:
-        keyring.delete_password(service, key)
-        return True
-    except keyring.errors.PasswordDeleteError:
-        return False
+# Keyring layer -- the primitives live in aep_creds now (single source of
+# truth); aliased here so this admin tool's call sites stay unchanged. NOTE:
+# these are the raw keyring/registry primitives, NOT aep_creds.load_creds --
+# this tool deliberately reads the VAULT ONLY (never the folder fallback), so
+# `store`/`sweep`/`purge` operate on exactly what's in Credential Manager.
+if _DEPS_OK:
+    kr_set          = aep_creds.kr_set
+    kr_get          = aep_creds.kr_get
+    kr_del          = aep_creds.kr_del
+    registry_list   = aep_creds.registry_list
+    registry_add    = aep_creds.registry_add
+    registry_remove = aep_creds.registry_remove
 
 
 def load_creds(service: str) -> dict[str, str]:
-    """Read all present fields for a service into a config dict (stripped)."""
+    """Read all present fields for a service from the VAULT into a config dict
+    (stripped). Keyring-only by design -- sweep/purge report on what's actually
+    in Credential Manager, so this must not fall back to the plaintext folder
+    the way aep_creds.load_creds does."""
     conf: dict[str, str] = {}
     for key in ALL_KEYS:
         val = kr_get(service, key)
         if val:
             conf[key] = val.strip()
     return conf
-
-
-def registry_list() -> list[str]:
-    raw = kr_get(REGISTRY_SERVICE, REGISTRY_KEY)
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-        return sorted(data) if isinstance(data, list) else []
-    except (ValueError, TypeError):
-        return []
-
-
-def registry_add(service: str) -> None:
-    services = set(registry_list())
-    if service not in services:
-        services.add(service)
-        kr_set(REGISTRY_SERVICE, REGISTRY_KEY, json.dumps(sorted(services)))
-
-
-def registry_remove(service: str) -> None:
-    services = set(registry_list())
-    if service in services:
-        services.discard(service)
-        kr_set(REGISTRY_SERVICE, REGISTRY_KEY, json.dumps(sorted(services)))
 
 
 # ----------------------------------------------------------------------------
@@ -896,6 +877,211 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------------
+# sweep / purge  (vault-wide discovery, validation, cleanup)
+# ----------------------------------------------------------------------------
+# The 5 core keys the sweep reports on. Presence of all 5 is shown, but only the
+# REQUIRED_KEYS actually gate a token mint -- tech_account_id isn't used by
+# client_credentials and scopes has a default, so a set lacking those can still
+# authenticate and should not be branded INCOMPLETE.
+SWEEP_KEYS = ["client_id", "client_secret", "org_id", "tech_account_id", "scopes"]
+KEY_ABBR = {"client_id": "id", "client_secret": "sec", "org_id": "org",
+            "tech_account_id": "ta", "scopes": "sco"}
+
+
+# Vault enumeration (Credential Manager `key@service` scan) + registry∪vault
+# discovery both live in aep_creds now; aliased so sweep/purge are unchanged.
+# These stay keyring-only (no folder), which is exactly what a vault sweep wants.
+if _DEPS_OK:
+    vault_services    = aep_creds.vault_services
+    discover_services = aep_creds.discover_services
+
+
+def short_auth_reason(ex: Exception) -> str:
+    """Compact one-phrase reason for a failed token mint, for the sweep table."""
+    if isinstance(ex, IMSAuthError):
+        err = (ex.error or "").lower()
+        desc = (ex.description or "").lower()
+        if "scope" in err or "scope" in desc:
+            return "missing/invalid scope"
+        if "invalid_client" in err or ex.status in (400, 401):
+            if "expired" in desc:
+                return "expired secret"
+            if "secret" in desc:
+                return "bad secret"
+            if "client_id" in desc or "client id" in desc:
+                return "bad client_id"
+            return "invalid client (bad/expired secret)"
+        return f"HTTP {ex.status} {ex.error}".strip()
+    if isinstance(ex, requests.exceptions.SSLError):
+        return "TLS error (try --insecure)"
+    return f"network: {type(ex).__name__}"
+
+
+def sweep_services(rate_limit: float = 1.0) -> tuple[list[dict], int, bool]:
+    """Read-only vault-wide validation. Discovers every credential service,
+    records which of the 5 core keys it holds, and -- for services that have the
+    keys IMS needs -- attempts a token mint, throttled to `rate_limit` seconds
+    between live calls to be polite to IMS.
+
+    Returns (rows, exit_code, scanned_ok). Each row is a dict: service, present
+    (set of the 5 keys held), missing_required, orphan (bool), status
+    ('OK'|'FAIL'|'INCOMPLETE'), detail. exit_code is 0 only if every service
+    minted a token, else 1. Makes NO changes to the vault."""
+    services, orphans, scanned_ok = discover_services()
+    rows: list[dict] = []
+    minted_any = False
+    for service in services:
+        present = {k for k in SWEEP_KEYS if kr_get(service, k)}
+        missing_req = [k for k in REQUIRED_KEYS if k not in present]
+        row = {"service": service, "present": present,
+               "missing_required": missing_req, "orphan": service in orphans,
+               "status": "INCOMPLETE", "detail": ""}
+        if missing_req:
+            row["detail"] = "missing " + ",".join(KEY_ABBR[k]
+                                                   for k in missing_req)
+            rows.append(row)
+            continue
+        # Complete enough to mint. Throttle between live IMS calls (not before
+        # the first one).
+        if minted_any and rate_limit > 0:
+            time.sleep(rate_limit)
+        minted_any = True
+        try:
+            authenticate(load_creds(service))
+            row["status"] = "OK"
+        except (IMSAuthError, requests.RequestException) as ex:
+            row["status"] = "FAIL"
+            row["detail"] = short_auth_reason(ex)
+        rows.append(row)
+
+    rc = 0 if rows and all(r["status"] == "OK" for r in rows) else \
+         (0 if not rows else 1)
+    return rows, rc, scanned_ok
+
+
+def _key_flags(present: set[str]) -> str:
+    """Fixed-width, colorised presence indicator for the 5 core keys."""
+    parts = []
+    for key in SWEEP_KEYS:
+        abbr = KEY_ABBR[key]
+        if key in present:
+            parts.append(f"{ANSI['green']}{abbr}{ANSI['reset']}")
+        else:
+            parts.append(f"{ANSI['dim']}{'-' * len(abbr)}{ANSI['reset']}")
+    return " ".join(parts)
+
+
+def print_sweep_table(rows: list[dict], scanned_ok: bool) -> None:
+    """Render the sweep result as a service | keys | status table."""
+    print()
+    if not scanned_ok:
+        print(f"  {ANSI['dim']}(vault scan unavailable; discovered from the "
+              f"cred-index registry only){ANSI['reset']}")
+    if not rows:
+        print(f"  {ANSI['yellow']}No credential services found.{ANSI['reset']}")
+        return
+    svc_w = min(max([len("service")] + [len(r["service"]) for r in rows]), 28)
+    flags_hdr = " ".join(KEY_ABBR[k] for k in SWEEP_KEYS)  # "id sec org ta sco"
+    print(f"  {ANSI['bold']}{'service':<{svc_w}}  {flags_hdr}  status"
+          f"{ANSI['reset']}")
+    print(f"  {ANSI['dim']}{'-' * svc_w}  {'-' * len(flags_hdr)}  ------"
+          f"{ANSI['reset']}")
+
+    n_ok = n_fail = n_inc = 0
+    for row in rows:
+        status = row["status"]
+        if status == "OK":
+            n_ok += 1
+            status_cell = f"{ANSI['green']}OK{ANSI['reset']}"
+        elif status == "FAIL":
+            n_fail += 1
+            status_cell = (f"{ANSI['red']}FAIL{ANSI['reset']} "
+                           f"{ANSI['dim']}{row['detail']}{ANSI['reset']}")
+        else:
+            n_inc += 1
+            status_cell = (f"{ANSI['yellow']}INCOMPLETE{ANSI['reset']} "
+                           f"{ANSI['dim']}{row['detail']}{ANSI['reset']}")
+        name = row["service"]
+        shown = name if len(name) <= svc_w else name[:svc_w - 1] + "…"
+        orphan = f" {ANSI['magenta']}*{ANSI['reset']}" if row["orphan"] else ""
+        print(f"  {ANSI['yellow']}{shown:<{svc_w}}{ANSI['reset']}  "
+              f"{_key_flags(row['present'])}  {status_cell}{orphan}")
+
+    print()
+    summary = (f"  {ANSI['green']}{n_ok} OK{ANSI['reset']}   "
+               f"{ANSI['red']}{n_fail} FAIL{ANSI['reset']}   "
+               f"{ANSI['yellow']}{n_inc} INCOMPLETE{ANSI['reset']}")
+    if any(r["orphan"] for r in rows):
+        summary += (f"   {ANSI['magenta']}* = in vault but not in the "
+                    f"cred-index{ANSI['reset']}")
+    print(summary)
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """sweep: discover + validate every service, print a table. Read-only."""
+    rows, rc, scanned_ok = sweep_services(rate_limit=args.rate)
+    print_sweep_table(rows, scanned_ok)
+    return rc
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    """purge: sweep, then offer to delete each FAILED/INCOMPLETE service."""
+    rows, _rc, scanned_ok = sweep_services(rate_limit=args.rate)
+    print_sweep_table(rows, scanned_ok)
+
+    targets = [r for r in rows if r["status"] in ("FAIL", "INCOMPLETE")]
+    if not targets:
+        print()
+        logger.info("Nothing to purge -- every service minted a token.")
+        return 0
+
+    print()
+    print(f"  {ANSI['bold']}{len(targets)} service(s) failed or incomplete:"
+          f"{ANSI['reset']} "
+          f"{', '.join(r['service'] for r in targets)}")
+
+    if args.dry_run:
+        print(f"  {ANSI['magenta']}[DRY-RUN]{ANSI['reset']} would prompt to "
+              f"delete each of these; no changes made.")
+        for row in targets:
+            n = sum(1 for k in ALL_KEYS if kr_get(row["service"], k))
+            print(f"     {ANSI['yellow']}{row['service']:<26}{ANSI['reset']} "
+                  f"{ANSI['dim']}{row['status']}: {row['detail']} -> would "
+                  f"delete {n} key(s){ANSI['reset']}")
+        return 0
+
+    removed = 0
+    for row in targets:
+        service = row["service"]
+        keys = [k for k in ALL_KEYS if kr_get(service, k)]
+        print()
+        print(f"  {ANSI['bold']}{service}{ANSI['reset']} "
+              f"{ANSI['dim']}({row['status']}: {row['detail'] or 'n/a'}) - "
+              f"{len(keys)} key(s){ANSI['reset']}")
+        ans = input(f"  {ANSI['red']}Delete all its keys?{ANSI['reset']} "
+                    f"[y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
+            print(f"  {ANSI['dim']}Skipped.{ANSI['reset']}")
+            continue
+        typed = input(f"  Type the service name "
+                      f"{ANSI['yellow']}{service}{ANSI['reset']} to confirm: ")
+        if typed.strip() != service:
+            print(f"  {ANSI['yellow']}Name mismatch -- skipped '{service}'."
+                  f"{ANSI['reset']}")
+            continue
+        deleted = sum(1 for k in keys if kr_del(service, k))
+        registry_remove(service)
+        removed += 1
+        print(f"  {ANSI['green']}Deleted {deleted} key(s) for '{service}'."
+              f"{ANSI['reset']}")
+
+    print()
+    logger.info(f"Purge complete. Removed {removed}/{len(targets)} flagged "
+                f"service(s).")
+    return 0
+
+
+# ----------------------------------------------------------------------------
 # Auth reporting + interactive session
 # ----------------------------------------------------------------------------
 def authenticate_and_report(conf: dict) -> tuple[dict | None, int]:
@@ -1102,6 +1288,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Show which keys exist under a service (masked).")
     sub.add_parser("delete", parents=[common],
                    help="Delete all entries for a service (after confirm).")
+
+    p_sweep = sub.add_parser("sweep", parents=[common],
+                             help="Discover + validate every vault service "
+                                  "(read-only table).")
+    p_sweep.add_argument("--rate", type=float, default=1.0,
+                         help="Seconds between token attempts (default 1.0).")
+
+    p_purge = sub.add_parser("purge", parents=[common],
+                             help="Sweep, then delete failed/incomplete "
+                                  "services (confirmed).")
+    p_purge.add_argument("--rate", type=float, default=1.0,
+                         help="Seconds between token attempts (default 1.0).")
+    p_purge.add_argument("--dry-run", action="store_true",
+                         help="Preview what purge would delete; make no changes.")
     return parser
 
 
@@ -1133,6 +1333,8 @@ def main() -> int:
         "validate": cmd_validate,
         "list": cmd_list,
         "delete": cmd_delete,
+        "sweep": cmd_sweep,
+        "purge": cmd_purge,
     }
     return dispatch[args.command](args)
 

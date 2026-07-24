@@ -7,8 +7,9 @@ Measure how long BATCH audience evaluation actually takes in an AEP sandbox
 BATCH-evaluated ones, and reports the timing of recent batch segment jobs --
 the direct answer to "why is batch slow?".
 
-At startup it prompts you to pick a credential set from ./creds/ (the same
-credential bank used by credential_validator.py), authenticates against Adobe
+At startup it prompts you to pick a credential set from the OS keyring vault
+(Windows Credential Manager) via aep_creds -- falling back to a plaintext
+creds/ folder only where keyring is unavailable -- authenticates against Adobe
 IMS, then:
 
   1. Lists every audience in the sandbox (paged), tagging each with its
@@ -38,11 +39,14 @@ full as its feeders, so a feeder sitting at 0 is the first place to look.
 
 Read-only: it never creates, edits or deletes anything in AEP.
 
-VDI-friendly: stdlib only, no pip install required.
+Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
+with a plaintext creds/*.json fallback where keyring is unavailable; manage them
+with credential_validator_v2.py. Service names are the keys you stored -- run
+`credential_validator_v2.py list` to see them.
 
 Usage:
     python batch_eval_timing.py                 # interactive cred menu, dev sandbox
-    python batch_eval_timing.py prod            # pick creds/prod.json by stem
+    python batch_eval_timing.py prod            # pick the 'prod' service by name
     python batch_eval_timing.py --sandbox=stage # override sandbox
     python batch_eval_timing.py --jobs=50       # cap to 50 jobs (default: all)
     python batch_eval_timing.py --all-methods   # don't filter to batch-only
@@ -96,16 +100,17 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "batch_eval_timing"
-SCRIPT_VERSION = "1.2.0"
-SCRIPT_DATE = "2026-07-01"
+SCRIPT_VERSION = "1.3.0"
+SCRIPT_DATE = "2026-07-24"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDS_DIR = SCRIPT_DIR / "creds"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -200,21 +205,6 @@ def http(url, method="GET", headers=None, data=None, timeout=60):
         return r.read()
 
 
-def load_creds(path: Path):
-    """Read a creds/<name>.json file. Underscored keys are treated as inline
-    documentation and ignored. Requires client_id / client_secret / org_id."""
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    conf = {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in raw.items()
-        if not k.startswith("_")
-    }
-    for key in ("client_id", "client_secret", "org_id"):
-        if not conf.get(key):
-            raise ValueError(f"Missing required key {key!r} in {path.name}")
-    return conf
-
-
 def authenticate(conf):
     """client_credentials grant against Adobe IMS -> access token string."""
     payload = urllib.parse.urlencode({
@@ -243,37 +233,29 @@ def aep_headers(token, conf, sandbox):
 
 
 # ----------------------------------------------------------------------------
-# Credential bank menu (same UX as credential_validator.py)
+# Credential bank menu (keyring-backed; same UX as single_schema_extractor.py)
 # ----------------------------------------------------------------------------
-def discover_creds():
-    paths = []
-    if CREDS_DIR.exists():
-        for p in sorted(CREDS_DIR.glob("*.json")):
-            if p.stem == "example":
-                continue
-            paths.append(p)
-    return paths
-
-
-def menu(creds):
-    """Prompt for ONE credential set (this tool targets a single sandbox)."""
+def menu(services):
+    """Prompt for ONE credential set (this tool targets a single sandbox).
+    Takes the list of keyring service-name strings and returns the chosen name
+    (or None)."""
     print()
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Credential bank{ANSI['reset']}  "
-          f"{ANSI['dim']}({CREDS_DIR}){ANSI['reset']}")
+          f"{ANSI['dim']}(OS keyring vault){ANSI['reset']}")
     print(ANSI["cyan"] + "-" * 70 + ANSI["reset"])
-    for i, p in enumerate(creds, 1):
+    for i, name in enumerate(services, 1):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
-              f"{ANSI['yellow']}{p.stem:<20}{ANSI['reset']} "
-              f"{ANSI['dim']}{p.name}{ANSI['reset']}")
+              f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
+              f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
     raw = input(f"\nPick a credential set by number "
                 f"({ANSI['cyan']}1{ANSI['reset']}), blank to quit: ").strip()
     if not raw:
         return None
-    if raw.isdigit() and 1 <= int(raw) <= len(creds):
-        return creds[int(raw) - 1]
+    if raw.isdigit() and 1 <= int(raw) <= len(services):
+        return services[int(raw) - 1]
     logger.warning(f"Invalid choice: {raw}")
     return None
 
@@ -1719,7 +1701,7 @@ def parse_args(argv):
         elif a.startswith("-"):
             continue
         else:
-            opts["name"] = a  # creds stem
+            opts["name"] = a  # keyring service name
     return opts
 
 
@@ -1740,29 +1722,31 @@ def banner(conf, sandbox):
 def main():
     opts = parse_args(sys.argv[1:])
 
-    creds = discover_creds()
-    if not creds:
-        logger.error(f"No credential JSONs found in {CREDS_DIR}. "
-                     f"Drop your <tenant>.json files there.")
+    print(aep_creds.source_banner())
+    services = aep_creds.list_services()
+    if not services:
+        logger.error("No credentials found in the keyring vault or the creds/ "
+                     "folder. Add one with credential_validator_v2.py store "
+                     "(or migrate), or drop a <service>.json in creds/.")
         return
 
-    # Resolve which credential set to use: by stem on the CLI, else the menu.
+    # Resolve which credential set to use: by service name on the CLI, else menu.
     if opts["name"]:
-        by_stem = {p.stem: p for p in creds}
-        path = by_stem.get(opts["name"])
-        if not path:
-            logger.error(f"No credential set named {opts['name']!r} in {CREDS_DIR}")
+        try:
+            chosen = aep_creds.pick_service(opts["name"])
+        except aep_creds.CredsError as e:
+            logger.error(str(e))
             return
     else:
-        path = menu(creds)
-    if not path:
+        chosen = menu(services)
+    if not chosen:
         logger.info("Nothing chosen. Exiting.")
         return
 
     try:
-        conf = load_creds(path)
-    except Exception as e:
-        logger.error(f"Failed to load {path.name}: {e}")
+        conf = aep_creds.load_creds(chosen)
+    except aep_creds.CredsError as e:
+        logger.error(f"Failed to load credentials for {chosen!r}: {e}")
         return
 
     sandbox = opts["sandbox"] or conf.get("sandbox") or DEFAULT_SANDBOX
