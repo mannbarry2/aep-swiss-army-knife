@@ -787,7 +787,8 @@ def _get_json_retry(url, headers, timeout, attempts=3, pause=8, label=""):
     raise last
 
 
-def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30):
+def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30,
+                              meta_attempts=3, meta_pause=8):
     """Enumerate a batch's physical .parquet files as [(fid, name, length)].
     `length` is the file size in bytes (None if AEP omits it). Bounded to
     max_entries dataSetFileId entries so a snapshot with thousands of partitions
@@ -799,13 +800,15 @@ def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30):
     # enumeration that cold-504s, whereas the bare call returns the first ~100
     # physical files fast. Both are retried to ride out the cold-start 504.
     url = f"{EXPORT_URL}/batches/{bid}/files?limit={max_entries}"
-    files = _get_json_retry(url, headers, meta_timeout, label="batch files")
+    files = _get_json_retry(url, headers, meta_timeout, attempts=meta_attempts,
+                            pause=meta_pause, label="batch files")
     entries = (files.get("data") if isinstance(files, dict) else files) or []
     for fe in entries[:max_entries]:
         fid = fe.get("dataSetFileId")
         if not fid:
             continue
         meta = _get_json_retry(f"{EXPORT_URL}/files/{fid}", headers, meta_timeout,
+                               attempts=meta_attempts, pause=meta_pause,
                                label=f"file manifest {fid[:24]}")
         for phys in (meta.get("data") if isinstance(meta, dict) else meta) or []:
             name = phys.get("name") or ""
@@ -832,8 +835,14 @@ def _download_batch_rows(headers, bid, need, smallest_first=False,
     rows, total_bytes = [], 0
     # Snapshot listings are large/slow; give the metadata calls the same patience
     # as the file downloads when we're in the smallest-first (snapshot) path.
+    # A 504 on the SNAPSHOT manifest is expensive far beyond this one batch: the
+    # failure is cached and every remaining Profile-class schema is then skipped
+    # as coverage MISSING. Worth being markedly more patient on that path.
     cand = _list_batch_parquet_files(
-        headers, bid, meta_timeout=file_timeout if smallest_first else 30)
+        headers, bid,
+        meta_timeout=file_timeout if smallest_first else 30,
+        meta_attempts=6 if smallest_first else 3,
+        meta_pause=20 if smallest_first else 8)
     if smallest_first:
         # Unknown sizes (length is None) sort last so we prefer a known-small one.
         cand.sort(key=lambda c: (c[2] is None, c[2] if c[2] is not None else 0))
@@ -869,10 +878,13 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
     the Profile Snapshot Export path (smallest partition, longer timeout)."""
     headers = aep_headers(token, conf, sandbox)
     if not dsids:
-        return [], {"available": 0, "failed": 0, "empty_reads": 0}
+        return [], {"available": 0, "failed": 0, "empty_reads": 0,
+                    "list_failed": 0}
     per_ds = max(1, -(-target // len(dsids)))      # ceil(target / n)
     rows, total_bytes, total_batches = [], 0, 0
     available = failed = empty_reads = 0     # diagnostics: empty vs unreadable
+    list_failed = 0     # datasets whose batch LIST never returned (504/timeout):
+                        # we learned nothing about them, so 0 rows != empty
     t_start = time.perf_counter()
     logger.info(f"    sampling across {len(dsids)} dataset(s), "
                 f"~{per_ds} rows each (target {target}); streaming Parquet "
@@ -883,12 +895,18 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         need = min(per_ds, target - len(rows))
         try:
             url = f"{CATALOG_BATCHES_URL}?dataSet={dsid}&limit=20&orderBy=desc:created"
-            batches = json.loads(http(url, headers=headers)[0])
+            # Retried like the file manifests: Catalog gateway-504s under load,
+            # and a bare failure here used to read as "no batches" -> false EMPTY.
+            batches = _get_json_retry(url, headers, 60,
+                                      label=f"batch list {dsid[:24]}")
         except Exception as e:
+            list_failed += 1
             logger.warning(f"    dataset {di}/{len(dsids)} {dsid}: "
-                           f"batch list failed ({e}); skipping.")
+                           f"batch list failed ({e}); skipping -- this dataset's "
+                           f"contents are UNKNOWN, not empty.")
             continue
         if not isinstance(batches, dict):
+            list_failed += 1        # malformed response: also tells us nothing
             continue
         # Success batches that actually carry records (skip empty/control
         # partitions and still-loading batches), RICHEST first -- one big batch
@@ -937,7 +955,8 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
                 f"{total_bytes/1024/1024:.1f} MB streamed, "
                 f"{time.perf_counter() - t_start:.1f}s elapsed.")
     return rows[:target], {"available": available, "failed": failed,
-                           "empty_reads": empty_reads}
+                           "empty_reads": empty_reads,
+                           "list_failed": list_failed}
 
 
 def _extract_values(row, path):
@@ -1453,9 +1472,13 @@ def _coverage_status(k):
     """
     if k.get("datadict"):
         st = k.get("dd_sample_stats") or {}
-        if st.get("failed") or st.get("empty_reads"):
+        if st.get("failed") or st.get("empty_reads") or st.get("list_failed"):
+            lf = st.get("list_failed", 0)
             return ("partial", f"PARTIAL -- {st.get('failed', 0)} batch(es) failed "
-                    f"to read; coverage is understated")
+                    f"to read"
+                    + (f"; {lf} dataset(s) never listed (contents unknown)"
+                       if lf else "")
+                    + "; coverage is understated")
         return ("ok", "")
     reason = k.get("dd_empty_reason")
     if reason == "unreadable":
@@ -1913,7 +1936,18 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
             if not rows:
                 # Distinguish "genuinely empty" from "data exists but unreadable"
                 # so a 0% schema is never silently mistaken for an empty one.
-                if sstats["available"] == 0:
+                if sstats.get("list_failed"):
+                    # The batch LIST never returned for some dataset(s) -- we never
+                    # learned whether they carry records, so this is MISSING, not 0%.
+                    logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} -- "
+                                   f"0 records, but the batch list failed for "
+                                   f"{sstats['list_failed']} of {len(dsids)} "
+                                   f"dataset(s) (gateway/timeout). NOT confirmed "
+                                   f"empty -- contents unknown, coverage MISSING.")
+                    k["dd_empty_reason"] = "unreadable"
+                    if smallest_first:      # the snapshot itself failed -- cache it
+                        snap_unreadable = True
+                elif sstats["available"] == 0:
                     logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} -- "
                                    f"0 records: EMPTY (no batch in any of its "
                                    f"{len(dsids)} dataset(s) carries records). "
