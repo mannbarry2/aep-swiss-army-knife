@@ -61,6 +61,33 @@ per-journey GETs (the list payload carries status), so you don't fire a GET per
 journey when you only want some. --limit N samples the first N. --no-eval drops
 the Streaming/Batch + tag columns for a quick id/name/status-only run.
 
+------------------------------------------------------------------------------
+AUDIENCE TAG INVENTORY (--audiences)
+------------------------------------------------------------------------------
+A separate report over the AUDIENCE estate rather than the journey->audience
+view above: every audience in each sandbox, with its tags resolved to names.
+Used to track how far a tagging convention has actually been rolled out.
+
+  python ajo_journey_checker.py --creds "<svc>" --audiences \
+      --sandbox "prod,roi-prod,sk-prod,hu-prod,cz-prod" --highlight HST
+
+--sandbox takes a comma list here (or 'all-prod' to discover every production
+sandbox from the sandbox-management API). --highlight <text> flags matching tags
+in the console and shades them in the workbook.
+
+Two wrinkles this handles, both of which would otherwise distort the counts:
+  * Audience tags[] mixes UUID references into the org's Unified Tags vocabulary
+    with machine-written "key:value" system stamps (Audience Portal halo
+    refreshes). Only the former is human tagging; the latter is counted
+    separately in a "System tags" column.
+  * The vocabulary is fetched ONCE in bulk (~140 tags) rather than a lookup per
+    audience, so thousands of audiences resolve in seconds.
+
+Output: output/audience_tags_<service>_<date>.xlsx -- a Tag Summary tab
+(tag x sandbox counts) and an Audiences tab (one row per audience). A "Data
+completeness" tab appears only when paging failed for a sandbox, so a short
+list is never mistaken for the whole estate.
+
 Read-only: every call is a GET. Nothing is written to AEP/AJO. Stdlib only.
 """
 from __future__ import annotations
@@ -366,6 +393,280 @@ def journey_tags(token, api_key, conf, sandbox, journey, cache):
     return ", ".join(tag_name(token, api_key, conf, sandbox, t, cache) for t in ids)
 
 
+# ----------------------------------------------------------------------------
+# Audience TAG inventory (--audiences)
+# ----------------------------------------------------------------------------
+# Audiences carry tags in two different shapes on the SAME tags[] list:
+#   * a bare UUID          -> a reference into the org's Unified Tags vocabulary;
+#                             the human name only exists in that service.
+#   * a "key:value" string -> a machine-written system tag (Audience Portal's
+#                             halo refresh stamps, etc). Not user tagging, and it
+#                             would swamp the report if counted as such.
+# We resolve the former and quarantine the latter.
+SANDBOX_LIST_URL = ("https://platform.adobe.io/data/foundation/"
+                    "sandbox-management/sandboxes")
+SYSTEM_TAG_PREFIXES = ("audience_portal_",)
+
+
+def list_sandboxes(token, api_key, conf, production_only=True):
+    """Sandbox names visible to the credential. production_only keeps type=production."""
+    body, _ = http(SANDBOX_LIST_URL,
+                   headers=ajo_headers(token, api_key, conf["org_id"], "prod"),
+                   timeout=60)
+    sbs = (json.loads(body) or {}).get("sandboxes") or []
+    return [s.get("name") for s in sbs
+            if s.get("name") and s.get("state") == "active"
+            and (not production_only or s.get("type") == "production")]
+
+
+def fetch_tag_vocabulary(token, api_key, conf, sandbox):
+    """{tag_id: tag_name} for the whole org, paged from the Unified Tags service.
+    One bulk walk instead of a GET per tag id -- the vocabulary is small (~140)
+    while the audiences referencing it run to thousands."""
+    vocab, cursor, guard = {}, None, 0
+    while guard < 100:
+        guard += 1
+        url = f"{UNIFIED_TAGS_URL}?limit=100"
+        if cursor:
+            url += f"&start={urllib.parse.quote(str(cursor))}"
+        try:
+            body, _ = http(url, headers=ajo_headers(token, api_key,
+                                                    conf["org_id"], sandbox),
+                           timeout=60)
+            page = json.loads(body) or {}
+        except Exception as e:
+            logger.warning(f"  tag vocabulary page {guard} failed "
+                           f"({type(e).__name__}: {e}); names may fall back to ids.")
+            break
+        items = page.get("tags") or []
+        if not items:
+            break
+        for t in items:
+            if t.get("id"):
+                vocab[t["id"]] = t.get("name") or t["id"][:8]
+        cursor = (page.get("_page") or {}).get("next")
+        if not cursor:
+            break
+    return vocab
+
+
+def fetch_all_audiences(token, api_key, conf, sandbox):
+    """Every audience in a sandbox, paged in full. Returns (audiences, complete).
+
+    `complete` is False when the walk ended before totalCount -- the caller must
+    say so rather than presenting a short list as the whole estate.
+    """
+    out, seen, cursor, guard, total = [], set(), None, 0, None
+    while guard < 500:
+        guard += 1
+        url = f"{AUDIENCES_URL}?limit=100"
+        if cursor is not None:
+            url += f"&start={urllib.parse.quote(str(cursor))}"
+        try:
+            body, _ = http(url, headers=ajo_headers(token, api_key,
+                                                    conf["org_id"], sandbox),
+                           timeout=90)
+            page = json.loads(body) or {}
+        except Exception as e:
+            logger.warning(f"  {sandbox}: audience page {guard} failed "
+                           f"({type(e).__name__}: {e}); list is INCOMPLETE.")
+            return out, False
+        kids = page.get("children") or []
+        meta = page.get("_page") or {}
+        if total is None:
+            total = meta.get("totalCount")
+        for c in kids:
+            if c.get("id") and c["id"] not in seen:
+                seen.add(c["id"])
+                out.append(c)
+        if not kids:
+            break
+        cursor = meta.get("next")
+        if cursor is None:
+            break
+    complete = total is None or len(out) >= int(total)
+    if not complete:
+        logger.warning(f"  {sandbox}: collected {len(out)} of {total} audience(s) "
+                       f"-- list is INCOMPLETE.")
+    return out, complete
+
+
+def audience_eval_type(aud: dict) -> str:
+    """Streaming / Edge / Batch from the evaluationInfo carried on the LIST
+    payload (no per-audience GET needed). '' when the record omits it."""
+    ei = aud.get("evaluationInfo") or {}
+    if (ei.get("continuous") or {}).get("enabled"):
+        return "Streaming"
+    if (ei.get("synchronous") or {}).get("enabled"):
+        return "Edge"
+    if (ei.get("batch") or {}).get("enabled"):
+        return "Batch"
+    return ""
+
+
+def split_audience_tags(aud: dict, vocab: dict):
+    """(named_tags, system_tags, unresolved_ids) for one audience.
+
+    named  -- resolved against the Unified Tags vocabulary: the human tagging
+              this report is actually about.
+    system -- machine-written key:value stamps, kept out of the counts.
+    unresolved -- UUIDs with no vocabulary entry (deleted tag, or a tag the
+              credential cannot see). Reported rather than silently dropped.
+    """
+    named, system, unresolved = [], [], []
+    for t in (aud.get("tags") or []):
+        t = str(t)
+        if ":" in t or t.startswith(SYSTEM_TAG_PREFIXES):
+            system.append(t)
+        elif t in vocab:
+            named.append(vocab[t])
+        else:
+            unresolved.append(t)
+    return sorted(set(named)), system, unresolved
+
+
+def build_audience_rows(token, api_key, conf, sandboxes, highlight=""):
+    """Walk each sandbox and return (rows, tally, incomplete) for the report."""
+    rows, tally, incomplete = [], {}, []
+    vocab = {}
+    for sb in sandboxes:
+        if not vocab:
+            vocab = fetch_tag_vocabulary(token, api_key, conf, sb)
+            logger.info(f"  tag vocabulary: {len(vocab)} tag(s) in the org.")
+        logger.info(f"  {sb}: listing audiences ...")
+        auds, complete = fetch_all_audiences(token, api_key, conf, sb)
+        if not complete:
+            incomplete.append(sb)
+        tagged = 0
+        for a in auds:
+            named, system, unresolved = split_audience_tags(a, vocab)
+            if named:
+                tagged += 1
+            for n in named:
+                tally.setdefault(n, {}).setdefault(sb, 0)
+                tally[n][sb] += 1
+            rows.append([
+                sb, a.get("name") or "", a.get("id") or "",
+                audience_eval_type(a), a.get("lifecycleState") or "",
+                ", ".join(named),
+                len(named),
+                ", ".join(t[:8] for t in unresolved),
+                len(system),
+            ])
+        hi = ""
+        if highlight:
+            n_hi = sum(1 for r in rows if r[0] == sb
+                       and highlight.lower() in str(r[5]).lower())
+            hi = f", {n_hi} matching {highlight!r}"
+        pct = (tagged / len(auds) * 100) if auds else 0
+        logger.info(f"  {sb}: {len(auds)} audience(s), {tagged} tagged "
+                    f"({pct:.0f}%){hi}.")
+    return rows, tally, incomplete
+
+
+def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
+                        highlight=""):
+    """Two tabs: every audience with its tags, and a tag x sandbox summary."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    hdr_fill = PatternFill("solid", fgColor="1F4E78")
+    hit_fill = PatternFill("solid", fgColor="FFF2CC")
+
+    def style(ws, headers, widths):
+        for c in ws[1]:
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = hdr_fill
+            c.alignment = Alignment(vertical="center")
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+    wb = Workbook()
+
+    # --- Tag summary: the status-report view (tag x sandbox counts) ---
+    ws = wb.active
+    ws.title = "Tag Summary"
+    headers = ["Tag"] + list(sandboxes) + ["Total"]
+    ws.append(headers)
+    for tag in sorted(tally, key=lambda t: (-sum(tally[t].values()), t.lower())):
+        counts = [tally[tag].get(sb, 0) for sb in sandboxes]
+        ws.append([tag] + counts + [sum(counts)])
+        if highlight and highlight.lower() in tag.lower():
+            for c in ws[ws.max_row]:
+                c.fill = hit_fill
+                c.font = Font(bold=True)
+    style(ws, headers, [34] + [12] * len(sandboxes) + [10])
+
+    # --- Every audience, with its tags ---
+    ws2 = wb.create_sheet("Audiences")
+    headers2 = ["Sandbox", "Audience name", "Audience id", "Evaluation",
+                "Lifecycle", "Tags", "Tag count", "Unresolved tag ids",
+                "System tags"]
+    ws2.append(headers2)
+    for r in rows:
+        ws2.append(r)
+        if highlight and highlight.lower() in str(r[5]).lower():
+            for c in ws2[ws2.max_row]:
+                c.fill = hit_fill
+    style(ws2, headers2, (12, 52, 38, 12, 14, 40, 11, 24, 12))
+
+    if incomplete:
+        ws3 = wb.create_sheet("Data completeness")
+        ws3.append(["Sandbox", "Warning"])
+        for sb in incomplete:
+            ws3.append([sb, "Audience list INCOMPLETE -- paging failed; counts "
+                            "for this sandbox understate the estate."])
+        style(ws3, ["Sandbox", "Warning"], (16, 90))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_path)
+
+
+def run_audience_report(service, conf, token, api_key, opts):
+    """--audiences: tag inventory across one or more sandboxes."""
+    sandboxes = opts["sandboxes"]
+    if sandboxes == ["all-prod"]:
+        sandboxes = list_sandboxes(token, api_key, conf, production_only=True)
+        logger.info(f"  production sandboxes: {', '.join(sandboxes)}")
+    highlight = opts["highlight"]
+    rows, tally, incomplete = build_audience_rows(
+        token, api_key, conf, sandboxes, highlight=highlight)
+
+    print()
+    logger.info(f"{len(rows)} audience(s) across {len(sandboxes)} sandbox(es); "
+                f"{len(tally)} distinct tag(s) in use.")
+    if highlight:
+        hits = {t: v for t, v in tally.items() if highlight.lower() in t.lower()}
+        if hits:
+            for t, v in sorted(hits.items()):
+                spread = ", ".join(f"{sb}={n}" for sb, n in sorted(v.items()))
+                logger.info(f"  {ANSI['green']}{highlight} match:{ANSI['reset']} "
+                            f"{t} -- {sum(v.values())} audience(s) ({spread})")
+        else:
+            logger.warning(f"  no tag matching {highlight!r} is applied to any "
+                           f"audience in these sandbox(es).")
+    if incomplete:
+        logger.warning(f"  INCOMPLETE sandbox(es): {', '.join(incomplete)} -- "
+                       f"counts understate the estate.")
+
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    default = OUTPUT_DIR / (f"audience_tags_{service.replace(' ', '_')}_{stamp}.xlsx")
+    out_path = Path(opts["out"]) if opts["out"] else default
+    try:
+        write_audience_xlsx(rows, tally, sandboxes, out_path,
+                            incomplete=incomplete, highlight=highlight)
+        logger.info(f"Wrote {out_path}")
+    except PermissionError:
+        alt = out_path.with_name(out_path.stem + "_new" + out_path.suffix)
+        write_audience_xlsx(rows, tally, sandboxes, alt,
+                            incomplete=incomplete, highlight=highlight)
+        logger.warning(f"{out_path.name} is locked (open in Excel?) - wrote "
+                       f"{alt.name} instead.")
+
+
 def extract_audiences(journey: dict) -> list[dict]:
     """Pull every audience/segment reference out of a journey definition,
     regardless of how it's used. Returns a de-duped list of
@@ -576,6 +877,12 @@ def run_checker(service, opts, services):
     print(f"  {ANSI['green']}[OK] token minted fresh{ANSI['reset']}")
     print()
 
+    # --audiences is a standalone report over the AUDIENCE estate (every audience
+    # in each sandbox), not the journey->audience view below.
+    if opts["audiences"]:
+        run_audience_report(service, conf, token, api_key, opts)
+        return
+
     ids = list(opts["ids"])
     want_status = opts["status"]            # set of lowercased statuses, or None
     status_post_filter = bool(want_status)  # cleared if we filter pre-GET on list data
@@ -725,7 +1032,8 @@ def run_checker(service, opts, services):
 def parse_args(argv):
     opts = {"creds": None, "api_key": None, "sandbox": "prod", "list": False,
             "limit": 0, "xlsx": False, "out": None, "eval": True,
-            "status": None, "workers": 16, "ids": []}
+            "status": None, "workers": 16, "ids": [],
+            "audiences": False, "sandboxes": None, "highlight": ""}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -735,6 +1043,10 @@ def parse_args(argv):
             opts["api_key"] = argv[i + 1]; i += 2; continue
         if a in ("--sandbox", "-s") and i + 1 < len(argv):
             opts["sandbox"] = argv[i + 1]; i += 2; continue
+        if a == "--audiences":
+            opts["audiences"] = True; i += 1; continue
+        if a == "--highlight" and i + 1 < len(argv):
+            opts["highlight"] = argv[i + 1]; i += 2; continue
         if a == "--list":
             opts["list"] = True; i += 1; continue
         if a in ("--limit", "-n") and i + 1 < len(argv):
@@ -753,6 +1065,10 @@ def parse_args(argv):
         if a.startswith("-"):
             i += 1; continue
         opts["ids"].append(a); i += 1
+    # --audiences reads several sandboxes in one run, so --sandbox takes a comma
+    # list (or 'all-prod' to discover every production sandbox).
+    opts["sandboxes"] = [s.strip() for s in str(opts["sandbox"]).split(",")
+                         if s.strip()] or ["prod"]
     return opts
 
 
@@ -789,7 +1105,8 @@ def main():
             opts["api_key"] = pick_api_key(services, service)
 
     # No ids and no --list from an interactive pick -> default to listing all.
-    if not opts["ids"] and not opts["list"]:
+    # (--audiences is its own report and never wants the journey walk.)
+    if not opts["ids"] and not opts["list"] and not opts["audiences"]:
         opts["list"] = True
 
     run_checker(service, opts, services)
