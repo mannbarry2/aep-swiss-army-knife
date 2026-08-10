@@ -893,17 +893,35 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         if len(rows) >= target:
             break
         need = min(per_ds, target - len(rows))
-        try:
-            url = f"{CATALOG_BATCHES_URL}?dataSet={dsid}&limit=20&orderBy=desc:created"
-            # Retried like the file manifests: Catalog gateway-504s under load,
-            # and a bare failure here used to read as "no batches" -> false EMPTY.
-            batches = _get_json_retry(url, headers, 60,
-                                      label=f"batch list {dsid[:24]}")
-        except Exception as e:
+        # status=success is filtered SERVER-side, and it matters far beyond
+        # tidiness: on a continuously-landing feed (an Adobe Analytics one, say)
+        # asking Catalog to sort every batch it has ever held blows the gateway
+        # timeout, and the dataset reads as permanently unavailable. Filtering
+        # first turns a reliable 504 into a ~16s response. We still re-check
+        # status below, since this only narrows what we have to sort.
+        base = f"{CATALOG_BATCHES_URL}?dataSet={dsid}&limit=20&status=success"
+        shapes = [(f"{base}&orderBy=desc:created", "newest-first"),
+                  (base, "unsorted")]      # drop the sort if it still times out
+        batches, last_err = None, None
+        for url, shape in shapes:
+            try:
+                # Retried like the file manifests: Catalog gateway-504s under
+                # load, and a bare failure here used to read as "no batches"
+                # -> false EMPTY.
+                batches = _get_json_retry(url, headers, 60,
+                                          label=f"batch list {dsid[:24]} ({shape})")
+                break
+            except Exception as e:
+                last_err = e
+                if shape != shapes[-1][1]:
+                    logger.info(f"      {ANSI['dim']}batch list {shape} failed "
+                                f"({type(e).__name__}); trying a cheaper query "
+                                f"shape{ANSI['reset']}")
+        if batches is None:
             list_failed += 1
             logger.warning(f"    dataset {di}/{len(dsids)} {dsid}: "
-                           f"batch list failed ({e}); skipping -- this dataset's "
-                           f"contents are UNKNOWN, not empty.")
+                           f"batch list failed ({last_err}); skipping -- this "
+                           f"dataset's contents are UNKNOWN, not empty.")
             continue
         if not isinstance(batches, dict):
             list_failed += 1        # malformed response: also tells us nothing
