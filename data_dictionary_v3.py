@@ -749,6 +749,28 @@ def _batch_record_count(b):
     return -1
 
 
+def _is_consolidation_batch(b):
+    """True for a batch AEP's own compaction job produced by merging others.
+
+    Catalog advertises these as ordinary status=success batches carrying the
+    combined record count -- so they sort to the top of our richest-first list
+    -- but the Data Access API refuses them outright:
+
+        DTAC-4000  "The queried batch is a consolidation batch, which is not
+                    supported by Data Access API now."
+
+    Nothing is lost by skipping them: the batches they absorbed are listed in
+    their own replay.predecessors and Catalog still serves those individually.
+    """
+    tags = b.get("tags") or {}
+    workflow = tags.get("acp_workflow") or []
+    if isinstance(workflow, str):
+        workflow = [workflow]
+    if any("consolidation" in str(w).lower() for w in workflow):
+        return True
+    return "compaction" in str(b.get("createdClient") or "").lower()
+
+
 def _read_parquet_rows(raw_bytes, limit):
     """Parse only up to `limit` rows (row-group streaming) so a million-row
     file isn't fully materialised into memory just to sample a handful."""
@@ -899,24 +921,38 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         # timeout, and the dataset reads as permanently unavailable. Filtering
         # first turns a reliable 504 into a ~16s response. We still re-check
         # status below, since this only narrows what we have to sort.
-        base = f"{CATALOG_BATCHES_URL}?dataSet={dsid}&limit=20&status=success"
-        shapes = [(f"{base}&orderBy=desc:created", "newest-first"),
-                  (base, "unsorted")]      # drop the sort if it still times out
+        # ...and when even that times out, ask for FEWER batches. Adobe says as
+        # much in the 504 body ("This request timed out on database, please
+        # optimize your request"): it is the PAGE SIZE that decides whether the
+        # query returns, not the sort. Measured on the heaviest datasets --
+        # limit=20 dies, limit=5 answers in ~5s, limit=1 always answers. Fewer
+        # batches means a smaller sample pool, which is a real cost, but a
+        # narrower sample beats no coverage at all. Earlier rungs retry only
+        # twice: dropping to a smaller page beats waiting on a page size this
+        # dataset has already outgrown.
+        base = f"{CATALOG_BATCHES_URL}?dataSet={dsid}&status=success&orderBy=desc:created"
+        shapes = [(f"{base}&limit=20", "limit 20", 2),
+                  (f"{base}&limit=5", "limit 5", 2),
+                  (f"{base}&limit=1", "limit 1", 3)]
         batches, last_err = None, None
-        for url, shape in shapes:
+        for url, shape, tries in shapes:
             try:
                 # Retried like the file manifests: Catalog gateway-504s under
                 # load, and a bare failure here used to read as "no batches"
                 # -> false EMPTY.
-                batches = _get_json_retry(url, headers, 60,
+                batches = _get_json_retry(url, headers, 60, attempts=tries,
                                           label=f"batch list {dsid[:24]} ({shape})")
+                if shape != shapes[0][1]:
+                    logger.info(f"      {ANSI['dim']}{shape} succeeded -- sample "
+                                f"pool for this dataset is narrower than "
+                                f"usual{ANSI['reset']}")
                 break
             except Exception as e:
                 last_err = e
                 if shape != shapes[-1][1]:
                     logger.info(f"      {ANSI['dim']}batch list {shape} failed "
-                                f"({type(e).__name__}); trying a cheaper query "
-                                f"shape{ANSI['reset']}")
+                                f"({type(e).__name__}); asking for fewer "
+                                f"batches{ANSI['reset']}")
         if batches is None:
             list_failed += 1
             logger.warning(f"    dataset {di}/{len(dsids)} {dsid}: "
@@ -932,7 +968,8 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         # through dozens of tiny 1-row batches.
         succ_items = [(bid, b) for bid, b in batches.items()
                       if isinstance(b, dict) and b.get("status") == "success"
-                      and _batch_record_count(b) != 0]
+                      and _batch_record_count(b) != 0
+                      and not _is_consolidation_batch(b)]
         succ_items.sort(key=lambda kv: _batch_record_count(kv[1]), reverse=True)
         succ = [bid for bid, _ in succ_items]
         available += len(succ)
