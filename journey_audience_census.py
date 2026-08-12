@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """
-ajo_journey_checker.py  (AEP Swiss Army Knife)
-==============================================
-Read Adobe Journey Optimizer (AJO) journeys and pull out the AUDIENCE behind
-each one -- whether the journey READS an audience (a read-audience node) or is
-triggered by AUDIENCE QUALIFICATION (a profile qualifying for a segment). The
-end goal is a journey -> audience table, and from it a per-audience view of
-which journeys consume each audience.
+journey_audience_census.py  (AEP Swiss Army Knife)
+==================================================
+A census of the two things that drive customer contact in this org: JOURNEYS
+and AUDIENCES (the latter formerly known as segments). Two independent reports
+live here, because they answer different questions:
+
+  --list        every Adobe Journey Optimizer journey, and the AUDIENCE behind
+                each one -- whether the journey READS an audience (a
+                read-audience node) or is triggered by AUDIENCE QUALIFICATION
+                (a profile qualifying for a segment). Gives a journey ->
+                audience table, and from it a per-audience view of which
+                journeys consume each audience.
+
+  --audiences   every audience in each sandbox, with its tags, evaluation type
+                and segmentation rule (PQL). Note this is the WHOLE audience
+                estate -- the journey report above only ever sees the audiences
+                some journey happens to reference.
 
 Credentials come from the shared aep_creds layer: the OS keyring vault first,
 falling back to a plaintext creds/ folder where keyring is unavailable. Run
@@ -48,10 +58,10 @@ point --creds at it.
 ------------------------------------------------------------------------------
 USAGE
 ------------------------------------------------------------------------------
-  python ajo_journey_checker.py                       # interactive picker, then --list
-  python ajo_journey_checker.py --creds "acme alpha" --api-key <ajo-api-key> --list
-  python ajo_journey_checker.py --creds "acme alpha" --api-key <key> <journeyId> [...]
-  python ajo_journey_checker.py --creds "acme alpha" --api-key <key> --sandbox dev <journeyId>
+  python journey_audience_census.py                       # interactive picker, then --list
+  python journey_audience_census.py --creds "acme alpha" --api-key <ajo-api-key> --list
+  python journey_audience_census.py --creds "acme alpha" --api-key <key> <journeyId> [...]
+  python journey_audience_census.py --creds "acme alpha" --api-key <key> --sandbox dev <journeyId>
 
 --list pages the ENTIRE journey estate (~1,300), not just the recently-modified
 default. The per-journey GETs (and the Streaming/Batch + tag enrichment) run in
@@ -68,7 +78,7 @@ A separate report over the AUDIENCE estate rather than the journey->audience
 view above: every audience in each sandbox, with its tags resolved to names.
 Used to track how far a tagging convention has actually been rolled out.
 
-  python ajo_journey_checker.py --creds "<svc>" --audiences \
+  python journey_audience_census.py --creds "<svc>" --audiences \
       --sandbox "prod,roi-prod,sk-prod,hu-prod,cz-prod" --highlight HST
 
 --sandbox takes a comma list here (or 'all-prod' to discover every production
@@ -83,10 +93,11 @@ Two wrinkles this handles, both of which would otherwise distort the counts:
   * The vocabulary is fetched ONCE in bulk (~140 tags) rather than a lookup per
     audience, so thousands of audiences resolve in seconds.
 
-Output: output/audience_tags_<service>_<date>.xlsx -- a Tag Summary tab
-(tag x sandbox counts) and an Audiences tab (one row per audience). A "Data
-completeness" tab appears only when paging failed for a sandbox, so a short
-list is never mistaken for the whole estate.
+Output: output/audiences_<sandbox>_<date>.xlsx -- one row per audience, with its
+tags, evaluation type and segmentation rule (PQL). A "Data completeness" tab
+appears only when paging failed for a sandbox, so a short list is never mistaken
+for the whole estate. The filename carries no credential name: which credential
+read the data says nothing about the data.
 
 Read-only: every call is a GET. Nothing is written to AEP/AJO. Stdlib only.
 """
@@ -105,7 +116,7 @@ from pathlib import Path
 
 import aep_creds  # keyring-first credential store, plaintext creds/ fallback
 
-SCRIPT_NAME    = "ajo_journey_checker"
+SCRIPT_NAME    = "journey_audience_census"
 SCRIPT_VERSION = "1.1.0"
 SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
@@ -173,7 +184,7 @@ class ColoredFormatter(logging.Formatter):
 _handler = logging.StreamHandler(sys.stdout)
 _handler.setFormatter(ColoredFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
-logger = logging.getLogger("ajo_journey_checker")
+logger = logging.getLogger("journey_audience_census")
 SSL_CTX = ssl._create_unverified_context()
 
 
@@ -491,6 +502,151 @@ def fetch_all_audiences(token, api_key, conf, sandbox):
     return out, complete
 
 
+# ----------------------------------------------------------------------------
+# PQL rendering
+# ----------------------------------------------------------------------------
+# An audience's rule comes back as 'pql/json': Adobe's syntax TREE, not the PQL
+# you see in the UI. There is no supported way to ask for the text form -- every
+# format/expressionFormat parameter still returns json, and the conversion
+# endpoint is not available to a read-only credential -- so we render it here.
+#
+# The grammar is large (15 node types, 34 functions, trees up to 17 deep). We
+# render the shapes that make up the overwhelming majority -- boolean logic,
+# comparisons, field paths, segment references -- and REFUSE to guess at the
+# rest. Event-sequence and time-window nodes emit a visible <...> marker and set
+# the "partial" flag, so a half-rendered rule can never be mistaken for a whole
+# one. The raw tree is always kept in its own column.
+PQL_INFIX = {"and": "and", "or": "or", "=": "=", ">": ">", "<": "<",
+             ">=": ">=", "<=": "<=", "!=": "!=", "equals": "=",
+             "notEqualTo": "!="}
+PQL_WORDY = {"startsWith": "starts with", "endsWith": "ends with",
+             "contains": "contains", "doesNotContain": "does not contain",
+             "in": "in", "notIn": "not in"}
+# Nodes describing event sequences / time windows. Rendering these faithfully is
+# a project in itself; misrendering one would quietly change what the rule means.
+PQL_COMPLEX = {"chain", "occurs", "timeQualification", "duration", "select",
+               "varDecl", "element", "gap", "range"}
+XL_CELL_LIMIT = 32000          # Excel's hard ceiling is 32767
+
+
+def _pql_literal(node):
+    v = node.get("value")
+    lt = node.get("literalType")
+    if lt == "List" and isinstance(v, list):
+        return "[" + ", ".join(_pql_literal({"value": x, "literalType": "String"}
+                                            if isinstance(x, str) else {"value": x})
+                               for x in v) + "]"
+    if isinstance(v, str) and lt in ("String", "Timestamp", "TimeDirection",
+                                     "TimeUnit", "Comparison", None):
+        return f'"{v}"'
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def _pql_path(node, state):
+    """Dotted field path. The base is a parameter/var reference and contributes
+    nothing readable, so it is dropped: v0._experience.x -> _experience.x"""
+    parts = []
+    cur = node
+    while isinstance(cur, dict) and cur.get("nodeType") == "fieldLookup":
+        parts.append(cur.get("fieldName") or "?")
+        cur = cur.get("object")
+    if isinstance(cur, dict) and cur.get("nodeType") not in (
+            "parameterReference", "varRef", None):
+        head = _render_node(cur, state)
+        if head:
+            parts.append(head)
+    return ".".join(reversed(parts))
+
+
+def _render_node(node, state):
+    if node is None:
+        return ""
+    if isinstance(node, list):
+        return ", ".join(_render_node(n, state) for n in node)
+    if not isinstance(node, dict):
+        return str(node)
+
+    nt = node.get("nodeType")
+    if nt in PQL_COMPLEX:
+        state["partial"] = True
+        state["complex"].add(nt)
+        return f"<{nt}: see raw>"
+    if nt == "literal":
+        return _pql_literal(node)
+    if nt == "fieldLookup":
+        return _pql_path(node, state)
+    if nt in ("parameterReference", "varRef"):
+        return ""                       # the implicit profile/event being tested
+    if nt == "lambda":
+        return _render_node(node.get("body"), state)
+    if nt != "fnApply":
+        state["partial"] = True
+        state["complex"].add(nt or "unknown")
+        return f"<{nt or 'unknown'}: see raw>"
+
+    fn = node.get("fnName")
+    params = node.get("params") or []
+
+    if fn == "inSegment" and params:
+        sid = (params[0] or {}).get("value")
+        name = state["segments"].get(sid)
+        return f'inSegment("{name}")' if name else f'inSegment({sid})'
+    if fn == "not" and len(params) == 1:
+        return f"not ({_render_node(params[0], state)})"
+    if fn in ("exists", "isNotNull") and params:
+        return f"{_render_node(params[0], state)} exists"
+    if fn == "isNull" and params:
+        return f"{_render_node(params[0], state)} is null"
+    # stringCompare NAMES its comparison in the first parameter -- it is
+    # stringCompare(<op>, <field>, <value>), not an infix pair. Treating it as
+    # infix renders the operator itself as the left-hand operand.
+    if fn == "stringCompare" and len(params) >= 3:
+        op = (params[0] or {}).get("value") or "compares"
+        return (f"{_render_node(params[1], state)} {op} "
+                f"{_render_node(params[2], state)}")
+    if fn == "get" and len(params) >= 2:
+        base = _render_node(params[0], state)
+        fld = (params[1] or {}).get("value") or _render_node(params[1], state)
+        return f"{base}.{fld}" if base else str(fld)
+    if fn in PQL_INFIX and len(params) >= 2:
+        op = PQL_INFIX[fn]
+        # equals/stringCompare carry a trailing case-sensitivity flag
+        operands = params[:2] if fn in ("equals", "stringCompare") else params
+        rendered = [_render_node(p, state) for p in operands]
+        joined = f" {op} ".join(r for r in rendered if r != "")
+        return f"({joined})" if op in ("and", "or") and len(rendered) > 1 else joined
+    if fn in PQL_WORDY and len(params) >= 2:
+        return (f"{_render_node(params[0], state)} {PQL_WORDY[fn]} "
+                f"{_render_node(params[1], state)}")
+    args = ", ".join(r for r in (_render_node(p, state) for p in params) if r != "")
+    return f"{fn}({args})"
+
+
+def render_pql(expression, segments):
+    """(readable_text, raw_text, partial) for an audience's expression.
+
+    partial=True means at least one node could not be rendered faithfully and
+    appears as a <marker>; the row is labelled so nobody reads it as complete.
+    """
+    if not expression:
+        return "", "", False
+    raw = expression.get("value")
+    raw_text = raw if isinstance(raw, str) else json.dumps(raw)
+    if expression.get("format") == "pql/text":
+        return str(raw_text), str(raw_text), False
+    try:
+        tree = json.loads(raw_text) if isinstance(raw_text, str) else raw_text
+    except (ValueError, TypeError):
+        return "", str(raw_text), True
+    state = {"segments": segments, "partial": False, "complex": set()}
+    text = _render_node(tree, state)
+    if state["partial"] and state["complex"]:
+        text = f"[PARTIAL: {', '.join(sorted(state['complex']))}] {text}"
+    return text, str(raw_text), state["partial"]
+
+
 def audience_eval_type(aud: dict) -> str:
     """Streaming / Edge / Batch from the evaluationInfo carried on the LIST
     payload (no per-audience GET needed). '' when the record omits it."""
@@ -537,7 +693,14 @@ def build_audience_rows(token, api_key, conf, sandboxes, highlight=""):
         auds, complete = fetch_all_audiences(token, api_key, conf, sb)
         if not complete:
             incomplete.append(sb)
-        tagged = 0
+        # inSegment() references another audience by id -- resolve to its name so
+        # the rule reads as prose. Built per sandbox: ids are sandbox-scoped.
+        seg_names = {}
+        for a in auds:
+            for key in ("id", "audienceId"):
+                if a.get(key):
+                    seg_names[a[key]] = a.get("name") or ""
+        tagged = n_pql = n_partial = 0
         for a in auds:
             named, system, unresolved = split_audience_tags(a, vocab)
             if named:
@@ -545,14 +708,24 @@ def build_audience_rows(token, api_key, conf, sandboxes, highlight=""):
             for n in named:
                 tally.setdefault(n, {}).setdefault(sb, 0)
                 tally[n][sb] += 1
+            pql, pql_raw, partial = render_pql(a.get("expression"), seg_names)
+            if pql:
+                n_pql += 1
+                n_partial += bool(partial)
             rows.append([
                 sb, a.get("name") or "", a.get("id") or "",
                 audience_eval_type(a), a.get("lifecycleState") or "",
                 ", ".join(named),
                 len(named),
+                a.get("namespace") or "",
+                pql[:XL_CELL_LIMIT],
+                "partial" if partial else ("yes" if pql else ""),
+                pql_raw[:XL_CELL_LIMIT],
                 ", ".join(t[:8] for t in unresolved),
                 len(system),
             ])
+        logger.info(f"  {sb}: {n_pql} audience(s) carry a rule "
+                    f"({n_partial} only partly renderable).")
         hi = ""
         if highlight:
             n_hi = sum(1 for r in rows if r[0] == sb
@@ -566,7 +739,11 @@ def build_audience_rows(token, api_key, conf, sandboxes, highlight=""):
 
 def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
                         highlight=""):
-    """Two tabs: every audience with its tags, and a tag x sandbox summary."""
+    """One row per audience: tags, evaluation type and its rule (PQL).
+
+    A "Data completeness" tab is added only when a sandbox's listing failed, so
+    a short list is never mistaken for the whole estate. `tally` is still used
+    for the console tag summary -- it just doesn't get a tab of its own."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
@@ -586,24 +763,14 @@ def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
 
     wb = Workbook()
 
-    # --- Tag summary: the status-report view (tag x sandbox counts) ---
-    ws = wb.active
-    ws.title = "Tag Summary"
-    headers = ["Tag"] + list(sandboxes) + ["Total"]
-    ws.append(headers)
-    for tag in sorted(tally, key=lambda t: (-sum(tally[t].values()), t.lower())):
-        counts = [tally[tag].get(sb, 0) for sb in sandboxes]
-        ws.append([tag] + counts + [sum(counts)])
-        if highlight and highlight.lower() in tag.lower():
-            for c in ws[ws.max_row]:
-                c.fill = hit_fill
-                c.font = Font(bold=True)
-    style(ws, headers, [34] + [12] * len(sandboxes) + [10])
-
-    # --- Every audience, with its tags ---
-    ws2 = wb.create_sheet("Audiences")
+    # --- Every audience, with its tags. FIRST sheet on purpose: this is the
+    # one people came for, and a workbook that opens on a summary tab reads as
+    # though the per-audience tags live somewhere else. ---
+    ws2 = wb.active
+    ws2.title = "Audiences"
     headers2 = ["Sandbox", "Audience name", "Audience id", "Evaluation",
-                "Lifecycle", "Tags", "Tag count", "Unresolved tag ids",
+                "Lifecycle", "Tags", "Tag count", "Origin", "PQL (readable)",
+                "PQL rendered", "PQL (raw pql/json)", "Unresolved tag ids",
                 "System tags"]
     ws2.append(headers2)
     for r in rows:
@@ -611,7 +778,16 @@ def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
         if highlight and highlight.lower() in str(r[5]).lower():
             for c in ws2[ws2.max_row]:
                 c.fill = hit_fill
-    style(ws2, headers2, (12, 52, 38, 12, 14, 40, 11, 24, 12))
+    style(ws2, headers2, (12, 52, 38, 12, 14, 40, 11, 22, 80, 13, 60, 24, 12))
+    # Deliberately NOT wrapping the rule column. Wrapped text makes Excel
+    # auto-fit each row to the tallest cell, and a 30,000-character PQL turns
+    # one row into a screenful -- the grid stops being scannable. Rows stay one
+    # line high; the full rule is still in the cell (and in the raw column) for
+    # anyone who widens it or clicks in.
+    ws2.sheet_format.defaultRowHeight = 15
+    for row in ws2.iter_rows(min_row=2, min_col=9, max_col=9):
+        for c in row:
+            c.alignment = Alignment(vertical="center", wrap_text=False)
 
     if incomplete:
         ws3 = wb.create_sheet("Data completeness")
@@ -625,12 +801,55 @@ def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
     wb.save(out_path)
 
 
+def pick_sandbox(token, api_key, conf, default="prod"):
+    """Ask which sandbox to report on, listing what the credential can see.
+    Enter takes the default. Falls back to the default off a terminal."""
+    if not sys.stdin.isatty():
+        return [default]
+    try:
+        names = list_sandboxes(token, api_key, conf, production_only=False)
+    except Exception as e:
+        logger.warning(f"Could not list sandboxes ({type(e).__name__}); "
+                       f"using {default}.")
+        return [default]
+    if not names:
+        return [default]
+    print(f"\n  {ANSI['bold']}Which sandbox?{ANSI['reset']}")
+    for i, n in enumerate(names, 1):
+        mark = f"  {ANSI['dim']}(default){ANSI['reset']}" if n == default else ""
+        print(f"    {i:>2}. {n}{mark}")
+    print(f"    {ANSI['dim']}Enter = {default}; or type a name, a number, "
+          f"or a comma list{ANSI['reset']}")
+    try:
+        raw = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return [default]
+    if not raw:
+        return [default]
+    chosen = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit() and 1 <= int(part) <= len(names):
+            chosen.append(names[int(part) - 1])
+        elif part in names:
+            chosen.append(part)
+        else:
+            logger.warning(f"No sandbox named {part!r}; ignoring it.")
+    return chosen or [default]
+
+
 def run_audience_report(service, conf, token, api_key, opts):
     """--audiences: tag inventory across one or more sandboxes."""
     sandboxes = opts["sandboxes"]
     if sandboxes == ["all-prod"]:
         sandboxes = list_sandboxes(token, api_key, conf, production_only=True)
         logger.info(f"  production sandboxes: {', '.join(sandboxes)}")
+    elif sandboxes is None:
+        # No --sandbox given: ask rather than assuming the whole estate.
+        sandboxes = pick_sandbox(token, api_key, conf)
+        logger.info(f"  sandbox(es): {', '.join(sandboxes)}")
     highlight = opts["highlight"]
     rows, tally, incomplete = build_audience_rows(
         token, api_key, conf, sandboxes, highlight=highlight)
@@ -652,8 +871,11 @@ def run_audience_report(service, conf, token, api_key, opts):
         logger.warning(f"  INCOMPLETE sandbox(es): {', '.join(incomplete)} -- "
                        f"counts understate the estate.")
 
+    # No credential name in the filename: which credential happened to read the
+    # data says nothing about the data. What it IS and when it was taken do.
     stamp = datetime.now().strftime("%Y-%m-%d")
-    default = OUTPUT_DIR / (f"audience_tags_{service.replace(' ', '_')}_{stamp}.xlsx")
+    sb_part = "_".join(sandboxes) if len(sandboxes) <= 2 else f"{len(sandboxes)}sandboxes"
+    default = OUTPUT_DIR / f"audiences_{sb_part}_{stamp}.xlsx"
     out_path = Path(opts["out"]) if opts["out"] else default
     try:
         write_audience_xlsx(rows, tally, sandboxes, out_path,
@@ -842,7 +1064,7 @@ def run_checker(service, opts, services):
     bar = ANSI["cyan"] + "=" * 70 + ANSI["reset"]
     print()
     print(bar)
-    print(f"  {ANSI['bold']}AJO Journey Checker{ANSI['reset']}  "
+    print(f"  {ANSI['bold']}Journey + Audience Census{ANSI['reset']}  "
           f"{ANSI['yellow']}{service}{ANSI['reset']} "
           f"{ANSI['dim']}({service}){ANSI['reset']}")
     print(bar)
@@ -1004,8 +1226,7 @@ def run_checker(service, opts, services):
 
     if opts["xlsx"] or opts["out"]:
         stamp = datetime.now().strftime("%Y-%m-%d")
-        default = OUTPUT_DIR / (f"ajo_journeys_{service.replace(' ', '_')}_"
-                                f"{opts['sandbox']}_{stamp}.xlsx")
+        default = OUTPUT_DIR / f"journeys_{opts['sandbox']}_{stamp}.xlsx"
         out_path = Path(opts["out"]) if opts["out"] else default
         subtitle = f"AJO journeys - {service} - {opts['sandbox']} - {stamp}"
         try:
@@ -1034,6 +1255,7 @@ def parse_args(argv):
             "limit": 0, "xlsx": False, "out": None, "eval": True,
             "status": None, "workers": 16, "ids": [],
             "audiences": False, "sandboxes": None, "highlight": ""}
+    given_sandbox = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -1042,7 +1264,7 @@ def parse_args(argv):
         if a == "--api-key" and i + 1 < len(argv):
             opts["api_key"] = argv[i + 1]; i += 2; continue
         if a in ("--sandbox", "-s") and i + 1 < len(argv):
-            opts["sandbox"] = argv[i + 1]; i += 2; continue
+            opts["sandbox"] = argv[i + 1]; given_sandbox = True; i += 2; continue
         if a == "--audiences":
             opts["audiences"] = True; i += 1; continue
         if a == "--highlight" and i + 1 < len(argv):
@@ -1065,10 +1287,12 @@ def parse_args(argv):
         if a.startswith("-"):
             i += 1; continue
         opts["ids"].append(a); i += 1
-    # --audiences reads several sandboxes in one run, so --sandbox takes a comma
-    # list (or 'all-prod' to discover every production sandbox).
-    opts["sandboxes"] = [s.strip() for s in str(opts["sandbox"]).split(",")
-                         if s.strip()] or ["prod"]
+    # --audiences can read several sandboxes in one run, so --sandbox takes a
+    # comma list (or 'all-prod' for every production sandbox). Left as None when
+    # not passed, which is the signal to ASK rather than assume the estate --
+    # the journey path keeps its own "prod" default via opts["sandbox"].
+    opts["sandboxes"] = ([s.strip() for s in str(opts["sandbox"]).split(",")
+                          if s.strip()] or ["prod"]) if given_sandbox else None
     return opts
 
 

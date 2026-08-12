@@ -30,7 +30,7 @@ The toolkit spans two product ranges:
 | [`credential_validator.py`](credential_validator.py) | Quickly checks whether an IMS/AEP credential set is alive and what it can see. **Run this first on any new credential set.** |
 | [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
-| [`ajo_journey_checker.py`](ajo_journey_checker.py) | Lists every Adobe Journey Optimizer journey and extracts the **audience behind each** (read-audience or qualification) into a journey → audience table. |
+| [`journey_audience_census.py`](journey_audience_census.py) | Census of **journeys and audiences** (audiences formerly = segments). `--list` maps every AJO journey to the **audience behind it** (read-audience or qualification); `--audiences` inventories the **whole audience estate** across sandboxes with tags, evaluation type and the segmentation rule (PQL) rendered readable. |
 | [`audit_batch_schedules_v2.py`](audit_batch_schedules_v2.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
@@ -236,7 +236,7 @@ python credential_validator.py            # interactive menu
 python credential_validator.py --all      # validate every set in ./creds/
 ```
 
-## ajo_journey_checker.py
+## journey_audience_census.py
 
 Lists every **Adobe Journey Optimizer** journey in a sandbox and pulls out the
 **audience behind each one** — whether the journey *reads* an audience or is
@@ -258,7 +258,7 @@ just use `--creds`. Read-only, stdlib-only. See
 [`ajo_journey_checker - Overview.docx`](ajo_journey_checker%20-%20Overview.docx)
 for the full write-up.
 
-Run it **bare** (`python ajo_journey_checker.py`) and it prompts you through the
+Run it **bare** (`python journey_audience_census.py`) and it prompts you through the
 choices — pick the token credential, then pick the AJO-subscribed credential
 for the `x-api-key` — and lists the whole estate. The header names both
 credentials (e.g. `Token from: acme alpha … Api-key from: acme beta`) and a
@@ -267,9 +267,9 @@ first N; `--xlsx` writes `output/ajo_journeys_<creds>_<sandbox>_<date>.xlsx`
 (needs `openpyxl`).
 
 ```
-python ajo_journey_checker.py                                   # bare: prompts for both creds, lists all
-python ajo_journey_checker.py --creds "acme alpha" --api-key <key> --list --limit 10 --xlsx
-python ajo_journey_checker.py --creds "acme alpha" --api-key <key> <journeyId> [<journeyId> ...]
+python journey_audience_census.py                                   # bare: prompts for both creds, lists all
+python journey_audience_census.py --creds "acme alpha" --api-key <key> --list --limit 10 --xlsx
+python journey_audience_census.py --creds "acme alpha" --api-key <key> <journeyId> [<journeyId> ...]
 ```
 
 ## audit_batch_schedules_v2.py
