@@ -461,6 +461,63 @@ def fetch_tag_vocabulary(token, api_key, conf, sandbox):
     return vocab
 
 
+USER_DIRECTORY_URL = "https://usermanagement.adobe.io/v2/usermanagement/users"
+
+
+def fetch_user_directory(token, api_key, conf):
+    """{ims_user_id: email} for the org, paged from User Management.
+
+    Audiences record who created/modified them as an opaque IMS id
+    (D82F225C...@805f1e8e...), which tells a reader nothing. The directory is a
+    couple of pages for a few thousand users, so it is fetched once per run and
+    used to turn those ids into people. Empty dict on failure -- the columns
+    then show raw ids rather than the report dying over a nicety.
+    """
+    users, page = {}, 0
+    while page < 50:
+        url = f"{USER_DIRECTORY_URL}/{conf['org_id']}/{page}"
+        try:
+            # Org-level endpoint: no sandbox header (and urllib rejects a None
+            # header value, so it is dropped rather than passed empty).
+            hdrs = {k: v for k, v in ajo_headers(token, api_key, conf["org_id"],
+                                                 "prod").items()
+                    if k != "x-sandbox-name"}
+            body, _ = http(url, headers=hdrs, timeout=60)
+            r = json.loads(body) or {}
+        except Exception as e:
+            logger.warning(f"  user directory page {page} failed "
+                           f"({type(e).__name__}); creator columns will show "
+                           f"raw ids.")
+            break
+        for u in r.get("users") or []:
+            if u.get("id"):
+                users[u["id"]] = u.get("email") or u.get("username") or ""
+        if r.get("lastPage"):
+            break
+        page += 1
+    return users
+
+
+def resolve_actor(actor_id, directory):
+    """An IMS id turned into something a human can act on.
+
+    Three kinds appear on audiences and only the first is a person:
+      * a directory user        -> their email
+      * @techacct.adobe.com     -> an API integration, not somebody's doing
+      * @AdobeID service names  -> Adobe's own automation (halo refreshes etc)
+    """
+    if not actor_id:
+        return ""
+    actor_id = str(actor_id)
+    if actor_id in directory and directory[actor_id]:
+        return directory[actor_id]
+    if actor_id.endswith("@techacct.adobe.com"):
+        return f"(API integration {actor_id.split('@')[0][:8]})"
+    if actor_id.endswith("@AdobeID"):
+        return f"(Adobe service: {actor_id.split('@')[0]})"
+    return actor_id
+
+
 def fetch_all_audiences(token, api_key, conf, sandbox):
     """Every audience in a sandbox, paged in full. Returns (audiences, complete).
 
@@ -684,11 +741,15 @@ def split_audience_tags(aud: dict, vocab: dict):
 def build_audience_rows(token, api_key, conf, sandboxes, highlight=""):
     """Walk each sandbox and return (rows, tally, incomplete) for the report."""
     rows, tally, incomplete = [], {}, []
-    vocab = {}
+    vocab, directory = {}, None
     for sb in sandboxes:
         if not vocab:
             vocab = fetch_tag_vocabulary(token, api_key, conf, sb)
             logger.info(f"  tag vocabulary: {len(vocab)} tag(s) in the org.")
+        if directory is None:
+            directory = fetch_user_directory(token, api_key, conf)
+            logger.info(f"  user directory: {len(directory)} user(s) "
+                        f"(for the created/modified-by columns).")
         logger.info(f"  {sb}: listing audiences ...")
         auds, complete = fetch_all_audiences(token, api_key, conf, sb)
         if not complete:
@@ -718,6 +779,8 @@ def build_audience_rows(token, api_key, conf, sandboxes, highlight=""):
                 ", ".join(named),
                 len(named),
                 a.get("namespace") or "",
+                resolve_actor(a.get("createdBy"), directory or {}),
+                resolve_actor(a.get("lastModifiedBy"), directory or {}),
                 pql[:XL_CELL_LIMIT],
                 "partial" if partial else ("yes" if pql else ""),
                 pql_raw[:XL_CELL_LIMIT],
@@ -769,23 +832,25 @@ def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
     ws2 = wb.active
     ws2.title = "Audiences"
     headers2 = ["Sandbox", "Audience name", "Audience id", "Evaluation",
-                "Lifecycle", "Tags", "Tag count", "Origin", "PQL (readable)",
-                "PQL rendered", "PQL (raw pql/json)", "Unresolved tag ids",
-                "System tags"]
+                "Lifecycle", "Tags", "Tag count", "Origin", "Created by",
+                "Last modified by", "PQL (readable)", "PQL rendered",
+                "PQL (raw pql/json)", "Unresolved tag ids", "System tags"]
     ws2.append(headers2)
     for r in rows:
         ws2.append(r)
         if highlight and highlight.lower() in str(r[5]).lower():
             for c in ws2[ws2.max_row]:
                 c.fill = hit_fill
-    style(ws2, headers2, (12, 52, 38, 12, 14, 40, 11, 22, 80, 13, 60, 24, 12))
+    style(ws2, headers2,
+          (12, 52, 38, 12, 14, 40, 11, 22, 34, 34, 80, 13, 60, 24, 12))
     # Deliberately NOT wrapping the rule column. Wrapped text makes Excel
     # auto-fit each row to the tallest cell, and a 30,000-character PQL turns
     # one row into a screenful -- the grid stops being scannable. Rows stay one
     # line high; the full rule is still in the cell (and in the raw column) for
     # anyone who widens it or clicks in.
     ws2.sheet_format.defaultRowHeight = 15
-    for row in ws2.iter_rows(min_row=2, min_col=9, max_col=9):
+    pql_col = headers2.index("PQL (readable)") + 1
+    for row in ws2.iter_rows(min_row=2, min_col=pql_col, max_col=pql_col):
         for c in row:
             c.alignment = Alignment(vertical="center", wrap_text=False)
 

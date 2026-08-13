@@ -1550,6 +1550,378 @@ FIELD_INDEX_COLUMNS = ["Field (dot notation)", "Data Type", "Friendly Name",
                        "Coverage %", "Top values (count)"]
 
 
+
+# ----------------------------------------------------------------------------
+# Audiences / segments (lifted from journey_audience_census.py)
+# ----------------------------------------------------------------------------
+# The dictionary describes the data; this describes what the business does WITH
+# it. Same sandbox, same run, so schemas -> datasets -> audiences -> the rule
+# behind each audience can be read top to bottom in one workbook.
+#
+# NOTE: this block is a copy of the same code in journey_audience_census.py, by
+# request. A fix made here does NOT reach that script, or vice versa.
+AUDIENCES_URL = "https://platform.adobe.io/data/core/ups/audiences"
+UNIFIED_TAGS_URL = "https://experience.adobe.io/unifiedtags/tags"
+
+SYSTEM_TAG_PREFIXES = ("audience_portal_",)
+
+def fetch_tag_vocabulary(token, conf, sandbox):
+    """{tag_id: tag_name} for the whole org, paged from the Unified Tags service.
+    One bulk walk instead of a GET per tag id -- the vocabulary is small (~140)
+    while the audiences referencing it run to thousands."""
+    vocab, cursor, guard = {}, None, 0
+    while guard < 100:
+        guard += 1
+        url = f"{UNIFIED_TAGS_URL}?limit=100"
+        if cursor:
+            url += f"&start={urllib.parse.quote(str(cursor))}"
+        try:
+            body, _ = http(url, headers=aep_headers(token, conf, sandbox),
+                           timeout=60)
+            page = json.loads(body) or {}
+        except Exception as e:
+            logger.warning(f"  tag vocabulary page {guard} failed "
+                           f"({type(e).__name__}: {e}); names may fall back to ids.")
+            break
+        items = page.get("tags") or []
+        if not items:
+            break
+        for t in items:
+            if t.get("id"):
+                vocab[t["id"]] = t.get("name") or t["id"][:8]
+        cursor = (page.get("_page") or {}).get("next")
+        if not cursor:
+            break
+    return vocab
+
+USER_DIRECTORY_URL = "https://usermanagement.adobe.io/v2/usermanagement/users"
+
+def fetch_user_directory(token, conf):
+    """{ims_user_id: email} for the org, paged from User Management.
+
+    Audiences record who created/modified them as an opaque IMS id
+    (D82F225C...@805f1e8e...), which tells a reader nothing. The directory is a
+    couple of pages for a few thousand users, so it is fetched once per run and
+    used to turn those ids into people. Empty dict on failure -- the columns
+    then show raw ids rather than the report dying over a nicety.
+    """
+    users, page = {}, 0
+    while page < 50:
+        url = f"{USER_DIRECTORY_URL}/{conf['org_id']}/{page}"
+        try:
+            # Org-level endpoint: no sandbox header (and urllib rejects a None
+            # header value, so it is dropped rather than passed empty).
+            hdrs = {k: v for k, v in aep_headers(token, conf, "prod").items()
+                    if k != "x-sandbox-name"}
+            body, _ = http(url, headers=hdrs, timeout=60)
+            r = json.loads(body) or {}
+        except Exception as e:
+            logger.warning(f"  user directory page {page} failed "
+                           f"({type(e).__name__}); creator columns will show "
+                           f"raw ids.")
+            break
+        for u in r.get("users") or []:
+            if u.get("id"):
+                users[u["id"]] = u.get("email") or u.get("username") or ""
+        if r.get("lastPage"):
+            break
+        page += 1
+    return users
+
+def resolve_actor(actor_id, directory):
+    """An IMS id turned into something a human can act on.
+
+    Three kinds appear on audiences and only the first is a person:
+      * a directory user        -> their email
+      * @techacct.adobe.com     -> an API integration, not somebody's doing
+      * @AdobeID service names  -> Adobe's own automation (halo refreshes etc)
+    """
+    if not actor_id:
+        return ""
+    actor_id = str(actor_id)
+    if actor_id in directory and directory[actor_id]:
+        return directory[actor_id]
+    if actor_id.endswith("@techacct.adobe.com"):
+        return f"(API integration {actor_id.split('@')[0][:8]})"
+    if actor_id.endswith("@AdobeID"):
+        return f"(Adobe service: {actor_id.split('@')[0]})"
+    return actor_id
+
+def fetch_all_audiences(token, conf, sandbox):
+    """Every audience in a sandbox, paged in full. Returns (audiences, complete).
+
+    `complete` is False when the walk ended before totalCount -- the caller must
+    say so rather than presenting a short list as the whole estate.
+    """
+    out, seen, cursor, guard, total = [], set(), None, 0, None
+    while guard < 500:
+        guard += 1
+        url = f"{AUDIENCES_URL}?limit=100"
+        if cursor is not None:
+            url += f"&start={urllib.parse.quote(str(cursor))}"
+        try:
+            body, _ = http(url, headers=aep_headers(token, conf, sandbox),
+                           timeout=90)
+            page = json.loads(body) or {}
+        except Exception as e:
+            logger.warning(f"  {sandbox}: audience page {guard} failed "
+                           f"({type(e).__name__}: {e}); list is INCOMPLETE.")
+            return out, False
+        kids = page.get("children") or []
+        meta = page.get("_page") or {}
+        if total is None:
+            total = meta.get("totalCount")
+        for c in kids:
+            if c.get("id") and c["id"] not in seen:
+                seen.add(c["id"])
+                out.append(c)
+        if not kids:
+            break
+        cursor = meta.get("next")
+        if cursor is None:
+            break
+    complete = total is None or len(out) >= int(total)
+    if not complete:
+        logger.warning(f"  {sandbox}: collected {len(out)} of {total} audience(s) "
+                       f"-- list is INCOMPLETE.")
+    return out, complete
+
+# ----------------------------------------------------------------------------
+# PQL rendering
+# ----------------------------------------------------------------------------
+# An audience's rule comes back as 'pql/json': Adobe's syntax TREE, not the PQL
+# you see in the UI. There is no supported way to ask for the text form -- every
+# format/expressionFormat parameter still returns json, and the conversion
+# endpoint is not available to a read-only credential -- so we render it here.
+#
+# The grammar is large (15 node types, 34 functions, trees up to 17 deep). We
+# render the shapes that make up the overwhelming majority -- boolean logic,
+# comparisons, field paths, segment references -- and REFUSE to guess at the
+# rest. Event-sequence and time-window nodes emit a visible <...> marker and set
+# the "partial" flag, so a half-rendered rule can never be mistaken for a whole
+# one. The raw tree is always kept in its own column.
+PQL_INFIX = {"and": "and", "or": "or", "=": "=", ">": ">", "<": "<",
+             ">=": ">=", "<=": "<=", "!=": "!=", "equals": "=",
+             "notEqualTo": "!="}
+
+PQL_WORDY = {"startsWith": "starts with", "endsWith": "ends with",
+             "contains": "contains", "doesNotContain": "does not contain",
+             "in": "in", "notIn": "not in"}
+
+# Nodes describing event sequences / time windows. Rendering these faithfully is
+# a project in itself; misrendering one would quietly change what the rule means.
+PQL_COMPLEX = {"chain", "occurs", "timeQualification", "duration", "select",
+               "varDecl", "element", "gap", "range"}
+
+XL_CELL_LIMIT = 32000          # Excel's hard ceiling is 32767
+
+def _pql_literal(node):
+    v = node.get("value")
+    lt = node.get("literalType")
+    if lt == "List" and isinstance(v, list):
+        return "[" + ", ".join(_pql_literal({"value": x, "literalType": "String"}
+                                            if isinstance(x, str) else {"value": x})
+                               for x in v) + "]"
+    if isinstance(v, str) and lt in ("String", "Timestamp", "TimeDirection",
+                                     "TimeUnit", "Comparison", None):
+        return f'"{v}"'
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+def _pql_path(node, state):
+    """Dotted field path. The base is a parameter/var reference and contributes
+    nothing readable, so it is dropped: v0._experience.x -> _experience.x"""
+    parts = []
+    cur = node
+    while isinstance(cur, dict) and cur.get("nodeType") == "fieldLookup":
+        parts.append(cur.get("fieldName") or "?")
+        cur = cur.get("object")
+    if isinstance(cur, dict) and cur.get("nodeType") not in (
+            "parameterReference", "varRef", None):
+        head = _render_node(cur, state)
+        if head:
+            parts.append(head)
+    return ".".join(reversed(parts))
+
+def _render_node(node, state):
+    if node is None:
+        return ""
+    if isinstance(node, list):
+        return ", ".join(_render_node(n, state) for n in node)
+    if not isinstance(node, dict):
+        return str(node)
+
+    nt = node.get("nodeType")
+    if nt in PQL_COMPLEX:
+        state["partial"] = True
+        state["complex"].add(nt)
+        return f"<{nt}: see raw>"
+    if nt == "literal":
+        return _pql_literal(node)
+    if nt == "fieldLookup":
+        return _pql_path(node, state)
+    if nt in ("parameterReference", "varRef"):
+        return ""                       # the implicit profile/event being tested
+    if nt == "lambda":
+        return _render_node(node.get("body"), state)
+    if nt != "fnApply":
+        state["partial"] = True
+        state["complex"].add(nt or "unknown")
+        return f"<{nt or 'unknown'}: see raw>"
+
+    fn = node.get("fnName")
+    params = node.get("params") or []
+
+    if fn == "inSegment" and params:
+        sid = (params[0] or {}).get("value")
+        name = state["segments"].get(sid)
+        return f'inSegment("{name}")' if name else f'inSegment({sid})'
+    if fn == "not" and len(params) == 1:
+        return f"not ({_render_node(params[0], state)})"
+    if fn in ("exists", "isNotNull") and params:
+        return f"{_render_node(params[0], state)} exists"
+    if fn == "isNull" and params:
+        return f"{_render_node(params[0], state)} is null"
+    # stringCompare NAMES its comparison in the first parameter -- it is
+    # stringCompare(<op>, <field>, <value>), not an infix pair. Treating it as
+    # infix renders the operator itself as the left-hand operand.
+    if fn == "stringCompare" and len(params) >= 3:
+        op = (params[0] or {}).get("value") or "compares"
+        return (f"{_render_node(params[1], state)} {op} "
+                f"{_render_node(params[2], state)}")
+    if fn == "get" and len(params) >= 2:
+        base = _render_node(params[0], state)
+        fld = (params[1] or {}).get("value") or _render_node(params[1], state)
+        return f"{base}.{fld}" if base else str(fld)
+    if fn in PQL_INFIX and len(params) >= 2:
+        op = PQL_INFIX[fn]
+        # equals/stringCompare carry a trailing case-sensitivity flag
+        operands = params[:2] if fn in ("equals", "stringCompare") else params
+        rendered = [_render_node(p, state) for p in operands]
+        joined = f" {op} ".join(r for r in rendered if r != "")
+        return f"({joined})" if op in ("and", "or") and len(rendered) > 1 else joined
+    if fn in PQL_WORDY and len(params) >= 2:
+        return (f"{_render_node(params[0], state)} {PQL_WORDY[fn]} "
+                f"{_render_node(params[1], state)}")
+    args = ", ".join(r for r in (_render_node(p, state) for p in params) if r != "")
+    return f"{fn}({args})"
+
+def render_pql(expression, segments):
+    """(readable_text, raw_text, partial) for an audience's expression.
+
+    partial=True means at least one node could not be rendered faithfully and
+    appears as a <marker>; the row is labelled so nobody reads it as complete.
+    """
+    if not expression:
+        return "", "", False
+    raw = expression.get("value")
+    raw_text = raw if isinstance(raw, str) else json.dumps(raw)
+    if expression.get("format") == "pql/text":
+        return str(raw_text), str(raw_text), False
+    try:
+        tree = json.loads(raw_text) if isinstance(raw_text, str) else raw_text
+    except (ValueError, TypeError):
+        return "", str(raw_text), True
+    state = {"segments": segments, "partial": False, "complex": set()}
+    text = _render_node(tree, state)
+    if state["partial"] and state["complex"]:
+        text = f"[PARTIAL: {', '.join(sorted(state['complex']))}] {text}"
+    return text, str(raw_text), state["partial"]
+
+def audience_eval_type(aud: dict) -> str:
+    """Streaming / Edge / Batch from the evaluationInfo carried on the LIST
+    payload (no per-audience GET needed). '' when the record omits it."""
+    ei = aud.get("evaluationInfo") or {}
+    if (ei.get("continuous") or {}).get("enabled"):
+        return "Streaming"
+    if (ei.get("synchronous") or {}).get("enabled"):
+        return "Edge"
+    if (ei.get("batch") or {}).get("enabled"):
+        return "Batch"
+    return ""
+
+def split_audience_tags(aud: dict, vocab: dict):
+    """(named_tags, system_tags, unresolved_ids) for one audience.
+
+    named  -- resolved against the Unified Tags vocabulary: the human tagging
+              this report is actually about.
+    system -- machine-written key:value stamps, kept out of the counts.
+    unresolved -- UUIDs with no vocabulary entry (deleted tag, or a tag the
+              credential cannot see). Reported rather than silently dropped.
+    """
+    named, system, unresolved = [], [], []
+    for t in (aud.get("tags") or []):
+        t = str(t)
+        if ":" in t or t.startswith(SYSTEM_TAG_PREFIXES):
+            system.append(t)
+        elif t in vocab:
+            named.append(vocab[t])
+        else:
+            unresolved.append(t)
+    return sorted(set(named)), system, unresolved
+
+
+def attach_audiences(token, conf, res, caches):
+    """Read the sandbox's audiences onto res['audiences'].
+
+    Never fatal: the dictionary's job is schemas and fields, so a failure here
+    costs the Audiences tab and nothing else. res['audiences_complete'] records
+    whether the listing finished, so a short list is never presented as the
+    whole estate.
+    """
+    sandbox = res["name"]
+    res["audiences"], res["audiences_complete"] = [], True
+    try:
+        if caches.get("vocab") is None:
+            caches["vocab"] = fetch_tag_vocabulary(token, conf, sandbox)
+            logger.info(f"  tag vocabulary: {len(caches['vocab'])} tag(s).")
+        if caches.get("directory") is None:
+            caches["directory"] = fetch_user_directory(token, conf)
+            logger.info(f"  user directory: {len(caches['directory'])} user(s).")
+        auds, complete = fetch_all_audiences(token, conf, sandbox)
+    except Exception as e:
+        logger.warning(f"  {sandbox}: audiences unavailable "
+                       f"({type(e).__name__}: {e}); the Audiences tab will be "
+                       f"empty for this sandbox.")
+        res["audiences_complete"] = False
+        return
+
+    vocab = caches["vocab"] or {}
+    directory = caches["directory"] or {}
+    # inSegment() names another audience by id; resolve so a combined rule reads
+    # as prose. Sandbox-scoped, so built from this sandbox's own listing.
+    seg_names = {}
+    for a in auds:
+        for key in ("id", "audienceId"):
+            if a.get(key):
+                seg_names[a[key]] = a.get("name") or ""
+
+    rows, n_pql, n_partial, tagged = [], 0, 0, 0
+    for a in auds:
+        named, system, unresolved = split_audience_tags(a, vocab)
+        tagged += bool(named)
+        pql, pql_raw, partial = render_pql(a.get("expression"), seg_names)
+        if pql:
+            n_pql += 1
+            n_partial += bool(partial)
+        rows.append([
+            sandbox, a.get("name") or "", a.get("id") or "",
+            audience_eval_type(a), a.get("lifecycleState") or "",
+            ", ".join(named), len(named), a.get("namespace") or "",
+            resolve_actor(a.get("createdBy"), directory),
+            resolve_actor(a.get("lastModifiedBy"), directory),
+            pql[:XL_CELL_LIMIT],
+            "partial" if partial else ("yes" if pql else ""),
+            pql_raw[:XL_CELL_LIMIT],
+            ", ".join(t[:8] for t in unresolved), len(system),
+        ])
+    res["audiences"] = rows
+    res["audiences_complete"] = complete
+    logger.info(f"  audiences: {len(rows)} ({tagged} tagged, {n_pql} with a "
+                f"rule, {n_partial} of those only partly renderable).")
+
+
 def _archive_previous(out_dir: Path, safe_client: str) -> int:
     """Move any prior dictionary for this client into out_dir/archive/ so the
     output folder only ever holds the newest. Returns how many were moved."""
@@ -1581,7 +1953,12 @@ def write_xlsx(results, client: str, datestr: str):
         return None
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    safe_client = re.sub(r"[^0-9A-Za-z _-]+", "", client).strip() or "Client"
+    # The filename says WHAT this is, WHERE it came from and WHEN -- not which
+    # credential happened to read it. The credential label is an artefact of our
+    # own key management and means nothing to whoever opens the file.
+    sbs = [str(res.get("name") or "") for res in results if res.get("name")]
+    where = "-".join(sbs) if 0 < len(sbs) <= 2 else f"{len(sbs)}-sandboxes"
+    safe_client = re.sub(r"[^0-9A-Za-z _-]+", "", where).strip() or "sandbox"
     path = OUTPUT_DIR / f"Data Dictionary - {safe_client} - {datestr}.xlsx"
 
     head_font = Font(bold=True, color="FFFFFF")
@@ -1795,6 +2172,55 @@ def write_xlsx(results, client: str, datestr: str):
             dt.cell(rr, 6, d.get("id"))
             rr += 1
     autofit(dt, [18, 40, 42, 44, 26, 34])
+
+    # ---- Audiences tab: what the business does WITH the data ----------------
+    # Completes the chain: schema -> dataset -> audience -> the rule behind it.
+    # Only the rule-based audiences (Origin = AEPSegments) carry PQL; uploads,
+    # Data Distiller and Audience Orchestration compositions have none, which is
+    # why that column is legitimately blank for a good number of rows.
+    aud_rows = [r for res in results for r in (res.get("audiences") or [])]
+    aud_incomplete = [res["title"] for res in results
+                      if not res.get("audiences_complete", True)]
+    if aud_rows or aud_incomplete:
+        at = wb.create_sheet("Audiences")
+        confidential(at)
+        at["A2"] = f"Audiences / segments  -  {client}"
+        at["A2"].font = title_font
+        note = ("Every audience in the sandbox, with its tags, who created and "
+                "last changed it, and its segmentation rule. PQL is rendered "
+                "from Adobe's syntax tree: rows marked 'partial' contain an "
+                "event-sequence or time-window clause shown as <...> -- the raw "
+                "column holds the complete definition. Only Origin=AEPSegments "
+                "audiences have a rule at all.")
+        if aud_incomplete:
+            note += (f"  WARNING: the listing was INCOMPLETE for "
+                     f"{', '.join(aud_incomplete)} -- those counts understate "
+                     f"the estate.")
+        at["A3"] = note
+        at["A3"].font = Font(italic=True,
+                             color="C00000" if aud_incomplete else "666666")
+        AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Audience id",
+                            "Evaluation", "Lifecycle", "Tags", "Tag count",
+                            "Origin", "Created by", "Last modified by",
+                            "PQL (readable)", "PQL rendered",
+                            "PQL (raw pql/json)", "Unresolved tag ids",
+                            "System tags"]
+        hr = 5
+        for c, nm in enumerate(AUDIENCE_COLUMNS, 1):
+            at.cell(hr, c, nm)
+        style_header(at, len(AUDIENCE_COLUMNS), row=hr)
+        rr = hr + 1
+        # Tagged and rule-bearing audiences first: the ones anyone came to read.
+        for row in sorted(aud_rows,
+                          key=lambda r: (0 if r[5] else 1, 0 if r[10] else 1,
+                                         str(r[1]).lower())):
+            for c, val in enumerate(row, 1):
+                at.cell(rr, c, val)
+            rr += 1
+        autofit(at, [16, 46, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 22, 12])
+        at.freeze_panes = at.cell(hr + 1, 1).coordinate
+        at.auto_filter.ref = (f"A{hr}:"
+                              f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
 
     # ---- One tab per schema, listing its individual fields ------------------
     for res, k, name in tabbed:
@@ -2112,6 +2538,9 @@ def run(service: str, sandbox_arg: str | None,
                 f"{', '.join(sb.get('name', '?') for sb in chosen)}")
 
     results = []
+    # Org-level lookups shared across sandboxes: the tag vocabulary and the user
+    # directory are the same wherever you stand, so they are fetched once.
+    aud_caches = {"vocab": None, "directory": None}
     for sb in chosen:
         logger.info(f"Collecting {sb.get('name', '?')} ...")
         try:
@@ -2124,6 +2553,7 @@ def run(service: str, sandbox_arg: str | None,
             logger.error(f"  {sb.get('name')}: {type(e).__name__}: {e}")
             logger.debug(traceback.format_exc())
             continue
+        attach_audiences(token, conf, res, aud_caches)
         print_sandbox(res)
         results.append(res)
 
