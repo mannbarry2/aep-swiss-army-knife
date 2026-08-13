@@ -125,6 +125,8 @@ SCRIPT_NAME    = "data_dictionary_v3"
 SCRIPT_VERSION = "3.3.0"
 SCRIPT_DATE    = "2026-07-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
+AUTHOR_SITE     = "https://barrymann.com"
+AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"
@@ -1922,6 +1924,63 @@ def attach_audiences(token, conf, res, caches):
                 f"rule, {n_partial} of those only partly renderable).")
 
 
+def script_provenance() -> dict:
+    """Where this workbook came from, for the "who produced this?" conversation.
+
+    The script's own SCRIPT_DATE is hand-maintained and goes stale the moment
+    someone edits without touching it, so the last-changed date is taken from
+    git -- the commit that last touched THIS file -- and only falls back to the
+    file's mtime when git can't answer (no repo, git absent, exported copy).
+
+    `dirty` matters: if the working tree has uncommitted edits then the commit
+    id does NOT describe the code that produced the file, and the workbook says
+    so rather than implying a provenance it cannot support.
+    """
+    import subprocess
+
+    me = Path(__file__).resolve()
+    prov = {"script": me.name, "version": SCRIPT_VERSION,
+            "generated": f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}",
+            "changed": "", "commit": "", "dirty": False, "source": "file mtime"}
+
+    def git(*args):
+        return subprocess.run(("git", "-C", str(me.parent)) + args,
+                              capture_output=True, text=True, timeout=15)
+
+    try:
+        r = git("log", "-1", "--format=%cI%x00%h", "--", str(me))
+        if r.returncode == 0 and r.stdout.strip():
+            iso, _, short = r.stdout.strip().partition("\x00")
+            prov["changed"] = iso.strip()[:16].replace("T", " ")
+            prov["commit"] = short.strip()
+            prov["source"] = "git"
+        d = git("status", "--porcelain", "--", str(me))
+        prov["dirty"] = bool(d.returncode == 0 and d.stdout.strip())
+    except Exception:
+        pass                      # any git trouble -> fall through to mtime
+
+    if not prov["changed"]:
+        mtime = datetime.fromtimestamp(me.stat().st_mtime, timezone.utc)
+        prov["changed"] = f"{mtime:%Y-%m-%d %H:%M UTC}"
+    return prov
+
+
+def provenance_line(prov: dict) -> str:
+    """One line naming the script, when it ran, and when it last changed."""
+    bits = [f"Generated {prov['generated']}",
+            f"by {prov['script']} v{prov['version']}"]
+    if prov["commit"]:
+        bits.append(f"commit {prov['commit']}")
+    bits.append(f"script last changed {prov['changed']}"
+                + ("" if prov["source"] == "git" else " (file timestamp)"))
+    line = "  |  ".join(bits)
+    if prov["dirty"]:
+        line += ("  |  WARNING: the script had UNCOMMITTED changes when this ran "
+                 "-- the commit id above does not describe the code that "
+                 "produced this file.")
+    return line
+
+
 def _archive_previous(out_dir: Path, safe_client: str) -> int:
     """Move any prior dictionary for this client into out_dir/archive/ so the
     output folder only ever holds the newest. Returns how many were moved."""
@@ -1937,7 +1996,15 @@ def _archive_previous(out_dir: Path, safe_client: str) -> int:
         while dest.exists():               # never clobber an archived copy
             dest = arch / f"{p.stem} ({i}){p.suffix}"
             i += 1
-        p.rename(dest)
+        try:
+            p.rename(dest)
+        except OSError as e:
+            # Almost always the previous workbook still open in Excel. Tidying
+            # is a courtesy; it must never destroy the run that just spent
+            # forty minutes sampling data.
+            logger.warning(f"Could not archive {p.name} ({e.__class__.__name__})"
+                           f" -- it is probably open. Leaving it where it is.")
+            continue
         moved += 1
     return moved
 
@@ -1973,7 +2040,14 @@ def write_xlsx(results, client: str, datestr: str):
             cell = ws.cell(row=row, column=c)
             cell.font = head_font
             cell.fill = head_fill
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.row_dimensions[row].height = 28
         ws.freeze_panes = ws.cell(row=row + 1, column=1)
+        # Remember where the table starts so filters can be applied once every
+        # row has been written -- the range needs the LAST row, which isn't
+        # known yet here. Applied in one sweep just before saving, so no sheet
+        # can be forgotten.
+        ws._dd_table = (row, ncols)
 
     def autofit(ws, widths):
         for idx, w in enumerate(widths, 1):
@@ -1990,7 +2064,8 @@ def write_xlsx(results, client: str, datestr: str):
 
     # Unique worksheet name per kept schema (Excel: <=31 chars, unique). Built
     # up front so the Field Index and Schemas index can name each schema's tab.
-    used = {"summary", "schemas", "field index", "datasets"}
+    used = {"summary", "how to use", "schemas", "field index", "datasets",
+            "audiences"}
     tabbed = []  # (res, k, sheet_name)
     for res in results:
         for k in res["kept"]:
@@ -2003,14 +2078,21 @@ def write_xlsx(results, client: str, datestr: str):
     confidential(ws)
     ws["A2"] = f"Data Dictionary v{SCRIPT_VERSION}  -  {client}"
     ws["A2"].font = title_font
-    ws["A3"] = f"Generated {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
-    ws["A3"].font = Font(italic=True, color="666666")
-    ws["A4"] = ("Kept = schema referenced by >=1 dataset, not ad-hoc/AJO/system/"
-                "test. One tab per schema; the Field Index lists every field for "
-                "lookup; the Datasets tab maps each dataset's friendly name to "
-                "its SQL table (system) name. Paste a schema tab into Claude for "
-                "its Mermaid ERD.")
+    prov = script_provenance()
+    ws["A3"] = provenance_line(prov)
+    ws["A3"].font = Font(italic=True,
+                         color="C00000" if prov["dirty"] else "666666")
+    ws["A4"] = (
+        "WHAT THIS IS: a top-to-bottom picture of this Adobe Experience Platform "
+        "sandbox, read straight from the platform -- the SCHEMAS that define the "
+        "data, the DATASETS that hold it (and the SQL table name to query each "
+        "one), and the AUDIENCES built on top of it with the rule behind each. "
+        "Kept = a schema referenced by at least one dataset and not ad-hoc, AJO, "
+        "system or test. See the How to Use tab if you're not sure where to "
+        "start.")
     ws["A4"].font = Font(italic=True, color="666666")
+    ws["A4"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[4].height = 46
 
     # Tab colour key: a coloured swatch cell + its meaning, so readers know what
     # the purple schema tabs signify without having to ask.
@@ -2073,6 +2155,127 @@ def write_xlsx(results, client: str, datestr: str):
         if not listed:
             ws.cell(r, 1, "(every sampled schema returned coverage)").font = Font(
                 italic=True, color="666666")
+        r += 1
+
+    # Author / provenance footer, so the file can be traced back to a person as
+    # well as to a script.
+    r += 1
+    ws.cell(r, 1, f"Produced by {SCRIPT_AUTHOR}").font = Font(bold=True,
+                                                              color="666666")
+    for link in (AUTHOR_SITE, AUTHOR_LINKEDIN):
+        r += 1
+        c = ws.cell(r, 1, link)
+        c.font = Font(color="0563C1", underline="single")
+        c.hyperlink = link
+
+    # ---- How to Use: for the reader who has never seen this before ----------
+    # Second tab deliberately, so it sits next to the Summary rather than being
+    # buried behind thirty schema tabs.
+    hu = wb.create_sheet("How to Use")
+    confidential(hu)
+    hu["A2"] = "How to use this workbook"
+    hu["A2"].font = title_font
+    hu["A3"] = ("Everything here was read directly from Adobe Experience "
+                "Platform. Nothing is hand-maintained, so it is as current as "
+                "the date on the Summary tab -- and no more.")
+    hu["A3"].font = Font(italic=True, color="666666")
+
+    HOW_TO = [
+        ("START HERE", "", ""),
+        ("I want to...", "Go to", "What you'll find"),
+        ("...see what data exists at all",
+         "Schemas",
+         "Every schema kept, its class, how many datasets feed it, and which "
+         "tab describes it."),
+        ("...find one particular field",
+         "Field Index",
+         "Every field across every schema in one list. Filter the Field column "
+         "to search; it tells you which schema and tab it belongs to."),
+        ("...write SQL against the data",
+         "Datasets",
+         "Maps each dataset's friendly name to its SQL table name. Use the "
+         "TABLE NAME in FROM, not the friendly name -- they differ. The "
+         "Profile column flags what feeds Real-Time Customer Profile."),
+        ("...understand one schema in detail",
+         "Its own tab",
+         "Every field with its type, friendly label, whether it is an "
+         "identity, and (when the coverage pass ran) how often it is actually "
+         "populated plus its five commonest values."),
+        ("...see who is being targeted, and how",
+         "Audiences",
+         "Every audience with its tags, who built it, who last changed it, and "
+         "the rule behind it in readable form."),
+        ("", "", ""),
+        ("THINGS THAT WILL CATCH YOU OUT", "", ""),
+        ("Coverage % is a SAMPLE",
+         "schema tabs",
+         "Taken from up to a thousand real records, not the whole dataset. "
+         "Treat it as 'roughly how often this is filled in', not an exact "
+         "figure."),
+        ("MISSING is not the same as 0%",
+         "Summary",
+         "0% means we looked and the field was empty. MISSING means we could "
+         "not read the data at all. Any schema in that state is listed in the "
+         "DATA COMPLETENESS block on the Summary tab and banner-flagged on its "
+         "own tab."),
+        ("Some rules are only PARTLY shown",
+         "Audiences",
+         "Rules marked 'partial' contain an event-sequence or time-window "
+         "clause that is shown as <...>. What IS displayed is correct, but "
+         "there is more to the rule -- the raw column holds the full "
+         "definition."),
+        ("Not every audience has a rule",
+         "Audiences",
+         "Only Origin=AEPSegments audiences are rule-based. Uploads, Data "
+         "Distiller and Audience Orchestration compositions are built "
+         "elsewhere, so their rule column is legitimately blank."),
+        ("'Last modified by' is often a robot",
+         "Audiences",
+         "Entries like (Adobe service: pathos) are Adobe's own automation, not "
+         "a colleague. Only email addresses are people."),
+        ("", "", ""),
+        ("EVERY TAB", "", ""),
+        ("Filters and frozen headers are on",
+         "all tabs",
+         "Click any header arrow to filter. The header row stays put as you "
+         "scroll."),
+        ("Confidential",
+         "all tabs",
+         "With the coverage pass, this workbook contains real sampled customer "
+         "data. Treat it accordingly."),
+    ]
+    hr = 5
+    for c, nm in enumerate(("I want to...", "Go to", "What you'll find"), 1):
+        hu.cell(hr, c, nm)
+    style_header(hu, 3, row=hr)
+    rr = hr + 1
+    section_fill = PatternFill("solid", fgColor="DCE6F1")
+    for left, mid, right in HOW_TO[1:]:
+        if left in ("I want to...",):
+            continue
+        a = hu.cell(rr, 1, left)
+        b = hu.cell(rr, 2, mid)
+        c_ = hu.cell(rr, 3, right)
+        if left and not mid and not right:            # a section heading row
+            for cell in (a, b, c_):
+                cell.fill = section_fill
+            a.font = Font(bold=True, color="1F4E78")
+        else:
+            a.font = Font(bold=True)
+            b.font = Font(color="1F4E78")
+        for cell in (a, b, c_):
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        hu.row_dimensions[rr].height = 30 if right else 18
+        rr += 1
+    autofit(hu, [34, 18, 86])
+    hu._dd_table = None          # prose, not a table -- no filter dropdowns
+    hu.cell(rr + 1, 1, f"Generated by {SCRIPT_NAME}.py  -  {SCRIPT_AUTHOR}")
+    hu.cell(rr + 1, 1).font = Font(italic=True, color="666666")
+    hu.cell(rr + 2, 1, AUTHOR_SITE).font = Font(color="0563C1", underline="single")
+    hu.cell(rr + 2, 1).hyperlink = AUTHOR_SITE
+    hu.cell(rr + 3, 1, AUTHOR_LINKEDIN).font = Font(color="0563C1",
+                                                    underline="single")
+    hu.cell(rr + 3, 1).hyperlink = AUTHOR_LINKEDIN
 
     # ---- Master Field Index (every field across all schemas, for lookup) ----
     fi = wb.create_sheet("Field Index")
@@ -2288,11 +2491,32 @@ def write_xlsx(results, client: str, datestr: str):
             ridx += 1
         autofit(sheet, [50, 20, 28, 9, 22, 42] + ([11, 70] if dd else []))
 
+    # ---- Filters on every table, in one sweep -------------------------------
+    # Done here rather than per sheet so a tab added later can't quietly ship
+    # without them.
+    for sheet in wb.worksheets:
+        table = getattr(sheet, "_dd_table", None)
+        if not table:
+            continue
+        hrow, ncols = table
+        if sheet.max_row > hrow:
+            sheet.auto_filter.ref = (f"A{hrow}:"
+                                     f"{get_column_letter(ncols)}{sheet.max_row}")
+
     archived = _archive_previous(OUTPUT_DIR, safe_client)
     if archived:
         logger.info(f"Archived {archived} previous dictionary file(s) -> "
                     f"{OUTPUT_DIR / 'archive'}")
-    wb.save(path)
+    try:
+        wb.save(path)
+    except PermissionError:
+        # The file is open in Excel. A long sampling run must not be thrown away
+        # over that -- write alongside it and say so plainly.
+        alt = path.with_name(f"{path.stem} (new){path.suffix}")
+        wb.save(alt)
+        logger.warning(f"{path.name} is locked (open in Excel?) -- wrote "
+                       f"{alt.name} instead.")
+        return alt
     return path
 
 
