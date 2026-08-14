@@ -100,6 +100,14 @@ what the filename has said since v3.3. Every tab also carries a link to the
 release notes, so a dictionary found months later can be traced to what the
 version that produced it actually did.
 
+v3.4.1 -- Complete coverage on Profile schemas. Every Profile-class schema reads
+the SAME union dataset, but each one used to re-download the snapshot partition
+(~127MB) for itself: slow, and one gateway 504 anywhere in that sequence was
+cached into MISSING coverage for every Profile schema behind it. The snapshot is
+now sampled ONCE per sandbox and the rows reused. A second pass then revisits
+anything still UNREADABLE and tries it once more before the workbook is written,
+because a 504 is usually transient.
+
 Full version history: RELEASE_NOTES.md (link in the workbook's How to Use tab).
 
 openpyxl is needed for the XLSX; pyarrow + tzdata for --data-dict (all optional,
@@ -143,7 +151,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.0"
+SCRIPT_VERSION = "3.4.1"
 SCRIPT_DATE    = "2026-08-14"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -2623,112 +2631,149 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
                     f"{res['name']}: {', '.join(k['title'] for k in in_scope)}")
         ds_index = get_dataset_ids_by_schema(token, conf, res["name"])
         snap_resolved = None     # per-sandbox cache: (dsid, label) | False
-        snap_unreadable = False  # snapshot 504'd once -> don't retry it per schema
-        n_scope = len(in_scope)
+        # Every Profile-class schema reads the SAME union dataset, so the
+        # snapshot is sampled ONCE per sandbox and the rows reused for all of
+        # them. Until v3.4.1 each re-downloaded a ~127MB partition: slow, and as
+        # many separate chances to hit a gateway 504 as there were Profile
+        # schemas -- the first failure being cached into MISSING coverage for
+        # every one behind it. On a real prod run that cost 16 of 33 tabs.
+        snap_sample = None       # (rows, sstats) | None
         t_dd_start = time.perf_counter()         # wall clock for the whole sweep
-        for i, k in enumerate(in_scope, 1):
-            # Overall progress so an overnight all-schemas run is easy to track:
-            # how far through the sandbox we are and how long we've been going.
-            elapsed = time.perf_counter() - t_dd_start
-            eta = (elapsed / (i - 1) * (n_scope - (i - 1))) if i > 1 else 0
-            logger.info(f"  data dict: {ANSI['bold']}schema {i}/{n_scope}"
-                        f"{ANSI['reset']} in {res['name']}  "
-                        f"{ANSI['dim']}({elapsed/60:.1f} min elapsed"
-                        f"{f', ~{eta/60:.0f} min left' if eta else ''})"
-                        f"{ANSI['reset']}")
-            # Profile-class coverage must come from the merged union snapshot, not
-            # the pre-merge feeds. Falls back to feeding datasets if unresolvable.
-            smallest_first, file_timeout = False, 75
-            if k.get("meta_class") == PROFILE_CLASS:
-                if snap_resolved is None:
-                    snap_resolved = _resolve_profile_snapshot(
-                        token, conf, res["name"], profile_snapshot) or False
-                if snap_resolved:
-                    snap_dsid, source_label = snap_resolved
-                    k["dd_source"] = source_label
-                    # The snapshot already 504'd this run -- its manifest is too big
-                    # for the gateway. Don't waste ~3 min per Profile schema redoing
-                    # it; flag coverage MISSING straight away.
-                    if snap_unreadable:
-                        k["dd_empty_reason"] = "unreadable"
+
+        # Pass 1 covers everything in scope; pass 2 revisits only what came back
+        # UNREADABLE. A gateway 504 is usually transient, so a few extra minutes
+        # at the end of the run is far cheaper than finding the hole tomorrow.
+        for dd_pass in (1, 2):
+            if dd_pass == 1:
+                targets = in_scope
+            else:
+                targets = [k for k in in_scope
+                           if k.get("dd_empty_reason") == "unreadable"]
+                if not targets:
+                    break
+                snap_sample = None      # give the union one genuine second go
+                logger.info(f"  {ANSI['bold']}data dict: RETRY PASS{ANSI['reset']} "
+                            f"-- {len(targets)} schema(s) were unreadable on the "
+                            f"first pass; trying each once more before writing "
+                            f"the workbook.")
+            n_scope = len(targets)
+            for i, k in enumerate(targets, 1):
+                # Overall progress so an overnight all-schemas run is easy to
+                # track: how far through we are and how long we've been going.
+                elapsed = time.perf_counter() - t_dd_start
+                eta = (elapsed / (i - 1) * (n_scope - (i - 1))) if i > 1 else 0
+                logger.info(f"  data dict: {ANSI['bold']}schema {i}/{n_scope}"
+                            f"{ANSI['reset']} in {res['name']}"
+                            f"{' (RETRY)' if dd_pass == 2 else ''}  "
+                            f"{ANSI['dim']}({elapsed/60:.1f} min elapsed"
+                            f"{f', ~{eta/60:.0f} min left' if eta else ''})"
+                            f"{ANSI['reset']}")
+                k.pop("dd_empty_reason", None)   # this attempt re-decides it
+                # Profile-class coverage must come from the merged union
+                # snapshot, not the pre-merge feeds. Falls back to feeding
+                # datasets if unresolvable.
+                smallest_first, file_timeout = False, 75
+                if k.get("meta_class") == PROFILE_CLASS:
+                    if snap_resolved is None:
+                        snap_resolved = _resolve_profile_snapshot(
+                            token, conf, res["name"], profile_snapshot) or False
+                    if snap_resolved:
+                        snap_dsid, source_label = snap_resolved
+                        k["dd_source"] = source_label
+                        dsids = [snap_dsid]
+                        smallest_first, file_timeout = True, DD_SNAPSHOT_TIMEOUT
+                    else:
+                        dsids = ds_index.get(k["id"], [])
+                        k["dd_source"] = ("feeding datasets (PRE-MERGE -- snapshot "
+                                          "not found; coverage may read sparse)")
                         logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
-                                       f"-- snapshot unreadable this run (504); "
-                                       f"skipping, coverage MISSING.")
-                        continue
-                    dsids = [snap_dsid]
-                    smallest_first, file_timeout = True, DD_SNAPSHOT_TIMEOUT
+                                       f"is Profile-class but no snapshot "
+                                       f"resolved; falling back to feeding "
+                                       f"datasets.")
                 else:
                     dsids = ds_index.get(k["id"], [])
-                    k["dd_source"] = ("feeding datasets (PRE-MERGE -- snapshot not "
-                                      "found; coverage may read sparse)")
-                    logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} is "
-                                   f"Profile-class but no snapshot resolved; "
-                                   f"falling back to feeding datasets.")
-            else:
-                dsids = ds_index.get(k["id"], [])
-            if not dsids:
-                logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} has no "
-                               "(non-perf) datasets to sample; skipping.")
-                continue
-            logger.info(f"  data dict [{i}/{n_scope}]: '{k['title']}' -- "
-                        f"{len(dsids)} dataset(s), {k['n_fields']} fields; "
-                        f"sampling up to {dd_rows} records ...")
-            try:
-                rows, sstats = sample_schema_rows(
-                    token, conf, res["name"], dsids, dd_rows,
-                    smallest_first=smallest_first, file_timeout=file_timeout)
-            except Exception as e:
-                logger.warning(f"  data dict: sampling failed for {k['title']}: "
-                               f"{type(e).__name__}: {e}")
-                logger.debug(traceback.format_exc())
-                continue
-            k["dd_sample_stats"] = sstats
-            if not rows:
-                # Distinguish "genuinely empty" from "data exists but unreadable"
-                # so a 0% schema is never silently mistaken for an empty one.
-                if sstats.get("list_failed"):
-                    # The batch LIST never returned for some dataset(s) -- we never
-                    # learned whether they carry records, so this is MISSING, not 0%.
-                    logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} -- "
-                                   f"0 records, but the batch list failed for "
-                                   f"{sstats['list_failed']} of {len(dsids)} "
-                                   f"dataset(s) (gateway/timeout). NOT confirmed "
-                                   f"empty -- contents unknown, coverage MISSING.")
-                    k["dd_empty_reason"] = "unreadable"
-                    if smallest_first:      # the snapshot itself failed -- cache it
-                        snap_unreadable = True
-                elif sstats["available"] == 0:
-                    logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} -- "
-                                   f"0 records: EMPTY (no batch in any of its "
-                                   f"{len(dsids)} dataset(s) carries records). "
-                                   f"Genuinely not populated.")
-                    k["dd_empty_reason"] = "empty"
+                if not dsids:
+                    logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} has "
+                                   "no (non-perf) datasets to sample; skipping.")
+                    continue
+
+                # The snapshot is shared across every Profile schema: download it
+                # once, then reuse the rows in memory.
+                if smallest_first and snap_sample is not None:
+                    rows, sstats = snap_sample
+                    if not rows:
+                        k["dd_empty_reason"] = "unreadable"
+                        logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
+                                       f"-- snapshot unreadable on this pass; "
+                                       f"skipping, coverage MISSING.")
+                        continue
+                    logger.info(f"  data dict [{i}/{n_scope}]: '{k['title']}' -- "
+                                f"{k['n_fields']} fields; reusing the snapshot "
+                                f"sample already downloaded this run "
+                                f"({len(rows)} rows, no re-download).")
                 else:
+                    logger.info(f"  data dict [{i}/{n_scope}]: '{k['title']}' -- "
+                                f"{len(dsids)} dataset(s), {k['n_fields']} fields; "
+                                f"sampling up to {dd_rows} records ...")
+                    try:
+                        rows, sstats = sample_schema_rows(
+                            token, conf, res["name"], dsids, dd_rows,
+                            smallest_first=smallest_first,
+                            file_timeout=file_timeout)
+                    except Exception as e:
+                        logger.warning(f"  data dict: sampling failed for "
+                                       f"{k['title']}: {type(e).__name__}: {e}")
+                        logger.debug(traceback.format_exc())
+                        # Unreadable, NOT empty -- we learned nothing about the
+                        # contents. Classified by the block below.
+                        rows, sstats = [], {"available": 0, "failed": 1,
+                                            "empty_reads": 0, "list_failed": 1}
+                    if smallest_first:      # cache success OR failure, once
+                        snap_sample = (rows, sstats)
+                k["dd_sample_stats"] = sstats
+                if not rows:
+                    # Distinguish "genuinely empty" from "data exists but
+                    # unreadable" so a 0% schema is never mistaken for an empty one.
+                    if sstats.get("list_failed"):
+                        # The batch LIST never returned for some dataset(s) -- we
+                        # never learned whether they carry records: MISSING, not 0%.
+                        logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
+                                       f"-- 0 records, but the batch list failed "
+                                       f"for {sstats['list_failed']} of "
+                                       f"{len(dsids)} dataset(s) "
+                                       f"(gateway/timeout). NOT confirmed empty -- "
+                                       f"contents unknown, coverage MISSING.")
+                        k["dd_empty_reason"] = "unreadable"
+                    elif sstats["available"] == 0:
+                        logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
+                                       f"-- 0 records: EMPTY (no batch in any of "
+                                       f"its {len(dsids)} dataset(s) carries "
+                                       f"records). Genuinely not populated.")
+                        k["dd_empty_reason"] = "empty"
+                    else:
+                        logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
+                                       f"-- 0 records but {sstats['available']} "
+                                       f"batch(es) HAD records; {sstats['failed']} "
+                                       f"read(s) failed, {sstats['empty_reads']} "
+                                       f"parsed empty. NOT confirmed empty -- data "
+                                       f"exists but couldn't be sampled.")
+                        k["dd_empty_reason"] = "unreadable"
+                    continue
+                # Sampled OK, but flag if some batches failed (partial read).
+                if sstats["failed"]:
                     logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} -- "
-                                   f"0 records but {sstats['available']} batch(es) "
-                                   f"HAD records; {sstats['failed']} read(s) failed,"
-                                   f" {sstats['empty_reads']} parsed empty. NOT "
-                                   f"confirmed empty -- data exists but couldn't be "
-                                   f"sampled (timeouts/parse). Re-run or raise "
-                                   f"timeouts.")
-                    k["dd_empty_reason"] = "unreadable"
-                    if smallest_first:      # the snapshot itself failed -- cache it
-                        snap_unreadable = True
-                continue
-            # Sampled OK, but flag if some batches failed (partial read).
-            if sstats["failed"]:
-                logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} -- "
-                               f"note: {sstats['failed']} batch(es) failed to read; "
-                               f"coverage is from the {len(rows)} rows that "
-                               f"succeeded.")
-            t0 = time.perf_counter()
-            k["datadict"] = build_data_dict(rows, k["fields"])
-            k["dd_rows"] = len(rows)
-            populated = sum(1 for v in k["datadict"].values() if v["coverage"] > 0)
-            logger.info(f"  data dict [{i}/{n_scope}]: '{k['title']}' done -- "
-                        f"{len(rows)} records, {populated}/{len(k['fields'])} "
-                        f"fields populated (>0% coverage); "
-                        f"tally {time.perf_counter() - t0:.1f}s.")
+                                   f"note: {sstats['failed']} batch(es) failed to "
+                                   f"read; coverage is from the {len(rows)} rows "
+                                   f"that succeeded.")
+                t0 = time.perf_counter()
+                k["datadict"] = build_data_dict(rows, k["fields"])
+                k["dd_rows"] = len(rows)
+                populated = sum(1 for v in k["datadict"].values()
+                                if v["coverage"] > 0)
+                logger.info(f"  data dict [{i}/{n_scope}]: '{k['title']}' done -- "
+                            f"{len(rows)} records, {populated}/{len(k['fields'])} "
+                            f"fields populated (>0% coverage); "
+                            f"tally {time.perf_counter() - t0:.1f}s.")
 
 
 def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:

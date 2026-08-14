@@ -7,6 +7,37 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.1 — 2026-08-14
+
+**Complete coverage on Profile schemas.**
+
+A prod run came back with 16 of 33 schema tabs flagged `MISSING`. All 16 were
+Profile-class, and all 16 failed for one reason: a single gateway 504.
+
+Every Profile-class schema samples the *same* Profile Snapshot Export union —
+but each one re-downloaded the ~127 MB partition for itself. That was both
+slow (sixteen downloads of identical data) and fragile (sixteen independent
+chances to hit a 504). The `snap_unreadable` cache added in v3.2 kept the
+runtime sane by refusing to retry a snapshot that had already failed, but it
+also meant **the first failure became MISSING coverage for every Profile schema
+behind it**.
+
+- The snapshot is now sampled **once per sandbox** and the rows reused in
+  memory for every Profile-class schema. One download, not sixteen.
+- A **retry pass** runs at the end: any schema still `UNREADABLE` is tried once
+  more before the workbook is written, with the snapshot cache cleared so the
+  union gets a genuine second attempt. It costs nothing when the first pass was
+  clean.
+- A sampling **exception** is now classified as `unreadable` rather than
+  falling through unlabelled, so it lands in the DATA COMPLETENESS block
+  instead of reading as "not sampled".
+
+*Reading the log:* Profile schemas after the first now say `reusing the
+snapshot sample already downloaded this run (N rows, no re-download)`, and the
+retry pass announces itself as `RETRY PASS`.
+
+---
+
 ## v3.4.0 — 2026-08-14
 
 **The credential name is gone from the workbook.**
