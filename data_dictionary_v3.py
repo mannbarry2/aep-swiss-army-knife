@@ -2,7 +2,7 @@
 """
 data_dictionary_v3.py  (AEP Swiss Army Knife)
 =============================================
-Data Dictionary v3.2. Sucks every XDM schema out of an AEP sandbox, filters down
+Data Dictionary v3.4. Sucks every XDM schema out of an AEP sandbox, filters down
 to the ones that actually matter, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
@@ -81,6 +81,27 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.3 -- Readability and provenance:
+  * An Audiences tab: every audience with tags, owner, last-modified and its
+    segmentation rule (PQL) rendered readable.
+  * A provenance line on every tab (when it ran, which script version, which
+    commit, and a loud warning when the working tree was dirty).
+  * A How to Use tab, filters + frozen headers everywhere, and the credential
+    name dropped from the FILENAME in favour of the sandbox.
+
+v3.4 -- The credential name is gone from the workbook itself. The titles inside
+the file used to fall back to the credential's service name, so a workbook read
+with a key stored as "<name>" was headed "Data Dictionary - <Name>" -- the name
+of an entry in our own vault, printed where the reader expects the subject of
+the report.
+Titles now use the client name ONLY when the credential record carries an
+explicit "client" key, and otherwise identify the workbook by SANDBOX, matching
+what the filename has said since v3.3. Every tab also carries a link to the
+release notes, so a dictionary found months later can be traced to what the
+version that produced it actually did.
+
+Full version history: RELEASE_NOTES.md (link in the workbook's How to Use tab).
+
 openpyxl is needed for the XLSX; pyarrow + tzdata for --data-dict (all optional,
 pip install -r requirements.txt).
 
@@ -122,11 +143,17 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.3.0"
-SCRIPT_DATE    = "2026-07-24"
+SCRIPT_VERSION = "3.4.0"
+SCRIPT_DATE    = "2026-08-14"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
+
+# Where the version history lives. Surfaced in the workbook (provenance line +
+# How to Use tab) so whoever opens a dictionary months from now can find out
+# what the version that produced it actually did.
+RELEASE_NOTES_URL = ("https://github.com/mannbarry2/aep-swiss-army-knife"
+                     "/blob/main/RELEASE_NOTES.md")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"
@@ -1152,16 +1179,21 @@ def pretty_name(stem: str) -> str:
     return stem.replace("-", " ").replace("_", " ").title()
 
 
-def client_label(conf: dict, stem: str) -> str:
-    """Human client name for output files/titles -- the client, NOT which
-    credential set. Uses the optional "client" key in the creds JSON; otherwise
-    derives it from the filename stem by dropping a trailing key token
-    (e.g. "acme k" / "acme beta" -> "Acme"; "widget-co" -> "Widget-Co")."""
+def client_label(conf: dict) -> str:
+    """Human client name for workbook titles, or "" when none is configured.
+
+    ONLY the explicit "client" key in the credential record is used. It used to
+    fall back to the credential's own service name, which put the name of a key
+    in our own vault at the top of a document that goes out to the client.
+    That name identifies whose credential read the sandbox,
+    which is our own key-management artefact and nobody else's business; worse,
+    it reads like the subject of the report. Where no client name is configured
+    the workbook now identifies itself by SANDBOX instead (see write_xlsx),
+    which is what the filename has said since v3.3 and is what the reader
+    actually needs to know.
+    """
     c = (conf.get("client") or "").strip()
-    if not c:
-        parts = stem.split()
-        c = " ".join(parts[:-1]) if len(parts) > 1 else stem
-    return c.replace("-", " ").replace("_", " ").strip().title() or "Client"
+    return c.replace("-", " ").replace("_", " ").strip().title()
 
 
 def short_type(raw: str) -> str:
@@ -1973,6 +2005,7 @@ def provenance_line(prov: dict) -> str:
         bits.append(f"commit {prov['commit']}")
     bits.append(f"script last changed {prov['changed']}"
                 + ("" if prov["source"] == "git" else " (file timestamp)"))
+    bits.append(f"release notes: {RELEASE_NOTES_URL}")
     line = "  |  ".join(bits)
     if prov["dirty"]:
         line += ("  |  WARNING: the script had UNCOMMITTED changes when this ran "
@@ -2028,6 +2061,12 @@ def write_xlsx(results, client: str, datestr: str):
     safe_client = re.sub(r"[^0-9A-Za-z _-]+", "", where).strip() or "sandbox"
     path = OUTPUT_DIR / f"Data Dictionary - {safe_client} - {datestr}.xlsx"
 
+    # ...and the titles INSIDE the workbook say the same thing as the filename.
+    # `client` is filled only when the credential record carries an explicit
+    # client name; otherwise we identify the workbook by sandbox rather than by
+    # whichever key happened to read it.
+    label = client or where
+
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor=_HEADER_BG)
     title_font = Font(bold=True, size=14)
@@ -2076,7 +2115,7 @@ def write_xlsx(results, client: str, datestr: str):
     ws = wb.active
     ws.title = "Summary"
     confidential(ws)
-    ws["A2"] = f"Data Dictionary v{SCRIPT_VERSION}  -  {client}"
+    ws["A2"] = f"Data Dictionary v{SCRIPT_VERSION}  -  {label}"
     ws["A2"].font = title_font
     prov = script_provenance()
     ws["A3"] = provenance_line(prov)
@@ -2276,11 +2315,17 @@ def write_xlsx(results, client: str, datestr: str):
     hu.cell(rr + 3, 1, AUTHOR_LINKEDIN).font = Font(color="0563C1",
                                                     underline="single")
     hu.cell(rr + 3, 1).hyperlink = AUTHOR_LINKEDIN
+    # What changed in this version, and every version before it.
+    hu.cell(rr + 5, 1, f"What's new in v{SCRIPT_VERSION} -- release notes:").font = (
+        Font(bold=True))
+    hu.cell(rr + 6, 1, RELEASE_NOTES_URL).font = Font(color="0563C1",
+                                                      underline="single")
+    hu.cell(rr + 6, 1).hyperlink = RELEASE_NOTES_URL
 
     # ---- Master Field Index (every field across all schemas, for lookup) ----
     fi = wb.create_sheet("Field Index")
     confidential(fi)
-    fi["A2"] = f"Field Index  -  {client}"
+    fi["A2"] = f"Field Index  -  {label}"
     fi["A2"].font = title_font
     fi["A3"] = ("Every field across all schemas. Look up an exact dot-notation "
                 "path (Ctrl-F); the Tab column says which sheet it lives on.")
@@ -2339,7 +2384,7 @@ def write_xlsx(results, client: str, datestr: str):
     # FROM -- distinct from the friendly dataset name shown in the UI.
     dt = wb.create_sheet("Datasets")
     confidential(dt)
-    dt["A2"] = f"Datasets / SQL table names  -  {client}"
+    dt["A2"] = f"Datasets / SQL table names  -  {label}"
     dt["A2"].font = title_font
     dt["A3"] = ("Every dataset and its AEP Query Service table name. SQL uses the "
                 "SYSTEM table name, not the friendly name: SELECT ... FROM "
@@ -2387,7 +2432,7 @@ def write_xlsx(results, client: str, datestr: str):
     if aud_rows or aud_incomplete:
         at = wb.create_sheet("Audiences")
         confidential(at)
-        at["A2"] = f"Audiences / segments  -  {client}"
+        at["A2"] = f"Audiences / segments  -  {label}"
         at["A2"].font = title_font
         note = ("Every audience in the sandbox, with its tags, who created and "
                 "last changed it, and its segmentation rule. PQL is rendered "
@@ -2804,7 +2849,7 @@ def run(service: str, sandbox_arg: str | None,
                     f"(adds minutes).{ANSI['reset']}")
 
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    client = client_label(conf, service)
+    client = client_label(conf)
     xlsx_path = write_xlsx(results, client, datestr)
     if xlsx_path:
         n_tabs = sum(len(r["kept"]) for r in results)

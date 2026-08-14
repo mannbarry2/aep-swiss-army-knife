@@ -34,7 +34,7 @@ The toolkit spans two product ranges:
 | [`audit_batch_schedules_v2.py`](audit_batch_schedules_v2.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
-| [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.2.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. |
+| [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. [Release notes](RELEASE_NOTES.md). |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
 cleanly across multiple Adobe orgs without folder collisions. `creds/*.json`
@@ -356,11 +356,12 @@ python dataset_census.py my-tenant --limit=25 --warn=22   # your guardrail, not 
 
 ## data_dictionary_v3.py
 
-**Data Dictionary v3.2.** Sucks every XDM schema out of an AEP sandbox, **filters
+**Data Dictionary v3.4.** Sucks every XDM schema out of an AEP sandbox, **filters
 down to the ones that matter**, and writes a tabbed, **strictly-confidential**
 workbook: schema tabs are ready to paste into Claude (via the MCP connector) to
 generate **Mermaid ERDs**, and `--data-dict` adds real field coverage + example
-values. The successor to the standalone
+values. See the **[release notes](RELEASE_NOTES.md)** for what changed in each
+version. The successor to the standalone
 [`aep_data_dictionary`](https://github.com/mannbarry2/aep_data_dictionary) (v2,
 which staged JSON files off an FTP drop) — v3 is **ephemeral, in-memory, and
 writes nothing to disk but the workbook**. Pick a credential set, then pick

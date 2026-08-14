@@ -1,20 +1,24 @@
-# AEP Data Dictionary v3.2 — how it works
+# AEP Data Dictionary v3.4 — how it works
 
 > **STRICTLY CONFIDENTIAL** — with `--data-dict` the output workbook contains real sampled customer data.
 
-`data_dictionary_v3.py`  (AEP Swiss Army Knife)  ·  June 2026
+`data_dictionary_v3.py`  (AEP Swiss Army Knife)  ·  August 2026
 
 ## What it produces
 
-Data Dictionary v3.2 authenticates to Adobe Experience Platform with a chosen credential set, reads a chosen sandbox (Enter = production), pulls every XDM schema, filters out the noise, and writes one strictly-confidential Excel workbook to `./output` (the previous copy is moved to `./output/archive` first). Tabs:
+Data Dictionary v3.4 authenticates to Adobe Experience Platform with a chosen credential set, reads a chosen sandbox (Enter = production), pulls every XDM schema, filters out the noise, and writes one strictly-confidential Excel workbook to `./output` (the previous copy is moved to `./output/archive` first). Tabs:
 
-- **Summary** — counts per sandbox and a tab-colour key.
+- **Summary** — counts per sandbox, a tab-colour key, a provenance line, and the *DATA COMPLETENESS* block.
+- **How to Use** — written for a first-time reader, including the traps (coverage is a sample; `MISSING` ≠ `0%`). Links to the release notes.
 - **Field Index** — every field across all schemas; look up an exact dot-notation path with Ctrl-F.
 - **Schemas** — one row per kept schema (class, dataset count, **SQL table name(s)**, field/identity/relationship counts).
 - **Datasets** — every dataset mapped to its **SQL table (system) name** — see below.
+- **Audiences** — every audience with tags, owner, last-modified, and its segmentation rule (PQL) rendered readable.
 - **One tab per schema** — every field (dot-notation path, type, identity, relationship), plus the schema's SQL table name(s) in the header block. Ready to paste into Claude (via MCP) for a Mermaid ERD.
 
-The Profile schema's tab is coloured **purple** so the post-merge union stands out from the event and lookup schemas. The file is named `Data Dictionary - <Client> - <date>.xlsx`.
+The Profile schema's tab is coloured **purple** so the post-merge union stands out from the event and lookup schemas.
+
+The workbook identifies itself by **sandbox**, not by credential: the file is named `Data Dictionary - <sandbox> - <date>.xlsx` (since v3.3) and the titles inside say the same (since v3.4). The credential's service name is a key in our own vault — it says who *read* the sandbox, not what the document is about — so it appears nowhere in the output. Set an explicit `client` key on a credential record if you want a real client name in the titles instead.
 
 ## SQL table (system) names
 
@@ -61,6 +65,10 @@ A bare `--data-dict` samples **every** kept schema (one coverage pass per tab); 
 
 - **v3.1** — Profile coverage fix (sample the Profile Snapshot Export union, not pre-merge feeds).
 - **v3.2** — bundled Luma demo dataset (`demo/luma/`) **and** SQL table (system) names: a Datasets tab plus *SQL table name(s)* columns, so SQL can be formed against the right table straight from the workbook.
+- **v3.3** — Audiences tab, provenance line on every tab, a How to Use tab, filters/frozen headers everywhere, and the credential name dropped from the filename in favour of the sandbox.
+- **v3.4** — credential name removed from the workbook **titles** too (sandbox instead, unless a `client` key is configured), and a link to the release notes on every tab.
+
+Full detail: **[RELEASE_NOTES.md](RELEASE_NOTES.md)**.
 
 ## Known limitations — for review
 
