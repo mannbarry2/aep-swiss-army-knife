@@ -7,8 +7,8 @@ to the ones that actually matter, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
 SQL table (system) name, an Ingestion tab tracing how each dataset is actually
-populated, and -- with --data-dict -- real field coverage + top-5 example values
-sampled from ingested data.
+populated, and -- with --data-dict -- real field coverage + top-10 example
+values sampled from ingested data.
 
 The workbook is marked STRICTLY CONFIDENTIAL: with --data-dict it contains
 real sampled customer data.
@@ -44,7 +44,7 @@ column is always present (blank when a field has no alternate label).
 
 Phase 2 -- data dictionary (--data-dict): for each field, sample real ingested
 records (Snappy-Parquet) via the Data Access API and tally COVERAGE (% of
-sampled rows where the field is populated) and the TOP-5 values
+sampled rows where the field is populated) and the TOP-10 values
 (value(count), pipe-separated). One download covers every field at once -- no
 Query Service, no per-field calls. Two extra columns are added to each sampled
 schema's tab. Defaults to ALL kept schemas (a bare --data-dict samples every
@@ -229,6 +229,11 @@ PROFILE_TAB_COLOR = "7030A0"   # purple
 # Narrow it with --data-dict=<substr> (e.g. --data-dict=profile) for one schema.
 DD_DEFAULT_SCOPE = "all"
 DD_DEFAULT_ROWS = 1000
+# How many example values to tally per field. Ten rather than five: on a coded
+# field (status, channel, country) the tail is where the surprises live, and
+# five was routinely cut off mid-distribution. The cell is a single string, so
+# this costs width, not runtime -- the tally already counts every value.
+DD_TOP_N = 10
 # Profile Snapshot Export partitions are large; give each file download longer.
 DD_SNAPSHOT_TIMEOUT = 120
 
@@ -1445,7 +1450,7 @@ def _fmt_val(v):
     return str(v).replace("|", "/").replace("\n", " ").strip()[:40]
 
 
-def build_data_dict(rows, fields, top_n=5):
+def build_data_dict(rows, fields, top_n=DD_TOP_N):
     """{field_path: {"coverage": int_pct, "top": "value(count) | ..."}}.
     Coverage = % of sampled rows where the field is populated."""
     from collections import Counter
@@ -2635,7 +2640,7 @@ def write_xlsx(results, client: str, datestr: str):
          "Its own tab",
          "Every field with its type, friendly label, whether it is an "
          "identity, and (when the coverage pass ran) how often it is actually "
-         "populated plus its five commonest values."),
+         "populated plus its ten commonest values."),
         ("...see who is being targeted, and how",
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
@@ -2774,7 +2779,9 @@ def write_xlsx(results, client: str, datestr: str):
             cc.number_format = '0"%"'
         fi.cell(ridx, 9, top)
         ridx += 1
-    autofit(fi, [52, 18, 28, 20, 38, 34, 24, 11, 60])
+    # Last column is Top values -- widened for DD_TOP_N=10. Nothing sits to its
+    # right, so the extra width costs the reader nothing.
+    autofit(fi, [52, 18, 28, 20, 38, 34, 24, 11, 90])
 
     # ---- Schemas index tab (one row per kept schema) ------------------------
     sh = wb.create_sheet("Schemas")
@@ -3047,7 +3054,7 @@ def write_xlsx(results, client: str, datestr: str):
                 cov.number_format = '0"%"'
                 sheet.cell(ridx, 8, info.get("top"))
             ridx += 1
-        autofit(sheet, [50, 20, 28, 9, 22, 42] + ([11, 70] if dd else []))
+        autofit(sheet, [50, 20, 28, 9, 22, 42] + ([11, 100] if dd else []))
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship
@@ -3290,7 +3297,7 @@ def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
     print(bar)
     print(f"  {ANSI['bold']}Full data dictionary?{ANSI['reset']}")
     print(f"  {ANSI['dim']}Samples up to {dd_rows} real records per kept schema "
-          f"(downloads + parses\n  Parquet) to add COVERAGE % and TOP-5 values "
+          f"(downloads + parses\n  Parquet) to add COVERAGE % and TOP-{DD_TOP_N} values "
           f"per field.\n  This can take several minutes -- much longer on big "
           f"tenants.{ANSI['reset']}")
     print(bar)

@@ -417,14 +417,14 @@ Claude to generate that entity's Mermaid ERD. Needs `openpyxl`.
 
 ### Data dictionary (`--data-dict`)
 
-Adds field-level **coverage** and **top-5 values** by sampling real ingested
+Adds field-level **coverage** and **top-10 values** by sampling real ingested
 data. AEP has no API that returns a value distribution for a field, and Query
 Service `GROUP BY` per field is too slow, so the tool finds the schema's
 datasets, downloads recent successful batch files (Snappy-Parquet) via the
 **Data Access** API, and tallies locally — **one download covers every field**.
 Two columns are added to the schema tab: **Coverage %** (share of sampled rows
-where the field is populated) and **Top values (count)** (the five most common
-values, pipe-separated). It skips empty batches via `recordCount`, spreads the
+where the field is populated) and **Top values (count)** (the ten most common
+values, pipe-separated — tune with `DD_TOP_N`). It skips empty batches via `recordCount`, spreads the
 sample across the schema's datasets, and streams Parquet through memory —
 **nothing is written to disk**; only the sampled rows (≤ the row target) are
 held, then dropped.

@@ -44,6 +44,11 @@ how its last run went.
   a batch-history-only tab that says so in red, not a missing tab.
 - Skip the sweep entirely with `--no-ingestion`.
 
+**Top values went from 5 to 10.** On a coded field — status, channel, country,
+event type — the tail is where the surprises are, and five was routinely cut
+off mid-distribution. The tally already counted every value, so this costs
+column width, not runtime. Tunable via `DD_TOP_N`.
+
 **Fixed: every tab was reporting the wrong sandbox.**
 
 The sandbox column on Summary, Schemas, Datasets and Audiences — and the
