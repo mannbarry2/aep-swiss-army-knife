@@ -2,12 +2,13 @@
 """
 data_dictionary_v3.py  (AEP Swiss Army Knife)
 =============================================
-Data Dictionary v3.4. Sucks every XDM schema out of an AEP sandbox, filters down
+Data Dictionary v3.5. Sucks every XDM schema out of an AEP sandbox, filters down
 to the ones that actually matter, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
-SQL table (system) name, and -- with --data-dict -- real field coverage + top-5
-example values sampled from ingested data.
+SQL table (system) name, an Ingestion tab tracing how each dataset is actually
+populated, and -- with --data-dict -- real field coverage + top-5 example values
+sampled from ingested data.
 
 The workbook is marked STRICTLY CONFIDENTIAL: with --data-dict it contains
 real sampled customer data.
@@ -108,6 +109,21 @@ now sampled ONCE per sandbox and the rows reused. A second pass then revisits
 anything still UNREADABLE and tries it once more before the workbook is written,
 because a 504 is usually transient.
 
+v3.5 -- An Ingestion tab: how each dataset is actually POPULATED. The workbook
+could say what the data is and where it lives, but not how it got there -- so a
+field at 0% coverage looked the same whether its dataflow was disabled, failing
+nightly, or was a one-off file upload two years ago. Every dataset is now traced
+through Adobe's Flow Service to the dataflow that WRITES it, plus what feeds it
+(file upload / cloud storage / streaming / a scheduled query), its schedule, and
+how its last run went. The join is targetConnection -> dataset and it has two
+shapes in the wild -- params.dataSetId and params.datasets[].datasetId, the
+latter sometimes carrying the SQL TABLE name instead of a dataset id -- so both
+are matched, plus the table name as a fallback key. Datasets no dataflow writes
+(AJO/Decisioning system datasets, fed by internal streaming push) fall back to
+their newest batch's ingesting client. Rows needing attention -- failed last
+run, disabled dataflow, never received a batch -- sort to the top. Six paged
+list calls per sandbox, joined in memory; skip it with --no-ingestion.
+
 Full version history: RELEASE_NOTES.md (link in the workbook's How to Use tab).
 
 openpyxl is needed for the XLSX; pyarrow + tzdata for --data-dict (all optional,
@@ -123,6 +139,8 @@ Usage:
     python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict=profile  # one schema
     python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict \
         --profile-snapshot=67dc0539eaafb02aeeb92ed7   # override snapshot dataset
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --no-ingestion
+        # skip the Flow Service sweep (no Ingestion tab, a little faster)
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
 falling back to a plaintext creds/ folder where keyring is unavailable; manage
@@ -151,8 +169,8 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.1"
-SCRIPT_DATE    = "2026-08-14"
+SCRIPT_VERSION = "3.5"
+SCRIPT_DATE    = "2026-08-17"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -175,6 +193,25 @@ DATASETS_URL = f"{PLATFORM}/data/foundation/catalog/dataSets"
 CATALOG_BATCHES_URL = f"{PLATFORM}/data/foundation/catalog/batches"
 EXPORT_URL = f"{PLATFORM}/data/foundation/export"   # Data Access (batch files)
 UPS_MERGE_POLICIES_URL = f"{PLATFORM}/data/core/ups/config/mergePolicies"
+
+# Flow Service (v3.5): how each dataset is actually POPULATED -- the dataflow
+# that writes it, what kind of source feeds it, on what schedule, and how its
+# last run went. Every call is defensive: no Sources ACL degrades the Ingestion
+# tab to the batch-history fallback, it never kills the run.
+FLOWSERVICE = f"{PLATFORM}/data/foundation/flowservice"
+# Base connections live at /connections, NOT /baseConnections (that 404s).
+# Neither is fetched -- nothing on the tab needs the account behind the source.
+FLOW_ENDPOINTS = ("flows", "sourceConnections", "targetConnections",
+                  "connectionSpecs", "flowSpecs")
+FLOW_PAGE_LIMIT = 100
+FLOW_MAX_PAGES = 300      # ~30k items -- a runaway backstop, not a real ceiling
+# Datasets that no dataflow writes fall back to their newest batch: one Catalog
+# call each. Capped so a huge tenant can't turn the tab into a thousand-call
+# crawl; any truncation is logged AND stated on the tab, never passed silently.
+INGEST_BATCH_PROBE_MAX = 400
+# Last-run states that mean the dataflow did NOT work. Flow Service is not
+# consistent about the word -- both spellings appear in one tenant's flows.
+FLOW_FAILED_STATES = ("failed", "failure", "error")
 
 # Profile coverage (v3.1): a Profile-class schema's coverage must be sampled from
 # the merged UNION (Profile Snapshot Export), not its pre-merge feeding datasets.
@@ -499,6 +536,334 @@ def get_all_datasets(token, conf, sandbox):
             break
         start += limit
     return counts, datasets
+
+
+# ----------------------------------------------------------------------------
+# Ingestion -- how each dataset is POPULATED (Flow Service + batch fallback)
+# ----------------------------------------------------------------------------
+# The schema tabs say what the data IS and the Datasets tab says where it LIVES.
+# Neither says how it GETS there, and that changes what a number means: a field
+# sitting at 0% coverage reads very differently depending on whether its
+# dataflow is disabled, failing nightly, or was a one-off file upload two years
+# ago. So every dataset is traced back to the thing that writes it.
+#
+# The join is targetConnection -> dataset and it comes in TWO shapes in the wild
+# (both confirmed against a live tenant):
+#     params.dataSetId               sources -- cloud storage, streaming, ...
+#     params.datasets[].datasetId    Query Service
+# and the Query Service one sometimes carries the SQL TABLE name instead of a
+# dataset id, which is why the table name is kept as a fallback key. Between
+# them they resolve the large majority of a real estate. The remainder have no
+# dataflow at all (AJO / Decisioning system datasets, fed by internal streaming
+# push) and are answered from batch history instead.
+def _flow_paged(path, headers, label):
+    """Page one Flow Service collection.
+
+    Flow Service paginates on _links.next.href, and that href is relative to the
+    flowservice BASE ('/flows?...'), not the host root -- resolving it against
+    the host silently returns page 1 forever. Returns (items, error_or_None):
+    callers degrade to a thinner tab rather than losing the whole workbook."""
+    url = f"{FLOWSERVICE}/{path}?limit={FLOW_PAGE_LIMIT}"
+    out, page = [], 0
+    while url and page < FLOW_MAX_PAGES:
+        page += 1
+        try:
+            body, _ = http(url, headers=headers, timeout=90)
+        except urllib.error.HTTPError as e:
+            detail = flatten_err(e.read().decode(errors="replace"), 160)
+            return out, f"HTTP {e.code}: {detail}"
+        except Exception as e:
+            return out, f"{type(e).__name__}: {e}"
+        data = json.loads(body) or {}
+        items = (data.get("items") or data.get("flows")
+                 or data.get("children") or [])
+        out.extend(i for i in items if isinstance(i, dict))
+        nxt = ((data.get("_links") or {}).get("next") or {}).get("href")
+        if not nxt or not items:
+            break
+        url = nxt if nxt.startswith("http") else f"{FLOWSERVICE}{nxt}"
+    else:
+        logger.warning(f"  {label}: stopped at the {FLOW_MAX_PAGES}-page "
+                       f"backstop; the list may be incomplete.")
+    return out, None
+
+
+def _conn_dataset_refs(conn: dict) -> list:
+    """Every dataset reference a source/target connection carries -- see the two
+    shapes described above. Returns raw refs (dataset ids AND table names); the
+    caller resolves them against the Catalog."""
+    refs, params = [], (conn.get("params") or {})
+    for key in ("dataSetId", "datasetId", "dataSetID"):
+        if params.get(key):
+            refs.append(str(params[key]))
+    for d in params.get("datasets") or []:
+        if isinstance(d, dict) and d.get("datasetId"):
+            refs.append(str(d["datasetId"]))
+    return refs
+
+
+# Cron shapes worth naming. Anything unrecognised is shown raw -- better an
+# expression the reader can look up than a wrong plain-English guess.
+_CRON_EVERY_N_MIN = re.compile(r"^\*/(\d+) \* \* \* \*$")
+_CRON_EVERY_N_HR = re.compile(r"^(\d+) \*/(\d+) \* \* \*$")
+_CRON_DAILY = re.compile(r"^(\d+) (\d+) \* \* \*$")
+
+
+def _human_cron(expr: str) -> str:
+    """A cron expression as something a non-engineer can read."""
+    expr = " ".join((expr or "").split())
+    if not expr:
+        return ""
+    # '*/1' means 'every one of them', i.e. exactly the same as '*'. AEP writes
+    # the long form constantly ('0 4 */1 * *' for a 04:00 daily), so normalise
+    # before matching or every daily schedule falls through to raw cron.
+    parts = expr.split(" ")
+    if len(parts) == 5:
+        expr = " ".join("*" if p == "*/1" else p for p in parts)
+    if expr in ("0 * * * *", "@hourly"):
+        return "hourly"
+    if expr in ("@daily", "@midnight"):
+        return "daily at 00:00 UTC"
+    if expr == "@once":
+        return "one-off"
+    m = _CRON_EVERY_N_MIN.match(expr)
+    if m:
+        return f"every {m.group(1)} min"
+    m = _CRON_EVERY_N_HR.match(expr)
+    if m:
+        return f"every {m.group(2)}h (at :{int(m.group(1)):02d})"
+    m = _CRON_DAILY.match(expr)
+    if m:
+        return f"daily at {int(m.group(2)):02d}:{int(m.group(1)):02d} UTC"
+    return expr
+
+
+def _ingest_verdict(flow_spec: str, source_spec: str) -> str:
+    """The plain-English 'Populated by' answer for a dataset that a dataflow
+    writes. Matched on the flow spec + source connection spec NAMES rather than
+    their spec ids, because the ids are per-connector GUIDs and the names are
+    what the Sources UI shows. Ordered most-specific first, and it always falls
+    through to naming the connector rather than saying 'unknown' -- a tenant
+    using S3/SFTP/Salesforce lands in the generic branch and still reads well."""
+    fs, ss = (flow_spec or "").lower(), (source_spec or "").lower()
+    if "query service" in fs:
+        return "Query Service output (Data Distiller)"
+    if "fileupload" in fs.replace(" ", "") or ss == "file-upload":
+        return "Manual file upload"
+    if "datastream" in fs or "edge datastream" in ss:
+        return "Streaming -- Web/Mobile SDK (datastream)"
+    if "stream" in fs or "steam" in fs or "streaming connection" in ss:
+        # 'Steam data with transformation' is Adobe's own typo in the flow spec.
+        return "Streaming -- HTTP API"
+    if "ttl" in fs or "dataretention" in ss:
+        return "System -- data retention (TTL)"
+    if "classification" in fs:
+        return "Adobe Analytics -- classifications"
+    if "backfill" in fs or "report suite" in ss:
+        return "Adobe Analytics -- report suite"
+    if "lookup store" in fs:
+        return "System -- lookup store"
+    if "ups" in fs or "activation-ups" in ss:
+        return "System -- Profile export"
+    if ss and ss not in ("datalake", "dwh", "?"):
+        return f"Source connector -- {source_spec}"
+    return flow_spec or "Dataflow"
+
+
+# Ingestion clients seen on batches, for the datasets no dataflow writes. The
+# client id is Adobe's internal name for whatever pushed the batch.
+_BATCH_CLIENT_LABELS = {
+    "acp_foundation_push": "Streaming ingestion (no dataflow)",
+    "acp_foundation_stream": "Streaming ingestion (no dataflow)",
+    "acp_foundation_queryservice": "Query Service output (Data Distiller)",
+    "acp_ui_platform": "Manual upload (UI)",
+    "acp_foundation_dataingestion": "Batch ingestion API",
+}
+
+
+def _batch_verdict(client: str) -> str:
+    """'Populated by' for a dataset with no dataflow, from its newest batch."""
+    if not client:
+        return "No batches ever ingested"
+    label = _BATCH_CLIENT_LABELS.get(str(client).lower())
+    return label or f"Batch ingestion ({client})"
+
+
+def _newest_batch(token, conf, sandbox, dsid):
+    """(created_by_client, created_epoch_ms, status) for a dataset's most recent
+    batch, or (None, None, '') when it has never been written to. The fallback
+    signal for datasets Flow Service knows nothing about."""
+    url = (f"{CATALOG_BATCHES_URL}?dataSet={urllib.parse.quote(str(dsid))}"
+           f"&limit=1&sort=desc:created")
+    try:
+        body, _ = http(url, headers=aep_headers(token, conf, sandbox),
+                       timeout=45)
+        data = json.loads(body) or {}
+    except Exception:
+        return None, None, ""
+    for _bid, b in (data.items() if isinstance(data, dict) else []):
+        b = b or {}
+        return (b.get("createdClient") or b.get("createdUser") or ""),\
+               b.get("created"), str(b.get("status") or "")
+    return None, None, ""
+
+
+def _pick_primary_flow(entries):
+    """One dataset can be written by several flows (a backfill plus a nightly,
+    say). Pick the one that best explains the data as it stands: enabled beats
+    disabled, then most recently run."""
+    def rank(entry):
+        f = entry[0]
+        enabled = str(f.get("state") or "").lower() in ("enabled", "active")
+        started = ((f.get("lastRunDetails") or {}).get("startedAtUTC")) or 0
+        try:
+            started = int(started)
+        except (TypeError, ValueError):
+            started = 0
+        return (0 if enabled else 1, -started)
+    return sorted(entries, key=rank)[0]
+
+
+def build_ingestion_map(token, conf, sandbox, ds_all):
+    """{dataset_id: {...}} describing how every dataset is populated, plus a
+    note for the tab when the picture is less than complete.
+
+    Six paged list calls, joined in memory -- NOT one call per dataset. Only the
+    datasets no dataflow writes cost a call each (their batch history), and that
+    tail is capped by INGEST_BATCH_PROBE_MAX.
+
+    Returns (rows, note). An empty rows dict with a note means Flow Service was
+    unreachable -- the caller still writes the tab, saying so, rather than
+    dropping it and leaving the reader to guess."""
+    headers = aep_headers(token, conf, sandbox)
+    raw = {}
+    for ep in FLOW_ENDPOINTS:
+        items, err = _flow_paged(ep, headers, ep)
+        if err and ep == "flows":
+            logger.warning(f"  {sandbox}: Flow Service /flows failed ({err}). "
+                           f"Ingestion falls back to batch history only.")
+            raw[ep] = []
+        elif err:
+            logger.warning(f"  {sandbox}: Flow Service /{ep} failed ({err}); "
+                           f"some ingestion detail will be blank.")
+            raw[ep] = items
+        else:
+            raw[ep] = items
+    flows = raw.get("flows") or []
+    logger.info(f"  {sandbox}: Flow Service -- {len(flows)} dataflow(s), "
+                f"{len(raw.get('targetConnections') or [])} target connection(s).")
+
+    spec_name = {str(s.get("id")): (s.get("name") or "")
+                 for s in (raw.get("connectionSpecs") or []) if s.get("id")}
+    flowspec_name = {str(s.get("id")): (s.get("name") or "")
+                     for s in (raw.get("flowSpecs") or []) if s.get("id")}
+    tc_by_id = {str(t.get("id")): t for t in (raw.get("targetConnections") or [])}
+    sc_by_id = {str(s.get("id")): s for s in (raw.get("sourceConnections") or [])}
+
+    # Catalog keys: by id, and by SQL table name for the Query Service targets
+    # that reference a table rather than a dataset id.
+    by_id = {d["id"]: d for d in ds_all}
+    by_table = {}
+    for d in ds_all:
+        if d.get("table"):
+            by_table.setdefault(d["table"], d["id"])
+
+    def resolve(ref):
+        if ref in by_id:
+            return ref
+        return by_table.get(ref)
+
+    ds_flows = {}
+    for f in flows:
+        for tid in f.get("targetConnectionIds") or []:
+            tc = tc_by_id.get(str(tid))
+            if not tc:
+                continue
+            for ref in _conn_dataset_refs(tc):
+                dsid = resolve(ref)
+                if dsid:
+                    ds_flows.setdefault(dsid, []).append((f, tc))
+
+    def source_spec_of(f):
+        """The connector feeding a flow. 'datalake' means the source is another
+        AEP dataset (Query Service, TTL, exports), so a real external connector
+        wins over it when a flow carries both."""
+        names = []
+        for sid in f.get("sourceConnectionIds") or []:
+            sc = sc_by_id.get(str(sid))
+            if not sc:
+                continue
+            nm = spec_name.get(str((sc.get("connectionSpec") or {}).get("id")), "")
+            if nm:
+                names.append(nm)
+        external = [n for n in names if n.lower() not in ("datalake", "dwh")]
+        return (external or names or [""])[0]
+
+    rows = {}
+    for dsid, entries in ds_flows.items():
+        f, _tc = _pick_primary_flow(entries)
+        fs = flowspec_name.get(str((f.get("flowSpec") or {}).get("id")), "")
+        src = source_spec_of(f)
+        lrd = f.get("lastRunDetails") or {}
+        state = str(f.get("state") or "")
+        rows[dsid] = {
+            "verdict": _ingest_verdict(fs, src),
+            "source": src or fs,
+            "flow_name": f.get("name") or "",
+            "flow_id": f.get("id") or "",
+            "flow_type": fs,
+            "schedule": _human_cron((f.get("scheduleParams") or {})
+                                    .get("cronExpression") or ""),
+            "state": state,
+            "enabled": state.lower() in ("enabled", "active"),
+            "last_run": str(lrd.get("state") or ""),
+            "last_run_at": fmt_epoch_ms(lrd.get("startedAtUTC")) if lrd.get("startedAtUTC") else "",
+            "n_flows": len(entries),
+            "from_batch": False,
+        }
+
+    # ---- Fallback: datasets no dataflow writes ------------------------------
+    noflow = [d["id"] for d in ds_all if d["id"] not in rows]
+    probed, truncated = noflow[:INGEST_BATCH_PROBE_MAX], []
+    if len(noflow) > INGEST_BATCH_PROBE_MAX:
+        truncated = noflow[INGEST_BATCH_PROBE_MAX:]
+        logger.warning(f"  {sandbox}: {len(noflow)} dataset(s) have no dataflow; "
+                       f"only the first {INGEST_BATCH_PROBE_MAX} were checked "
+                       f"against batch history (cap: INGEST_BATCH_PROBE_MAX).")
+    if probed:
+        logger.info(f"  {sandbox}: {len(probed)} dataset(s) have no dataflow -- "
+                    f"reading their batch history instead.")
+    for dsid in probed:
+        client, created, status = _newest_batch(token, conf, sandbox, dsid)
+        rows[dsid] = {
+            "verdict": _batch_verdict(client),
+            "source": client or "",
+            "flow_name": "", "flow_id": "", "flow_type": "",
+            "schedule": "", "state": "", "enabled": True,
+            "last_run": status,
+            "last_run_at": fmt_epoch_ms(created) if created else "",
+            "n_flows": 0,
+            "from_batch": True,
+        }
+    for dsid in truncated:
+        rows[dsid] = {
+            "verdict": "NOT CHECKED -- no dataflow, batch history not read",
+            "source": "", "flow_name": "", "flow_id": "", "flow_type": "",
+            "schedule": "", "state": "", "enabled": True, "last_run": "",
+            "last_run_at": "", "n_flows": 0, "from_batch": True,
+        }
+
+    note = ""
+    if not flows:
+        note = ("Flow Service could not be read with this credential (it needs "
+                "the Sources permission), so dataflow, schedule and last-run "
+                "detail are missing. Every row below comes from batch history "
+                "alone.")
+    elif truncated:
+        note = (f"{len(truncated)} dataset(s) with no dataflow were NOT checked "
+                f"against batch history (capped at {INGEST_BATCH_PROBE_MAX}); "
+                f"they are listed as NOT CHECKED.")
+    return rows, note
 
 
 def get_all_descriptors(token, conf, sandbox):
@@ -1312,7 +1677,7 @@ def resolve_sandboxes_arg(arg: str, sandboxes):
 # ----------------------------------------------------------------------------
 # Per-sandbox collection + filtering
 # ----------------------------------------------------------------------------
-def collect_sandbox(token, conf, sb):
+def collect_sandbox(token, conf, sb, with_ingestion=True):
     """Read one sandbox, filter, and resolve fields for kept schemas.
 
     Returns dict:
@@ -1322,6 +1687,7 @@ def collect_sandbox(token, conf, sb):
       kept      -> list of kept schema dicts (see build below)
       labels_n  -> count of alternateDisplayInfo (dual) labels in the sandbox
       stats     -> {total, kept, no_dataset, adhoc, ajo, fields, relationships}
+      ingestion -> {dataset_id: how it is populated}  (see build_ingestion_map)
     """
     name = sb.get("name", "?")
     title = sb.get("title") or name
@@ -1330,6 +1696,22 @@ def collect_sandbox(token, conf, sb):
     raws = get_all_schemas(token, conf, name)
     ds_counts, ds_all = get_all_datasets(token, conf, name)
     identities, relationships, labels = get_all_descriptors(token, conf, name)
+
+    # How each dataset is populated. Isolated behind its own try: this is the
+    # newest surface and the one most likely to be blocked by a credential's
+    # permissions, and a dictionary without it still beats no dictionary.
+    ingestion, ingestion_note = {}, ""
+    if with_ingestion:
+        try:
+            ingestion, ingestion_note = build_ingestion_map(
+                token, conf, name, ds_all)
+        except Exception as e:
+            logger.warning(f"  {name}: ingestion sweep failed "
+                           f"({type(e).__name__}: {e}); the Ingestion tab will "
+                           f"say so.")
+            logger.debug(traceback.format_exc())
+            ingestion_note = (f"The ingestion sweep failed for this sandbox "
+                              f"({type(e).__name__}). No rows could be read.")
 
     # id -> title, for resolving relationship destinations to readable names.
     id_to_title = {r.get("$id"): (r.get("title") or r.get("$id")) for r in raws}
@@ -1396,7 +1778,12 @@ def collect_sandbox(token, conf, sb):
 
         field_rows = []
         n_identities = n_rels = n_labels = 0
-        for path, dtype, title, req in fields:
+        # NB: the loop variable is fld_title, NOT title -- `title` is this
+        # function's SANDBOX title, and a Python for-loop leaks its variable
+        # into the enclosing scope. Binding it here overwrote the sandbox title
+        # with the display name of the last field of the last kept schema, and
+        # that wrong value was then stamped on every tab of the workbook.
+        for path, dtype, fld_title, req in fields:
             mkey = (sid, path.replace("[]", "").lower())
             ident = identities.get(mkey)
             rel = relationships.get(mkey)
@@ -1423,7 +1810,7 @@ def collect_sandbox(token, conf, sb):
                 rel_disp = ""
             # Display name lives on the field itself; fall back to an
             # alternateDisplayInfo descriptor only where the field has none.
-            friendly = title or (lab["title"] if lab else "")
+            friendly = fld_title or (lab["title"] if lab else "")
             if friendly:
                 n_labels += 1
             field_rows.append((path, dtype, friendly, "Y" if req else "",
@@ -1452,6 +1839,7 @@ def collect_sandbox(token, conf, sb):
         "title": title, "name": name, "env": env,
         "verdicts": verdicts, "kept": kept, "datasets": ds_all,
         "labels_n": len(labels), "stats": stats,
+        "ingestion": ingestion, "ingestion_note": ingestion_note,
     }
 
 
@@ -2112,7 +2500,7 @@ def write_xlsx(results, client: str, datestr: str):
     # Unique worksheet name per kept schema (Excel: <=31 chars, unique). Built
     # up front so the Field Index and Schemas index can name each schema's tab.
     used = {"summary", "how to use", "schemas", "field index", "datasets",
-            "audiences"}
+            "audiences", "ingestion"}
     tabbed = []  # (res, k, sheet_name)
     for res in results:
         for k in res["kept"]:
@@ -2252,6 +2640,16 @@ def write_xlsx(results, client: str, datestr: str):
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
          "the rule behind it in readable form."),
+        ("...find out how a dataset gets filled",
+         "Ingestion",
+         "The dataflow that writes each dataset, what feeds it (file upload, "
+         "cloud storage, streaming, a query), its schedule, and whether its "
+         "last run worked. Problems sort to the top."),
+        ("...explain why a field is empty",
+         "Ingestion",
+         "Look the dataset up here. A disabled dataflow, a failed last run or "
+         "'never received a batch' explains a column of zeroes on a schema "
+         "tab far better than the schema itself can."),
         ("", "", ""),
         ("THINGS THAT WILL CATCH YOU OUT", "", ""),
         ("Coverage % is a SAMPLE",
@@ -2280,6 +2678,16 @@ def write_xlsx(results, client: str, datestr: str):
          "Audiences",
          "Entries like (Adobe service: pathos) are Adobe's own automation, not "
          "a colleague. Only email addresses are people."),
+        ("One dataset can have several dataflows",
+         "Ingestion",
+         "The row shows the one that best explains the data now -- enabled "
+         "first, then most recently run. The 'Dataflows writing this' column "
+         "tells you when there are others behind it."),
+        ("A blank schedule is not a broken one",
+         "Ingestion",
+         "Most file uploads and streaming connections have no cron at all: "
+         "they run once, or continuously. A blank Schedule only matters on "
+         "something you expected to be recurring."),
         ("", "", ""),
         ("EVERY TAB", "", ""),
         ("Filters and frozen headers are on",
@@ -2428,6 +2836,103 @@ def write_xlsx(results, client: str, datestr: str):
             dt.cell(rr, 6, d.get("id"))
             rr += 1
     autofit(dt, [18, 40, 42, 44, 26, 34])
+
+    # ---- Ingestion tab: how each dataset actually gets populated ------------
+    # The Datasets tab says where data lives; this says how it got there, and
+    # therefore what a low coverage number means. Rows that need attention --
+    # a failed last run, a disabled dataflow, a dataset nothing has ever
+    # written to -- sort to the top, because those are the ones that explain a
+    # column of zeroes on a schema tab.
+    ing = wb.create_sheet("Ingestion")
+    confidential(ing)
+    ing["A2"] = f"Ingestion  -  how each dataset is populated  -  {label}"
+    ing["A2"].font = title_font
+    ing_notes = [res.get("ingestion_note") for res in results
+                 if res.get("ingestion_note")]
+    ing["A3"] = ("Traced from Adobe's Flow Service: the dataflow that WRITES "
+                 "each dataset, what feeds it, on what schedule, and how its "
+                 "last run went. Datasets no dataflow writes fall back to their "
+                 "most recent batch. Rows needing attention are sorted to the "
+                 "top.")
+    ing["A3"].font = Font(italic=True, color="666666")
+    INGEST_COLUMNS = ["Sandbox", "Schema", "Dataset (friendly name)",
+                      "Table Name (SQL / system)", "Populated by",
+                      "Source / client", "Dataflow", "Schedule",
+                      "Dataflow state", "Last run", "Last run (UTC)",
+                      "Dataflows writing this", "Dataset ID", "Dataflow ID"]
+
+    ing_rows = []
+    for res in results:
+        imap = res.get("ingestion") or {}
+        for d in res.get("datasets") or []:
+            info = imap.get(d.get("id")) or {}
+            verdict = info.get("verdict") or "Unknown"
+            # Flow Service is not consistent about the word: 'failed' from the
+            # sources runs, 'failure' from others. Both mean the same thing and
+            # both need to reach the top of the tab.
+            failed = (info.get("last_run") or "").lower() in FLOW_FAILED_STATES
+            disabled = bool(info.get("state")) and not info.get("enabled")
+            never = verdict.startswith("No batches")
+            unchecked = verdict.startswith("NOT CHECKED")
+            # Attention rank: what a reader should look at first.
+            rank = 0 if failed else 1 if disabled else 2 if never else \
+                3 if unchecked else 4
+            ing_rows.append((rank, failed, disabled, never or unchecked, res, d,
+                             info, verdict))
+    ing_rows.sort(key=lambda t: (t[0], (t[5].get("schema_title") or "~").lower(),
+                                 (t[5].get("name") or "").lower()))
+
+    n_flow = sum(1 for t in ing_rows if (t[6].get("n_flows") or 0) > 0)
+    n_failed = sum(1 for t in ing_rows if t[1])
+    n_never = sum(1 for t in ing_rows if t[7].startswith("No batches"))
+    summary_bits = [f"{n_flow} of {len(ing_rows)} dataset(s) are written by a "
+                    f"dataflow"]
+    if n_failed:
+        summary_bits.append(f"{n_failed} whose last run FAILED")
+    if n_never:
+        summary_bits.append(f"{n_never} that have never received a batch")
+    ing["A4"] = "; ".join(summary_bits) + "."
+    ing["A4"].font = Font(bold=True,
+                          color="C00000" if (n_failed or ing_notes) else "1F4E78")
+    if ing_notes:
+        ing["A5"] = "  ".join(ing_notes)
+        ing["A5"].font = Font(italic=True, color="C00000")
+        ing["A5"].alignment = Alignment(wrap_text=True, vertical="top")
+        ing.row_dimensions[5].height = 30
+    hr = 7 if ing_notes else 6
+    for c, nm in enumerate(INGEST_COLUMNS, 1):
+        ing.cell(hr, c, nm)
+    style_header(ing, len(INGEST_COLUMNS), row=hr)
+
+    warn_font = Font(bold=True, color="C00000")
+    amber_font = Font(bold=True, color="B26B00")
+    quiet_font = Font(italic=True, color="808080")
+    rr = hr + 1
+    for rank, failed, disabled, quiet, res, d, info, verdict in ing_rows:
+        ing.cell(rr, 1, res["title"])
+        ing.cell(rr, 2, d.get("schema_title"))
+        ing.cell(rr, 3, d.get("name"))
+        ing.cell(rr, 4, d.get("table"))
+        vcell = ing.cell(rr, 5, verdict)
+        ing.cell(rr, 6, info.get("source") or "")
+        ing.cell(rr, 7, info.get("flow_name") or "")
+        ing.cell(rr, 8, info.get("schedule") or "")
+        scell = ing.cell(rr, 9, info.get("state") or "")
+        lcell = ing.cell(rr, 10, info.get("last_run") or "")
+        ing.cell(rr, 11, info.get("last_run_at") or "")
+        ing.cell(rr, 12, info.get("n_flows") if info else "")
+        ing.cell(rr, 13, d.get("id"))
+        ing.cell(rr, 14, info.get("flow_id") or "")
+        if failed:
+            lcell.font = warn_font
+            vcell.font = warn_font
+        elif disabled:
+            scell.font = amber_font
+            vcell.font = amber_font
+        elif quiet:
+            vcell.font = quiet_font
+        rr += 1
+    autofit(ing, [18, 38, 40, 42, 38, 26, 34, 20, 15, 12, 18, 12, 28, 36])
 
     # ---- Audiences tab: what the business does WITH the data ----------------
     # Completes the chain: schema -> dataset -> audience -> the rule behind it.
@@ -2806,7 +3311,7 @@ def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
 
 def run(service: str, sandbox_arg: str | None,
         dd_scope: str | None = None, dd_rows: int = DD_DEFAULT_ROWS,
-        profile_snapshot: str | None = None):
+        profile_snapshot: str | None = None, with_ingestion: bool = True):
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print()
     print(bar)
@@ -2858,7 +3363,8 @@ def run(service: str, sandbox_arg: str | None,
     for sb in chosen:
         logger.info(f"Collecting {sb.get('name', '?')} ...")
         try:
-            res = collect_sandbox(token, conf, sb)
+            res = collect_sandbox(token, conf, sb,
+                                  with_ingestion=with_ingestion)
         except urllib.error.HTTPError as e:
             logger.error(f"  {sb.get('name')}: HTTP {e.code} "
                          f"{flatten_err(e.read().decode(errors='replace'))}")
@@ -2900,7 +3406,7 @@ def run(service: str, sandbox_arg: str | None,
         n_tabs = sum(len(r["kept"]) for r in results)
         logger.info(f"XLSX written: {xlsx_path}  "
                     f"({n_tabs} schema tab(s) + Summary + Field Index + "
-                    f"Schemas index + Datasets)")
+                    f"Schemas index + Datasets + Ingestion)")
 
     total_kept = sum(r["stats"]["kept"] for r in results)
     total_seen = sum(r["stats"]["total"] for r in results)
@@ -2926,6 +3432,7 @@ def main():
     dd_scope = None
     dd_rows = DD_DEFAULT_ROWS
     profile_snapshot = None
+    with_ingestion = True
     positional = []
     for a in args:
         if a.startswith("--sandbox="):
@@ -2936,6 +3443,8 @@ def main():
             dd_scope = a.split("=", 1)[1].strip().lower()
         elif a.startswith("--profile-snapshot="):
             profile_snapshot = a.split("=", 1)[1].strip() or None
+        elif a in ("--no-ingestion", "--no-flows"):
+            with_ingestion = False
         elif a.startswith("--dd-rows="):
             try:
                 dd_rows = max(1, int(a.split("=", 1)[1]))
@@ -2969,7 +3478,7 @@ def main():
         return
 
     run(chosen, sandbox_arg, dd_scope, dd_rows,
-        profile_snapshot=profile_snapshot)
+        profile_snapshot=profile_snapshot, with_ingestion=with_ingestion)
 
 
 if __name__ == "__main__":

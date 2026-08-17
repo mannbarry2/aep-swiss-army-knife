@@ -7,6 +7,66 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.5 — 2026-08-17
+
+**An Ingestion tab: how each dataset actually gets populated.**
+
+The workbook could say what the data *is* (schema tabs) and where it *lives*
+(Datasets tab), but nothing said how it *got there* — and that changes what the
+numbers mean. A field sitting at 0% coverage read identically whether its
+dataflow was disabled, failing every night, or was a one-off file upload two
+years ago.
+
+Every dataset is now traced through Adobe's **Flow Service** to the dataflow
+that writes it, with a plain-English verdict per dataset: *Manual file upload*,
+*Query Service output (Data Distiller)*, *Source connector — azure-blob*,
+*Streaming — Web/Mobile SDK (datastream)*, *No batches ever ingested*, and so
+on — plus the source connector, the dataflow name, its schedule, its state and
+how its last run went.
+
+- **The join is `targetConnection → dataset`, and it has two shapes in the
+  wild.** `params.dataSetId` (sources) and `params.datasets[].datasetId`
+  (Query Service) — and the Query Service one sometimes carries the SQL *table*
+  name instead of a dataset id. All three keys are matched, which resolves the
+  large majority of a real estate; matching only the documented `dataSetId`
+  would have quietly mislabelled every Data Distiller output as unknown.
+- **Datasets no dataflow writes fall back to batch history** — the ingesting
+  client on their newest batch. That is what answers the AJO and Decisioning
+  system datasets, which have no dataflow at all.
+- **Problems sort to the top**: failed last run, then disabled dataflow, then
+  never-written-to. The first live run surfaced a run of failing dataflows and
+  a set of datasets that have never received a batch at all — none of which
+  were visible anywhere in the workbook before.
+- Six paged list calls per sandbox, joined in memory — not one call per
+  dataset. Only the no-dataflow tail costs a call each, capped at 400 and
+  **stated on the tab** when it truncates.
+- Degrades rather than fails: a credential without the Sources permission gets
+  a batch-history-only tab that says so in red, not a missing tab.
+- Skip the sweep entirely with `--no-ingestion`.
+
+**Fixed: every tab was reporting the wrong sandbox.**
+
+The sandbox column on Summary, Schemas, Datasets and Audiences — and the
+`sandbox:` line in each schema tab's header block — showed *Timestamp* instead
+of *Prod*.
+
+`collect_sandbox` held the sandbox title in a local called `title`, and the
+per-field loop inside it also unpacked into `title`. A Python for-loop leaks its
+variable into the enclosing scope, so by the time the function returned, the
+sandbox title had been overwritten by **the display name of the last field of
+the last kept schema** — which happened to be `Timestamp`. Every workbook this
+tool has written since the sandbox column was added has carried a field name
+where the sandbox should be. The loop variable is now `fld_title`.
+
+**Fixed: daily schedules were shown as raw cron.** AEP writes `*/1` where `*`
+would do (`0 4 */1 * *` for an 04:00 daily), which fell straight through the
+humaniser. `*/1` is now normalised to `*` before matching, so the commonest
+schedule in the estate reads as *daily at 04:00 UTC*. Unrecognised expressions
+are still shown raw — better a cron a reader can look up than a confident wrong
+guess.
+
+---
+
 ## v3.4.1 — 2026-08-14
 
 **Complete coverage on Profile schemas.**
