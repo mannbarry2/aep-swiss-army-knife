@@ -35,6 +35,7 @@ The toolkit spans two product ranges:
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.5.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an **Ingestion** tab tracing how each dataset is actually populated (Flow Service → the dataflow that writes it, its source, schedule and last run), an Audiences tab, and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. [Release notes](RELEASE_NOTES.md). |
+| [`estimate_prober.py`](estimate_prober.py) | Watches the **audience estimation** service in a sandbox: `sample-status` ages the store-wide Profile sample estimates run against, `probe` fires a canary estimate and classifies the outcome (including the `NEVER_STARTED` signature — `PROCESSING`, 0 profiles read, empty error, forever). Reads its own CSV history back to tell you **how long it has been failing**; exit codes suit a scheduler. |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
 cleanly across multiple Adobe orgs without folder collisions. `creds/*.json`
@@ -450,4 +451,132 @@ python data_dictionary_v3.py "acme k" --sandbox=prod,dev1
 python data_dictionary_v3.py "acme k" --sandbox=all
 python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict="acme order event schema"
 python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict=all --dd-rows=2000
+```
+
+## estimate_prober.py
+
+Watches the **audience estimation** service in one sandbox, so a degradation is
+something you *detect* rather than something the audience team reports days
+later. Two independent things decide whether an estimate can be trusted, and
+this observes both, appending every run to a CSV so the history outlives the
+incident. Read-only: creating a preview job is inherent to probing an estimate
+(the estimate job is triggered by the preview job and shares its id), but no
+audience is created, published or modified, and no segment definition is saved.
+
+### Naked run
+
+No arguments and it goes interactive, like the rest of the toolkit: pick a
+credential set, pick a sandbox from the live list, and it checks the sample
+straight away (free and instant), then offers the estimate probe (which can take
+up to `--timeout`). Both results land in the default history, so naked runs and
+scheduled ones build one continuous picture. No TTY *and* no subcommand fails
+fast and loud rather than waiting on a prompt nobody can answer.
+
+```
+python estimate_prober.py
+```
+
+### `sample-status`
+
+Estimates don't run against the full Profile store — they run against a
+**store-wide sample** AEP refreshes on its own schedule. If that sample goes
+stale, every estimate riding on it is misleading or zero, and nothing in the UI
+tells you. Reads `/previewsamplestatus` and reports the **sample size**
+(`numRowsToRead` — merged profiles in the sample), the **total profile count**
+(`totalRows`), **when the sample job last succeeded** and its **age in hours**.
+
+Exits non-zero once the sample is older than `--max-age-hours` (default 96) —
+and also when the endpoint won't say when it last ran, which fails safe rather
+than reporting a freshness it can't establish. `--report=dataset|namespace`
+additionally prints the sample's distribution by dataset or identity namespace
+(screen only — reports never reach the history file).
+
+### `probe`
+
+Fires a canary estimate: one event with a short lookback,
+`select var1 from xEvent where var1.timestamp occurs <= 7 days before now`,
+overridable with `--pql`. (The event has to be *bound* like that — the bare
+`xEvent.timestamp occurs <= ...` is rejected 400, because `xEvent.timestamp` is
+array-typed and `occurs` wants a scalar.) It
+creates the preview job, then polls `/estimate/{previewId}` every `--interval`
+seconds (5) up to `--timeout` (180), recording elapsed seconds, `state`,
+`profilesReadSoFar`, `profilesMatchedSoFar`, `numRowsToRead`, `totalRows`,
+`estimatedSize`, `standardError` and the `error` object **on every poll**
+(`--verbose` prints them live). Adobe documents estimates as completing in
+10–15 seconds.
+
+Every run lands on exactly one outcome:
+
+| Outcome | Meaning | Exit |
+|---------|---------|------|
+| `COMPLETED_WITH_RESULT` | Reached `RESULT_READY` with a non-zero estimate. Healthy. | 0 |
+| `COMPLETED_EMPTY` | Reached `RESULT_READY`, read rows, matched none. Legitimate sample starvation, **not** a fault. | 0 |
+| `NEVER_STARTED` | Timed out with `profilesReadSoFar` at 0 and an empty error object. **The signature this tool exists for** — we have watched jobs sit like this indefinitely on a trivial definition. | 2 |
+| `STALLED` | Timed out having read some rows but never finished. | 3 |
+| `ERRORED` | The `error` object was populated, the service answered 4xx, or the body couldn't be parsed (an unparseable response is itself a finding). | 4 |
+
+A credential or transport failure exits 1.
+
+### How long has it been stuck?
+
+A single run can only report its own wait, and that is capped by `--timeout`: a
+service stuck for six hours still reads "180s", because every probe creates a
+fresh preview job and none of them can see further back than itself. So each run
+reads the history file back first, counts the unbroken run of failures for this
+sandbox and subcommand, and prints the answer you actually want:
+
+```
+  OUTCOME         : NEVER_STARTED - timed out after 180s in state PROCESSING ...
+  STUCK FOR       : 6.2h across 41 consecutive runs, since 2026-08-21T06:00:00Z
+```
+
+That is **service-level, not job-level** — how long estimates have been failing
+in this sandbox, not how long any one job has hung — and it is only as granular
+as your schedule, so hourly runs give hourly resolution. It lands in the CSV as
+`consecutive_failures`, `degraded_since_utc` and `degraded_hours`. An earlier
+outage that has since recovered doesn't count: only the unbroken run at the end
+does. The first healthy run after a bad streak reports `RECOVERED`, and
+`--no-history` turns the whole thing off along with the file.
+
+### Output and scheduling
+
+`--history <path>` appends one row per run with an ISO 8601 UTC timestamp,
+sandbox, subcommand, outcome, how long it has been failing and every numeric
+field above; both subcommands share one file. It defaults to
+`output/estimate_probe_history.csv` **next to the script**, not the working
+directory — Task Scheduler runs with a CWD you didn't choose, and a history that
+lands somewhere different each time can't tell you how long anything has been
+stuck. The folder is created on first write. `--json` writes the full run record — including each individual poll — to
+stdout for piping, with all logging on stderr so stdout stays clean.
+`--no-history` skips the file entirely.
+
+No credential, org id or profile data reaches the history file or the log; the
+`previewId` is masked in the log and kept out of the history entirely, being a
+base64 wrapper around an org-scoped application id. Credentials come from the
+keyring vault via `aep_creds` (`--service`, default `aep-prod`) — never from the
+command line. Needs `requests` + `keyring`.
+
+Wire the exit codes into a scheduler (Windows Task Scheduler / cron), run as the
+logged-on user so keyring can read the vault:
+
+```
+python estimate_prober.py                          # naked: pick, then check both
+python estimate_prober.py sample-status
+python estimate_prober.py sample-status --sandbox=prod --max-age-hours=48
+python estimate_prober.py sample-status --sandbox=prod --report=dataset
+python estimate_prober.py probe --sandbox=prod --verbose
+python estimate_prober.py probe --sandbox=prod --timeout=300 --interval=10
+python estimate_prober.py probe --pql="select var1 from xEvent where var1.timestamp occurs <= 1 days before now"
+python estimate_prober.py probe --sandbox=prod --json | jq .outcome
+
+# hourly health check -- non-zero exit is the alert
+python estimate_prober.py sample-status --service=aep-prod --sandbox=prod
+python estimate_prober.py probe --service=aep-prod --sandbox=prod
+```
+
+Unit tests for the outcome classifier run on the standard library alone, driven
+by recorded response fixtures in [`tests/fixtures/`](tests/fixtures/):
+
+```
+python -m unittest discover -s tests -v
 ```

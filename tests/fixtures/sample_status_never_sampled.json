@@ -1,0 +1,17 @@
+{
+  "numRowsToRead": "0",
+  "sampleJobRunning": {
+    "status": false,
+    "submissionTimestamp": "\"null\""
+  },
+  "docCount": "\"0\"",
+  "totalFragmentCount": 0,
+  "lastSuccessfulBatchTimestamp": "\"null\"",
+  "streamingDriven": "\"false\"",
+  "totalRows": "0",
+  "lastBatchId": "\"null\"",
+  "status": "TASK_NOT_STARTED",
+  "samplingRatio": 0.0,
+  "mergeStrategy": "timestampOrdered_auto",
+  "lastSampledTimestamp": "\"null\""
+}

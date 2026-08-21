@@ -1,0 +1,17 @@
+{
+  "numRowsToRead": "41003",
+  "sampleJobRunning": {
+    "status": true,
+    "submissionTimestamp": "2020-08-01 17:57:57.0"
+  },
+  "docCount": "\"300803\"",
+  "totalFragmentCount": 47429,
+  "lastSuccessfulBatchTimestamp": "\"null\"",
+  "streamingDriven": "\"false\"",
+  "totalRows": "41003",
+  "lastBatchId": "\"null\"",
+  "status": "TASK_FINISHED",
+  "samplingRatio": 1.0,
+  "mergeStrategy": "timestampOrdered_auto",
+  "lastSampledTimestamp": "2020-08-01 17:57:57.0"
+}

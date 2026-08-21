@@ -1,0 +1,13 @@
+{
+    "estimatedSize": 0,
+    "numRowsToRead": 0,
+    "state": "RESULT_READY",
+    "profilesReadSoFar": 0,
+    "standardError": 0,
+    "error": {
+        "description": "Failed to evaluate the segment definition.",
+        "traceback": "com.adobe.ups.segment.PqlEvaluationException: unresolved field"
+    },
+    "profilesMatchedSoFar": 0,
+    "totalRows": 0
+}

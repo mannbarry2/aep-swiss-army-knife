@@ -1,0 +1,27 @@
+{
+    "estimatedSize": 4275,
+    "numRowsToRead": 4275,
+    "estimatedNamespaceDistribution": [
+        {
+            "namespaceId": "4",
+            "profilesMatchedSoFar": 35
+        },
+        {
+            "namespaceId": "6",
+            "profilesMatchedSoFar": 4275
+        }
+    ],
+    "state": "RESULT_READY",
+    "profilesReadSoFar": 4275,
+    "standardError": 0,
+    "error": {
+        "description": "",
+        "traceback": ""
+    },
+    "profilesMatchedSoFar": 4275,
+    "totalRows": 4275,
+    "confidenceInterval": "95%",
+    "_links": {
+        "preview": "https://platform.adobe.io/data/core/ups/preview/app-00000000-0000-0000-0000-000000000000/execution/0?previewQueryId=00000000-0000-0000-0000-000000000000"
+    }
+}

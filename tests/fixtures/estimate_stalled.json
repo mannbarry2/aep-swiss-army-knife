@@ -1,0 +1,14 @@
+{
+    "estimatedSize": 0,
+    "numRowsToRead": 41003,
+    "estimatedNamespaceDistribution": [],
+    "state": "PROCESSING",
+    "profilesReadSoFar": 12500,
+    "standardError": 0,
+    "error": {
+        "description": "",
+        "traceback": ""
+    },
+    "profilesMatchedSoFar": 118,
+    "totalRows": 41003
+}

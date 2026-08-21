@@ -1,0 +1,16 @@
+{
+  "cosmosDocCount": "\"1000000000\"",
+  "lastBatchId": "\"null\"",
+  "lastSampledTimestamp": "2020-08-01 12:30:26.0",
+  "lastSuccessfulBatchTimestamp": "\"null\"",
+  "mergeStrategy": "timestampOrdered_auto",
+  "numRowsToRead": "100000",
+  "sampleJobRunning": {
+    "status": false
+  },
+  "samplingRatio": 0.01,
+  "status": "TASK_FINISHED",
+  "streamingDriven": "\"false\"",
+  "totalFragmentCount": 15000000,
+  "totalRows": "10000000"
+}

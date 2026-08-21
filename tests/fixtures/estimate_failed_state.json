@@ -1,0 +1,11 @@
+{
+    "state": "FAILED",
+    "profilesReadSoFar": 0,
+    "profilesMatchedSoFar": 0,
+    "numRowsToRead": 0,
+    "totalRows": 0,
+    "error": {
+        "description": "",
+        "traceback": ""
+    }
+}
