@@ -2,7 +2,7 @@
 """
 data_dictionary_v3.py  (AEP Swiss Army Knife)
 =============================================
-Data Dictionary v3.6. Sucks every XDM schema out of an AEP sandbox, works out
+Data Dictionary v3.7. Sucks every XDM schema out of an AEP sandbox, works out
 which ones hold data worth reading, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
@@ -185,6 +185,10 @@ Usage:
         # no wall-clock ceiling on sampling (can run for many hours)
     python data_dictionary_v3.py "acme-k" --sandbox=prod --no-activity
         # skip the per-dataset batch sweep (faster; behaves as --width=all)
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --no-journeys
+        # skip the AJO sweep (no Journeys tab; Audiences loses its usage count)
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --journey-budget=0
+        # read EVERY journey's audiences, however long it takes
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
 falling back to a plaintext creds/ folder where keyring is unavailable; manage
@@ -213,7 +217,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.6"
+SCRIPT_VERSION = "3.7"
 SCRIPT_DATE    = "2026-08-21"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -2710,6 +2714,303 @@ def attach_audiences(token, conf, res, caches):
                 f"rule, {n_partial} of those only partly renderable).")
 
 
+# ----------------------------------------------------------------------------
+# Journeys (lifted from journey_audience_census.py)
+# ----------------------------------------------------------------------------
+# The Audiences tab says who is being targeted. This says what actually goes
+# and targets them, which is the last link in the chain the workbook exists to
+# show: schema -> dataset -> audience -> the journey that acts on it.
+#
+# NOTE: like the audiences block above, this is a COPY of the logic in
+# journey_audience_census.py, by request. A fix made here does NOT reach that
+# script, or vice versa.
+#
+# It comes in two halves with very different costs:
+#   * the LIST is cheap -- one page call per 100 journeys, and it already
+#     carries name, status, version and full authorship (Adobe resolves the
+#     actor names for us here, unlike the audiences API).
+#   * the DETAIL is not: audiences and tags live only on the individual journey
+#     resource, at ~2.3s each. On a 1,800-journey estate that is over an hour.
+# So every journey reaches the tab from the list, and the detail pass runs over
+# as many as its budget allows, deployed journeys first. Rows the pass did not
+# reach say so in the Detail column rather than showing a misleading blank.
+AJO_JOURNEY_URL = "https://platform.adobe.io/ajo/journey"
+# The gateway's default window hides anything not touched recently; widen it so
+# the listing is the whole estate rather than the last few weeks of it.
+JOURNEY_LIST_FILTER = "metadata.lastModifiedAt>2000-01-01"
+MAX_JOURNEY_PAGES = 500          # ~50k journeys; a runaway-paging backstop
+JOURNEY_DETAIL_BUDGET_MIN = 45   # wall clock for the per-journey detail pass
+
+# A deployed journey is live in front of customers; a draft is somebody's
+# unfinished thought. When the budget cannot cover everything, spend it on the
+# ones that are actually running.
+JOURNEY_STATUS_RANK = {"deployed": 0, "published": 0, "live": 0, "running": 0,
+                       "dry run": 1, "dryrun": 1, "draft": 2,
+                       "stopped": 3, "closed": 3, "archived": 4}
+
+
+def _iso_short(v) -> str:
+    """'2026-08-25T14:11:40.314557138Z' -> '2026-08-25 14:11'. AJO's timestamps
+    carry nanosecond precision that datetime cannot parse, so this is done as
+    string surgery rather than by round-tripping through fromisoformat."""
+    s = str(v or "")
+    if len(s) >= 16 and s[10:11] == "T":
+        return s[:10] + " " + s[11:16]
+    return s[:16]
+
+
+def list_journeys(token, conf, sandbox):
+    """Page the entire AJO journey list. Returns (journeys, complete).
+
+    `complete` is False when paging stopped early -- a 403 from a credential
+    with no AJO subscription, or the page cap -- so a partial listing is never
+    presented as the whole estate."""
+    out, total, page = {}, None, 0
+    while page < MAX_JOURNEY_PAGES:
+        url = (f"{AJO_JOURNEY_URL}?"
+               + urllib.parse.urlencode({"filter": JOURNEY_LIST_FILTER,
+                                         "page": page}))
+        try:
+            body, _ = http(url, headers=aep_headers(token, conf, sandbox),
+                           timeout=60)
+            data = json.loads(body)
+        except urllib.error.HTTPError as e:
+            detail = flatten_err(e.read().decode(errors="replace"))
+            if e.code == 403:
+                logger.warning(f"  {sandbox}: journeys unavailable (HTTP 403). "
+                               f"This credential's x-api-key is not subscribed "
+                               f"to Journey Optimizer: {detail[:120]}")
+            else:
+                logger.warning(f"  {sandbox}: journey list page {page} failed "
+                               f"(HTTP {e.code}): {detail[:120]}")
+            return list(out.values()), False
+        except Exception as e:
+            logger.warning(f"  {sandbox}: journey list page {page} failed "
+                           f"({type(e).__name__}: {e}).")
+            return list(out.values()), False
+
+        results = (data.get("results") if isinstance(data, dict)
+                   else data if isinstance(data, list) else None)
+        if not results:
+            break
+        for it in results:
+            if isinstance(it, dict) and it.get("id"):
+                out[it["id"]] = it
+        pg = (data.get("pagination") or {}) if isinstance(data, dict) else {}
+        if pg.get("totalCount") is not None:
+            total = pg["totalCount"]
+        page += 1
+        if total is not None and len(out) >= total:
+            break
+    else:
+        logger.warning(f"  {sandbox}: journey listing stopped at the page cap "
+                       f"({MAX_JOURNEY_PAGES}); the list is incomplete.")
+        return list(out.values()), False
+    return list(out.values()), True
+
+
+def journey_audience_refs(journey: dict) -> list:
+    """Every audience/segment a journey references, however it references it.
+    Returns de-duped [{audience_id, audience_name, via}].
+
+    Two known shapes plus a recursive catch-all, so a variant we have not seen
+    yet still surfaces rather than silently going missing:
+      * read-audience nodes carrying an "audiences": [{id, name}] list
+      * audience qualification entry/event nodes naming a segment by
+        segmentId / audienceId / segment.{id,name}
+    """
+    found = {}
+
+    def add(aid, name, via):
+        if not aid:
+            return
+        cur = found.get(aid)
+        if cur is None:
+            found[aid] = {"audience_id": aid, "audience_name": name or "",
+                          "via": via}
+        else:
+            if name and not cur["audience_name"]:
+                cur["audience_name"] = name
+            if via not in cur["via"]:
+                cur["via"] = f"{cur['via']}+{via}"
+
+    def walk(obj, node_type=None):
+        if isinstance(obj, dict):
+            nt = obj.get("type") or node_type
+            auds = obj.get("audiences")
+            if isinstance(auds, list):
+                ntl = str(nt).lower() if nt else ""
+                via = ("read_audience" if "read" in ntl
+                       else "qualification" if "qualif" in ntl else "audiences")
+                for a in auds:
+                    if isinstance(a, dict):
+                        add(a.get("id") or a.get("audienceId"), a.get("name"),
+                            via)
+            for key in ("segmentId", "audienceId"):
+                if obj.get(key):
+                    add(obj[key], obj.get("name"), "qualification")
+            seg = obj.get("segment") or obj.get("audience")
+            if isinstance(seg, dict) and (seg.get("id") or seg.get("segmentId")):
+                add(seg.get("id") or seg.get("segmentId"), seg.get("name"),
+                    "qualification")
+            for v in obj.values():
+                walk(v, nt)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v, node_type)
+
+    walk(journey)
+    return list(found.values())
+
+
+def _journey_rank(j):
+    """Detail-pass priority: live journeys first, then most recently changed."""
+    status = str(j.get("status") or "").strip().lower()
+    return (JOURNEY_STATUS_RANK.get(status, 5),
+            _neg_iso(((j.get("metadata") or {}).get("lastModifiedAt")) or ""))
+
+
+def _neg_iso(s: str) -> str:
+    """Sort key that puts the NEWEST ISO timestamp first. Inverting a string is
+    not possible, so pair it with a reversed-ordinal trick: map each character
+    to its complement so a plain ascending sort runs newest-to-oldest."""
+    return "".join(chr(0x10FFFD - ord(c)) if ord(c) < 0x10FFFD else c
+                   for c in str(s))
+
+
+def attach_journeys(token, conf, res, caches, budget_min=JOURNEY_DETAIL_BUDGET_MIN):
+    """Read the sandbox's journeys onto res['journeys'].
+
+    Never fatal: the dictionary's job is schemas and fields, so a failure here
+    costs the Journeys tab and nothing else. res['journeys_note'] carries any
+    caveat the tab must state -- no AJO subscription, a partial listing, or a
+    detail pass that ran out of budget."""
+    sandbox = res["name"]
+    res["journeys"], res["journeys_note"] = [], ""
+    try:
+        journeys, complete = list_journeys(token, conf, sandbox)
+    except Exception as e:
+        logger.warning(f"  {sandbox}: journeys unavailable "
+                       f"({type(e).__name__}: {e}); the Journeys tab will say so.")
+        res["journeys_note"] = (f"The journey listing failed for this sandbox "
+                                f"({type(e).__name__}). No rows could be read.")
+        return
+    if not journeys:
+        res["journeys_note"] = ("No journeys were readable in this sandbox. If "
+                                "you expected some, check that this "
+                                "credential's API key is subscribed to Journey "
+                                "Optimizer -- an unsubscribed key returns 403.")
+        logger.info(f"  journeys: none readable in {sandbox}.")
+        return
+    logger.info(f"  journeys: {len(journeys)} listed in {sandbox}"
+                f"{'' if complete else ' (LISTING INCOMPLETE)'}.")
+
+    vocab = caches.get("vocab") or {}
+    # Audience id -> (name, evaluation type), joined from the Audiences tab this
+    # run already built. Free: no second call per audience, unlike the census
+    # script, which paid one apiece.
+    aud_by_id = {}
+    for row in res.get("audiences") or []:
+        if row[2]:
+            aud_by_id[row[2]] = (row[1], row[3])
+
+    # --- Detail pass: audiences + tags, live journeys first ------------------
+    order = sorted(journeys, key=_journey_rank)
+    budget_s = max(0, float(budget_min or 0)) * 60
+    t0 = time.perf_counter()
+    detail, n_read, n_skipped = {}, 0, 0
+    for i, j in enumerate(order, 1):
+        if budget_s and (time.perf_counter() - t0) > budget_s:
+            n_skipped = len(order) - i + 1
+            logger.warning(
+                f"  journeys: detail budget spent after "
+                f"{(time.perf_counter()-t0)/60:.0f} min -- {n_skipped} "
+                f"journey(s) listed WITHOUT their audiences or tags. Raise it "
+                f"with --journey-budget=<minutes> (0 = no ceiling).")
+            break
+        try:
+            body, _ = http(f"{AJO_JOURNEY_URL}/{j['id']}",
+                           headers=aep_headers(token, conf, sandbox), timeout=30)
+            full = json.loads(body) or {}
+        except Exception as e:
+            detail[j["id"]] = {"error": f"{type(e).__name__}"}
+            logger.debug(f"    journey {j.get('name')}: detail failed ({e})")
+            continue
+        tag_ids = [t.get("id") for t in (full.get("tags") or [])
+                   if isinstance(t, dict) and t.get("id")]
+        detail[j["id"]] = {
+            "audiences": journey_audience_refs(full),
+            "tags": [vocab.get(t, t[:8]) for t in tag_ids],
+        }
+        n_read += 1
+        if n_read % 100 == 0:
+            logger.info(f"    ...journey detail {n_read}/{len(order)} "
+                        f"({(time.perf_counter()-t0)/60:.1f} min)")
+
+    # --- Rows: one per journey-audience pair, one per journey when none ------
+    rows, n_pairs = [], 0
+    for j in order:
+        md = j.get("metadata") or {}
+        d = detail.get(j["id"])
+        if d is None:
+            detail_state = "NOT READ (budget)"
+        elif d.get("error"):
+            detail_state = f"unreadable ({d['error']})"
+        else:
+            detail_state = "read"
+        base = [sandbox, j.get("name") or "", j.get("status") or "",
+                j.get("version") or "",
+                ", ".join((d or {}).get("tags") or [])]
+        tail = [md.get("createdBy") or "", _iso_short(md.get("createdAt")),
+                md.get("lastModifiedBy") or "",
+                _iso_short(md.get("lastModifiedAt")),
+                _iso_short(md.get("lastDeployedAt")), j.get("id") or "",
+                detail_state]
+        auds = (d or {}).get("audiences") or []
+        if not auds:
+            rows.append(base + ["", "", "", ""] + tail)
+            continue
+        for a in sorted(auds, key=lambda x: (x["audience_name"] or "").lower()):
+            known = aud_by_id.get(a["audience_id"])
+            rows.append(base + [
+                a["audience_name"] or (known[0] if known else ""),
+                a["via"],
+                known[1] if known else "",
+                a["audience_id"],
+            ] + tail)
+            n_pairs += 1
+
+    res["journeys"] = rows
+    # The reverse index: audience id -> the journeys using it. This is what
+    # lets the Audiences tab answer "is anything actually using this?" without
+    # the reader having to cross-reference two sheets by hand. Only journeys we
+    # genuinely READ can appear here, so the Audiences tab must qualify a blank
+    # as "none found in the journeys we read", never as "unused".
+    used_by = {}
+    for j in order:
+        d = detail.get(j["id"])
+        for a in (d or {}).get("audiences") or []:
+            used_by.setdefault(a["audience_id"], []).append(
+                (j.get("name") or "", j.get("status") or "", a["via"]))
+    res["audience_journeys"] = used_by
+    res["journeys_detail_complete"] = (n_skipped == 0 and complete)
+
+    notes = []
+    if not complete:
+        notes.append("The journey LISTING did not finish, so this is not the "
+                     "whole estate.")
+    if n_skipped:
+        notes.append(f"{n_skipped} journey(s) are listed without their "
+                     f"audiences or tags: the detail pass ran out of time "
+                     f"(--journey-budget). Their Detail column says NOT READ -- "
+                     f"a blank Audience there means 'not looked at', NOT 'no "
+                     f"audience'.")
+    res["journeys_note"] = " ".join(notes)
+    logger.info(f"  journeys: {len(journeys)} journey(s), {n_read} read in "
+                f"detail, {n_pairs} journey-audience link(s) "
+                f"({(time.perf_counter()-t0)/60:.1f} min).")
+
+
 def script_provenance() -> dict:
     """Where this workbook came from, for the "who produced this?" conversation.
 
@@ -2864,7 +3165,7 @@ def write_xlsx(results, client: str, datestr: str):
     # own, capped at MAX_SCHEMA_TABS because a 700-tab workbook is not a
     # document, it is a filing cabinet with the drawers removed.
     used = {"summary", "how to use", "schemas", "field index", "datasets",
-            "audiences", "ingestion"}
+            "audiences", "ingestion", "journeys"}
     indexed = []  # (res, k, sheet_name_or_marker)
     tabbed = []   # (res, k, sheet_name)   -- subset of indexed
     for res in results:
@@ -3040,7 +3341,23 @@ def write_xlsx(results, client: str, datestr: str):
         ("...see who is being targeted, and how",
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
-         "the rule behind it in readable form."),
+         "the rule behind it in readable form. 'Used in journeys' says how "
+         "many journeys act on it, and names them."),
+        ("...see what is actually running",
+         "Journeys",
+         "Every Journey Optimizer journey and the audiences it acts on, one "
+         "row per link. Filter Status=Deployed for what is live right now."),
+        ("...find out if an audience is still used",
+         "Audiences",
+         "Sort or filter on 'Used in journeys'. Zero means no journey we read "
+         "references it -- check the Journeys tab's Detail column first, "
+         "because a journey that was never opened cannot report its "
+         "audiences."),
+        ("...see which audiences one journey targets",
+         "Journeys",
+         "Filter the Journey column. Each row is one audience it uses, and "
+         "'Via' says whether it reads the audience in batch or is triggered "
+         "by a profile qualifying for it."),
         ("...find out how a dataset gets filled",
          "Ingestion",
          "The dataflow that writes each dataset, what feeds it (file upload, "
@@ -3064,6 +3381,12 @@ def write_xlsx(results, client: str, datestr: str):
          "not read the data at all. Any schema in that state is listed in the "
          "DATA COMPLETENESS block on the Summary tab and banner-flagged on its "
          "own tab."),
+        ("A blank Audience on the Journeys tab may mean 'not looked at'",
+         "Journeys",
+         "Audiences live only on the individual journey record, at ~2 seconds "
+         "each, so on a big estate the detail pass runs under a time budget. "
+         "The Detail column says 'read', 'NOT READ (budget)' or 'unreadable' "
+         "for every row. Only 'read' rows can be trusted to show no audience."),
         ("A blank coverage column means NOT SAMPLED",
          "Field Index",
          "Sampling is expensive, so it runs in priority order under a time "
@@ -3406,6 +3729,13 @@ def write_xlsx(results, client: str, datestr: str):
     aud_rows = [r for res in results for r in (res.get("audiences") or [])]
     aud_incomplete = [res["title"] for res in results
                       if not res.get("audiences_complete", True)]
+    # audience id -> journeys using it, merged across sandboxes.
+    aud_used = {}
+    for res in results:
+        for aid, uses in (res.get("audience_journeys") or {}).items():
+            aud_used.setdefault(aid, []).extend(uses)
+    jrn_partial = any(not res.get("journeys_detail_complete", True)
+                      for res in results if res.get("journeys"))
     if aud_rows or aud_incomplete:
         at = wb.create_sheet("Audiences")
         confidential(at)
@@ -3416,7 +3746,14 @@ def write_xlsx(results, client: str, datestr: str):
                 "from Adobe's syntax tree: rows marked 'partial' contain an "
                 "event-sequence or time-window clause shown as <...> -- the raw "
                 "column holds the complete definition. Only Origin=AEPSegments "
-                "audiences have a rule at all.")
+                "audiences have a rule at all. 'Used in journeys' counts the "
+                "journeys that read or qualify on this audience -- read it "
+                "with the Journeys tab, which shows the same links the other "
+                "way round.")
+        if jrn_partial:
+            note += ("  NOTE: not every journey was read in detail, so a zero "
+                     "in 'Used in journeys' means 'none found in the journeys "
+                     "we read', NOT 'unused'. See the Journeys tab.")
         if aud_incomplete:
             note += (f"  WARNING: the listing was INCOMPLETE for "
                      f"{', '.join(aud_incomplete)} -- those counts understate "
@@ -3425,7 +3762,8 @@ def write_xlsx(results, client: str, datestr: str):
         at["A3"].font = Font(italic=True,
                              color="C00000" if aud_incomplete else "666666")
         AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Audience id",
-                            "Evaluation", "Lifecycle", "Tags", "Tag count",
+                            "Evaluation", "Lifecycle", "Used in journeys",
+                            "Journeys using it", "Tags", "Tag count",
                             "Origin", "Created by", "Last modified by",
                             "PQL (readable)", "PQL rendered",
                             "PQL (raw pql/json)", "Unresolved tag ids",
@@ -3435,17 +3773,85 @@ def write_xlsx(results, client: str, datestr: str):
             at.cell(hr, c, nm)
         style_header(at, len(AUDIENCE_COLUMNS), row=hr)
         rr = hr + 1
-        # Tagged and rule-bearing audiences first: the ones anyone came to read.
+        # In-use audiences first, then tagged, then rule-bearing: an audience
+        # a live journey depends on is the one you most need to see.
         for row in sorted(aud_rows,
-                          key=lambda r: (0 if r[5] else 1, 0 if r[10] else 1,
+                          key=lambda r: (0 if aud_used.get(r[2]) else 1,
+                                         0 if r[5] else 1, 0 if r[10] else 1,
                                          str(r[1]).lower())):
-            for c, val in enumerate(row, 1):
-                at.cell(rr, c, val)
+            uses = aud_used.get(row[2]) or []
+            names = sorted({u[0] for u in uses})
+            # Insert the two journey columns after Lifecycle (index 4).
+            out = list(row[:5]) + [len(names),
+                                   ", ".join(names)[:XL_CELL_LIMIT]] + list(row[5:])
+            for c, val in enumerate(out, 1):
+                cell = at.cell(rr, c, val)
+                if c == 6:
+                    cell.alignment = center
+                    if names:
+                        cell.font = Font(bold=True, color="2E7D32")
             rr += 1
-        autofit(at, [16, 46, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 22, 12])
+        autofit(at, [16, 46, 36, 12, 14, 9, 52, 34, 10, 20, 32, 32, 70, 13, 50,
+                     22, 12])
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
                               f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
+
+    # ---- Journeys tab: what actually ACTS on the audiences ------------------
+    # The last link in the chain: schema -> dataset -> audience -> journey. One
+    # row per journey-audience link, so the sheet can be filtered from either
+    # end -- by journey to see what it targets, or by audience to see what is
+    # using it. The Audiences tab carries the same links the other way round.
+    jrn_rows = [r for res in results for r in (res.get("journeys") or [])]
+    jrn_notes = [res.get("journeys_note") for res in results
+                 if res.get("journeys_note")]
+    if jrn_rows or jrn_notes:
+        jt = wb.create_sheet("Journeys")
+        confidential(jt)
+        jt["A2"] = f"Journeys  -  {label}"
+        jt["A2"].font = title_font
+        jnote = ("Every Journey Optimizer journey in the sandbox and the "
+                 "audiences it acts on. One row per journey-audience link; a "
+                 "journey referencing no audience still gets a row. 'Via' says "
+                 "HOW the journey uses it -- read_audience (it reads the "
+                 "audience as a batch) or qualification (a profile entering "
+                 "the audience triggers the journey). 'Audience type' is "
+                 "joined from the Audiences tab. Filter Status=Deployed for "
+                 "what is actually live.")
+        if jrn_notes:
+            jnote += "  " + " ".join(jrn_notes)
+        jt["A3"] = jnote
+        jt["A3"].font = Font(italic=True,
+                             color="C00000" if jrn_notes else "666666")
+        JOURNEY_COLUMNS = ["Sandbox", "Journey", "Status", "Version", "Tags",
+                           "Audience", "Via", "Audience type", "Audience id",
+                           "Created by", "Created", "Last modified by",
+                           "Last modified", "Last deployed", "Journey id",
+                           "Detail"]
+        hr = 5
+        for c, nm in enumerate(JOURNEY_COLUMNS, 1):
+            jt.cell(hr, c, nm)
+        style_header(jt, len(JOURNEY_COLUMNS), row=hr)
+        rr = hr + 1
+        live_font = Font(bold=True, color="2E7D32")
+        for row in jrn_rows:
+            for c, val in enumerate(row, 1):
+                cell = jt.cell(rr, c, val)
+                if c == 3 and str(val).strip().lower() in (
+                        "deployed", "published", "live", "running"):
+                    cell.font = live_font
+                # A journey we never opened must not read as one with no
+                # audience: flag the Detail cell so the blank is explained.
+                if c == 16 and str(val).startswith(("NOT READ", "unreadable")):
+                    cell.font = Font(color="C00000", bold=True)
+            rr += 1
+        autofit(jt, [16, 52, 12, 9, 30, 46, 16, 14, 36, 24, 17, 24, 17, 17, 38,
+                     20])
+        jt.freeze_panes = jt.cell(hr + 1, 1).coordinate
+        if rr > hr + 1:
+            jt.auto_filter.ref = (f"A{hr}:"
+                                  f"{get_column_letter(len(JOURNEY_COLUMNS))}"
+                                  f"{rr - 1}")
 
     # ---- One tab per schema, listing its individual fields ------------------
     for res, k, name in tabbed:
@@ -3816,7 +4222,9 @@ def run(service: str, sandbox_arg: str | None,
         dd_scope: str | None = None, dd_rows: int = DD_DEFAULT_ROWS,
         profile_snapshot: str | None = None, with_ingestion: bool = True,
         width: str = DEFAULT_WIDTH, with_activity: bool = True,
-        dd_budget: float = DD_BUDGET_DEFAULT_MIN):
+        dd_budget: float = DD_BUDGET_DEFAULT_MIN,
+        with_journeys: bool = True,
+        journey_budget: float = JOURNEY_DETAIL_BUDGET_MIN):
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print()
     print(bar)
@@ -3880,6 +4288,9 @@ def run(service: str, sandbox_arg: str | None,
             logger.debug(traceback.format_exc())
             continue
         attach_audiences(token, conf, res, aud_caches)
+        if with_journeys:
+            attach_journeys(token, conf, res, aud_caches,
+                            budget_min=journey_budget)
         print_sandbox(res)
         results.append(res)
 
@@ -3914,7 +4325,8 @@ def run(service: str, sandbox_arg: str | None,
         n_idx = sum(len(r["kept"]) for r in results)
         logger.info(f"XLSX written: {xlsx_path}  "
                     f"({n_tabs} schema tab(s), {n_idx} schema(s) in the Field "
-                    f"Index, + Summary + Schemas index + Datasets + Ingestion)")
+                    f"Index, + Summary + Schemas index + Datasets + Ingestion "
+                    f"+ Audiences + Journeys)")
 
     total_kept = sum(r["stats"]["kept"] for r in results)
     total_seen = sum(r["stats"]["total"] for r in results)
@@ -3949,6 +4361,8 @@ def main():
     width = DEFAULT_WIDTH
     with_activity = True
     dd_budget = DD_BUDGET_DEFAULT_MIN
+    with_journeys = True
+    journey_budget = JOURNEY_DETAIL_BUDGET_MIN
     positional = []
     for a in args:
         if a.startswith("--sandbox="):
@@ -3980,6 +4394,13 @@ def main():
             dd_scope = a.split("=", 1)[1].strip().lower()
         elif a.startswith("--profile-snapshot="):
             profile_snapshot = a.split("=", 1)[1].strip() or None
+        elif a in ("--no-journeys", "--no-ajo"):
+            with_journeys = False
+        elif a.startswith("--journey-budget="):
+            try:
+                journey_budget = max(0.0, float(a.split("=", 1)[1]))
+            except ValueError:
+                logger.warning(f"Ignoring bad --journey-budget value in {a!r}.")
         elif a in ("--no-ingestion", "--no-flows"):
             with_ingestion = False
         elif a.startswith("--dd-rows="):
@@ -4016,7 +4437,8 @@ def main():
 
     run(chosen, sandbox_arg, dd_scope, dd_rows,
         profile_snapshot=profile_snapshot, with_ingestion=with_ingestion,
-        width=width, with_activity=with_activity, dd_budget=dd_budget)
+        width=width, with_activity=with_activity, dd_budget=dd_budget,
+        with_journeys=with_journeys, journey_budget=journey_budget)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,50 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.7 — 2026-08-25
+
+**The Journeys half of the audience census, finally merged in.**
+
+v3.3 lifted the *audiences* half of `journey_audience_census.py` into the
+dictionary. The *journeys* half never came across, so the workbook could say
+who was being targeted but not what went and targeted them — and there was no
+way to answer the question people actually ask, which is *"is this audience
+still used by anything?"*
+
+Both halves now live here, self-contained. The dictionary no longer needs the
+census script for anything.
+
+- **New Journeys tab.** Every Journey Optimizer journey in the sandbox and the
+  audiences it acts on — one row per journey-audience link, so it filters from
+  either end. Carries status, version, tags, and full authorship (created /
+  last modified / last deployed, by whom and when — the AJO list resolves actor
+  names itself, unlike the audiences API). `Via` distinguishes *read_audience*
+  (the journey reads the audience as a batch) from *qualification* (a profile
+  entering the audience triggers the journey).
+- **The Audiences tab reads the link the other way.** Two new columns, *Used in
+  journeys* and *Journeys using it*, and audiences a journey depends on now
+  sort to the top. That is the schema → dataset → audience → journey chain
+  closed in one workbook.
+- **No new API cost for the join.** The census paid one call per audience for
+  its evaluation type and one per tag for its name. Both are already loaded
+  here for the Audiences tab, so the journey join is done in memory.
+- **The expensive half is budgeted, like sampling.** Audiences and tags live
+  only on the individual journey resource, ~2.3s each — over an hour on an
+  1,800-journey estate. The listing is cheap and always runs, so every journey
+  reaches the tab; the detail pass then works through them **deployed journeys
+  first**, under `--journey-budget` (default 45 min). Every row's `Detail`
+  column says `read`, `NOT READ (budget)` or `unreadable`, so a blank Audience
+  is never mistaken for "this journey targets nobody" — and the Audiences tab
+  says the same about a zero usage count.
+
+New flags: `--no-journeys`, `--journey-budget=<minutes>` (0 = no ceiling).
+
+Note: journeys need a credential whose API key is subscribed to Journey
+Optimizer. An unsubscribed key returns 403 and the tab says so rather than
+appearing empty.
+
+---
+
 ## v3.6 — 2026-08-21
 
 **Stop guessing which schemas matter. Gate on evidence instead.**
