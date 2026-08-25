@@ -2,8 +2,8 @@
 """
 data_dictionary_v3.py  (AEP Swiss Army Knife)
 =============================================
-Data Dictionary v3.5. Sucks every XDM schema out of an AEP sandbox, filters down
-to the ones that actually matter, and writes a tabbed Excel workbook: a master
+Data Dictionary v3.6. Sucks every XDM schema out of an AEP sandbox, works out
+which ones hold data worth reading, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
 SQL table (system) name, an Ingestion tab tracing how each dataset is actually
@@ -21,22 +21,26 @@ folder where keyring is unavailable) and the tool will:
   4. Per chosen sandbox: list all tenant schemas, count datasets per schema
      (Catalog), and pull every descriptor (identities, relationships, and the
      friendly "dual" labels).
-  5. FILTER the schemas (see below), print the full list to screen with a
-     KEEP / DROP verdict per schema so you can see exactly what was excluded.
-  6. For each KEPT schema, resolve its full field list (dot notation + data
+  5. Read every dataset's batch history to find which ones actually hold data,
+     TIER the schemas on that evidence, and print the full list to screen with
+     an IN / OUT verdict per schema so you can see exactly what was excluded.
+  6. For each INCLUDED schema, resolve its full field list (dot notation + data
      type), join identities / relationships / dual labels, and write
         output/Data Dictionary - <Client> - <YYYY-MM-DD>.xlsx
      (Summary, a master Field Index, a Schemas index, a Datasets / table-name
      map, then one tab per schema).
 
-Filtering (phase 1 -- transparent and reported, tune the constants below):
-  KEEP   schema is referenced by >= 1 dataset (the UI "DATASETS" column).
-  DROP   no-dataset   nothing ingests into it (ad-hoc audience schemas,
-                      unused drafts) -- not interesting yet.
-  DROP   adhoc        meta:class is the ad-hoc class (auto-generated ingestion
-                      schemas).
-  DROP   ajo          Adobe Journey Optimizer-managed schema (title / extends
-                      heuristic) -- out of scope for now.
+Width (--width, phase 1 -- transparent and reported):
+  core     modelled schemas only (Adobe's own schemaType == 'standard'): the
+           tenant's hand-built data model.
+  wide     DEFAULT. core, plus every schema whose datasets hold records --
+           one-off CSV and audience dumps, AJO, Adobe system datasets. If it
+           holds data you might query, its fields are in the index.
+  all      wide, plus datasets never written to and schemas with no dataset.
+
+Whatever the width, the Datasets tab lists EVERY dataset in the sandbox with an
+Included column and the reason it is in or out -- so the workbook can always
+tell you what it does not cover.
 
 The dual-label (alternateDisplayInfo) count is reported per sandbox so you can
 see whether this tenant uses friendly field labels at all. The Friendly Name
@@ -124,6 +128,38 @@ their newest batch's ingesting client. Rows needing attention -- failed last
 run, disabled dataflow, never received a batch -- sort to the top. Six paged
 list calls per sandbox, joined in memory; skip it with --no-ingestion.
 
+v3.6 -- Stop guessing which schemas matter; gate on evidence instead.
+The filter that decided what went into the workbook rested on a rule written
+early and never revisited: any schema whose meta:class id ended in a long hex
+blob was assumed to be an auto-generated ingestion dump. But Adobe hex-ids
+EVERY tenant-created custom class, so a hand-modelled lookup schema sitting on
+a shared custom class was indistinguishable from an import dump -- and was
+dropped. On a live prod tenant that quietly lost 20 modelled schemas, most of
+the estate's lookup tables among them, from the Field Index. The fields simply
+were not there, with nothing to say they were missing.
+
+Three changes:
+  * Adobe already labels this and we were ignoring it. schemaType is 'standard'
+    for a modelled schema and 'adhoc' for a generated one; meta:tenantNamespace
+    and meta:datasetNamespace say the same thing again. Those are read first
+    now, and the hex-class heuristic survives only as a last resort for records
+    carrying neither marker.
+  * KEEP/DROP became --width, and taxonomy became a column rather than a gate.
+    Every dataset's batch history is read to establish which ones hold data,
+    and that evidence -- not what a schema looks like -- decides what the
+    workbook covers. The default (wide) includes everything with data in it.
+    On a large prod tenant that is ~700 schemas rather than ~36; because a
+    full-schema fetch is ~0.15s, the whole sweep costs about two minutes.
+  * The Datasets tab is now the honest inventory: every dataset in the sandbox,
+    with Included YES/NO, its tier and kind, recent record count, when it was
+    last written to, and the reason it is in or out. Filter Included=NO to see
+    exactly what is missing. Tabs are capped (--max-tabs, default 120) since
+    the Field Index, not the tabs, is what anyone searches; and the --data-dict
+    sampling sweep now runs in priority order -- data model first, then most
+    recently written, then largest -- under a wall-clock ceiling (--dd-budget,
+    default 180 min) that names whatever it did not reach instead of reporting
+    it as 0% coverage.
+
 Full version history: RELEASE_NOTES.md (link in the workbook's How to Use tab).
 
 openpyxl is needed for the XLSX; pyarrow + tzdata for --data-dict (all optional,
@@ -141,6 +177,14 @@ Usage:
         --profile-snapshot=67dc0539eaafb02aeeb92ed7   # override snapshot dataset
     python data_dictionary_v3.py "acme-k" --sandbox=prod --no-ingestion
         # skip the Flow Service sweep (no Ingestion tab, a little faster)
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --width=core
+        # the modelled data model only (smallest workbook)
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --width=all --data-dict
+        # everything, including empty datasets, sampled until --dd-budget runs out
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict --dd-budget=0
+        # no wall-clock ceiling on sampling (can run for many hours)
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --no-activity
+        # skip the per-dataset batch sweep (faster; behaves as --width=all)
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
 falling back to a plaintext creds/ folder where keyring is unavailable; manage
@@ -169,8 +213,8 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.5"
-SCRIPT_DATE    = "2026-08-17"
+SCRIPT_VERSION = "3.6"
+SCRIPT_DATE    = "2026-08-21"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -248,11 +292,52 @@ XED_FULL = "application/vnd.adobe.xed-full+json; version=1"  # allOf resolved
 # Descriptors come back grouped by @type, each value a list of full objects.
 DESCRIPTOR_ACCEPT = "application/vnd.adobe.xdm+json"
 
-# --- Filtering knobs --------------------------------------------------------
+# --- Width: how much of the estate the workbook covers ----------------------
+# v3.6 replaced a KEEP/DROP filter with a WIDTH setting, because the old filter
+# was answering the wrong question. It gated on TAXONOMY -- "does this look like
+# a hand-modelled schema?" -- and every wrong guess made a real dataset
+# invisible in the Field Index, which is the one place people actually search.
+# Width gates on EVIDENCE instead -- "has this dataset got data in it?" -- and
+# taxonomy is demoted to a column you can read and filter on:
+#
+#   core     modelled schemas only (schemaType 'standard'). The old behaviour,
+#            minus its false positives. Smallest, cleanest data model.
+#   wide     DEFAULT. Everything with a dataset that has ever ingested a record,
+#            whoever or whatever created it: modelled schemas, one-off CSV and
+#            audience dumps, AJO, Adobe system datasets. If it holds data you
+#            might query, its fields are in the index.
+#   all      wide, plus datasets that exist but have never been written to, plus
+#            schemas with no dataset at all. Nothing is left out.
+#
+# Widening is nearly free: a full-schema fetch is ~0.15s, so the whole
+# schemas-with-datasets population of a large prod tenant resolves in ~2 min.
+# Only --data-dict sampling is expensive, and that is budgeted separately
+# (DD_BUDGET_DEFAULT_MIN) rather than paid for by hiding schemas.
+WIDTH_CHOICES = ("core", "wide", "all")
+DEFAULT_WIDTH = "wide"
+
+# A workbook with 700 tabs is unusable, and the tabs are not how anyone finds a
+# field anyway -- the Field Index is. So tabs are capped and everything else is
+# index-only; the Schemas tab says which is which. Raise with --max-tabs=.
+MAX_SCHEMA_TABS = 120
+
+# Wall-clock ceiling for the --data-dict parquet sweep, in minutes. When it runs
+# out the remaining schemas are marked NOT SAMPLED rather than silently reported
+# as 0% coverage. 0 disables the ceiling.
+DD_BUDGET_DEFAULT_MIN = 180
+
+# --- Taxonomy knobs (labels now, not filters) -------------------------------
 ADHOC_CLASS = "https://ns.adobe.com/xdm/data/adhoc"
-# Ad-hoc / auto-generated schemas: the canonical adhoc class, OR a per-schema
-# generated class whose id tail is a long hex blob (Adobe Campaign / audience
-# / import dumps -- the bulk of a tenant), OR an auto-generated title.
+# Adobe stamps auto-generated per-dataset schemas itself, two ways over, and
+# reading its own markers beats guessing:
+#     schemaType            'adhoc' / 'adhoc-v2'   vs  'standard'
+#     meta:datasetNamespace present on generated    vs  meta:tenantNamespace
+# The hex-class-tail regex below USED to be the primary test and it was wrong:
+# Adobe gives EVERY tenant-created custom class a hex id, so a hand-modelled
+# lookup schema on a shared custom class looked identical to an import dump. On
+# a live prod tenant that misread 20 modelled schemas -- most of the estate's
+# lookup tables -- as junk and dropped them. It survives only as a last-resort
+# fallback for records carrying neither namespace marker nor a schemaType.
 ADHOC_CLASS_HEX = re.compile(r"^[0-9a-fA-F]{24,}$")
 ADHOC_TITLE_SUBSTRINGS = [
     "xdm schema for dataset",   # " XDM Schema for dataset xxx. Random identifier:"
@@ -713,6 +798,92 @@ def _newest_batch(token, conf, sandbox, dsid):
     return None, None, ""
 
 
+def _batch_metrics(b: dict):
+    """(record_count, created_ms, status) for one Catalog batch object."""
+    m = b.get("metrics") or {}
+    n = m.get("outputRecordCount")
+    if n is None:
+        n = m.get("inputRecordCount")
+    if n is None:
+        n = b.get("recordCount")
+    try:
+        n = int(n) if n is not None else None
+    except (TypeError, ValueError):
+        n = None
+    return n, b.get("created"), str(b.get("status") or "")
+
+
+def fetch_dataset_activity(token, conf, sandbox, ds_all, probe_max=None):
+    """Ask every dataset when it was last written to and roughly how much.
+    Mutates each ds_all entry in place, adding:
+
+        rows        records in the newest batch that reported metrics (None if
+                    nothing has ever landed)
+        rows_recent sum over the newest few successful batches -- a volume
+                    proxy that is fairer to streaming datasets, whose
+                    individual batches are tiny but constant
+        last_write  epoch ms of the newest batch, or None
+        last_status status of that batch ('success', 'failure', 'loading', ...)
+        has_data    True if a batch has ever successfully landed records
+
+    This is the evidence the whole width decision now rests on: it is what
+    separates "a dataset you might query" from "an empty shell nobody ever
+    wrote to". One list call per dataset, sequential on purpose -- Adobe's
+    Catalog is slow enough mid-morning without us firing 800 parallel probes at
+    it. On an 850-dataset prod tenant it costs ~10 minutes.
+
+    Returns (n_probed, n_with_data)."""
+    headers = aep_headers(token, conf, sandbox)
+    todo = ds_all if probe_max is None else ds_all[:probe_max]
+    logger.info(f"  {sandbox}: reading batch history for {len(todo)} dataset(s) "
+                f"to find which ones actually hold data...")
+    t0 = time.perf_counter()
+    with_data = 0
+    for i, d in enumerate(todo, 1):
+        d.setdefault("rows", None)
+        d.setdefault("rows_recent", None)
+        d.setdefault("last_write", None)
+        d.setdefault("last_status", "")
+        d.setdefault("last_client", "")
+        d.setdefault("has_data", False)
+        d.setdefault("has_batches", False)
+        d["activity_read"] = True
+        url = (f"{CATALOG_BATCHES_URL}?dataSet={urllib.parse.quote(str(d['id']))}"
+               f"&limit=5&sort=desc:created")
+        try:
+            body, _ = http(url, headers=headers, timeout=45)
+            data = json.loads(body) or {}
+        except Exception as e:
+            d["last_status"] = f"unreadable ({type(e).__name__})"
+            logger.debug(f"    batch history unreadable for {d['name']}: {e}")
+            continue
+        batches = [b for b in (data.values() if isinstance(data, dict) else [])
+                   if isinstance(b, dict)]
+        batches.sort(key=lambda b: b.get("created") or 0, reverse=True)
+        d["has_batches"] = bool(batches)
+        recent = 0
+        for j, b in enumerate(batches):
+            n, created, status = _batch_metrics(b)
+            if j == 0:
+                d["last_write"], d["last_status"] = created, status
+                d["last_client"] = (b.get("createdClient")
+                                    or b.get("createdUser") or "")
+            if status == "success" and n:
+                recent += n
+                if d["rows"] is None:
+                    d["rows"] = n
+                d["has_data"] = True
+        d["rows_recent"] = recent or None
+        if d["has_data"]:
+            with_data += 1
+        if i % 100 == 0:
+            logger.info(f"    ...{i}/{len(todo)} datasets "
+                        f"({(time.perf_counter()-t0)/60:.1f} min)")
+    logger.info(f"  {sandbox}: {with_data} of {len(todo)} dataset(s) hold data "
+                f"({(time.perf_counter()-t0)/60:.1f} min).")
+    return len(todo), with_data
+
+
 def _pick_primary_flow(entries):
     """One dataset can be written by several flows (a backfill plus a nightly,
     say). Pick the one that best explains the data as it stands: enabled beats
@@ -828,16 +999,38 @@ def build_ingestion_map(token, conf, sandbox, ds_all):
         }
 
     # ---- Fallback: datasets no dataflow writes ------------------------------
+    # fetch_dataset_activity has usually already read every dataset's batch
+    # history for the width decision, so reuse it rather than paying for the
+    # same call twice. Only datasets it skipped are probed here, and only those
+    # are subject to INGEST_BATCH_PROBE_MAX.
+    by_id_all = {d["id"]: d for d in ds_all}
     noflow = [d["id"] for d in ds_all if d["id"] not in rows]
-    probed, truncated = noflow[:INGEST_BATCH_PROBE_MAX], []
-    if len(noflow) > INGEST_BATCH_PROBE_MAX:
-        truncated = noflow[INGEST_BATCH_PROBE_MAX:]
-        logger.warning(f"  {sandbox}: {len(noflow)} dataset(s) have no dataflow; "
-                       f"only the first {INGEST_BATCH_PROBE_MAX} were checked "
-                       f"against batch history (cap: INGEST_BATCH_PROBE_MAX).")
-    if probed:
-        logger.info(f"  {sandbox}: {len(probed)} dataset(s) have no dataflow -- "
-                    f"reading their batch history instead.")
+    cached = [i for i in noflow if by_id_all.get(i, {}).get("activity_read")]
+    fresh = [i for i in noflow if i not in set(cached)]
+    probed, truncated = fresh[:INGEST_BATCH_PROBE_MAX], []
+    if len(fresh) > INGEST_BATCH_PROBE_MAX:
+        truncated = fresh[INGEST_BATCH_PROBE_MAX:]
+        logger.warning(f"  {sandbox}: {len(fresh)} dataset(s) have no dataflow "
+                       f"and no cached batch history; only the first "
+                       f"{INGEST_BATCH_PROBE_MAX} were checked "
+                       f"(cap: INGEST_BATCH_PROBE_MAX).")
+    if noflow:
+        logger.info(f"  {sandbox}: {len(noflow)} dataset(s) have no dataflow -- "
+                    f"answering from batch history ({len(cached)} already read, "
+                    f"{len(probed)} to fetch).")
+    for dsid in cached:
+        d = by_id_all[dsid]
+        rows[dsid] = {
+            "verdict": _batch_verdict(d.get("last_client") or ""),
+            "source": d.get("last_client") or "",
+            "flow_name": "", "flow_id": "", "flow_type": "",
+            "schedule": "", "state": "", "enabled": True,
+            "last_run": d.get("last_status") or "",
+            "last_run_at": (fmt_epoch_ms(d["last_write"])
+                            if d.get("last_write") else ""),
+            "n_flows": 0,
+            "from_batch": True,
+        }
     for dsid in probed:
         client, created, status = _newest_batch(token, conf, sandbox, dsid)
         rows[dsid] = {
@@ -1514,16 +1707,60 @@ def extends_refs(raw: dict):
 
 
 def is_adhoc(raw: dict) -> bool:
+    """Did Adobe generate this schema for one dataset, rather than a person
+    modelling it?
+
+    Read Adobe's own markers first -- schemaType, then the namespace key -- and
+    fall back to the class/title heuristics only for records that carry
+    neither. See the ADHOC_CLASS_HEX comment for why the hex-class-tail test is
+    LAST and conditional: it cannot tell a tenant's custom class from a
+    generated one, because Adobe hex-ids both."""
+    stype = (raw.get("schemaType") or "").strip().lower()
+    if stype.startswith("adhoc"):         # 'adhoc', 'adhoc-v2'
+        return True
+    if stype == "standard":               # Adobe says a person modelled it
+        return False
+    if raw.get("meta:datasetNamespace"):  # generated: namespaced to a dataset
+        return True
+    if raw.get("meta:tenantNamespace"):   # modelled: namespaced to the tenant
+        return False
+
     cls = raw.get("meta:class") or ""
     if cls == ADHOC_CLASS:
         return True
     tail = cls.rstrip("/").rsplit("/", 1)[-1]
-    if ADHOC_CLASS_HEX.match(tail):       # generated per-schema class
+    if ADHOC_CLASS_HEX.match(tail):       # last resort -- see comment above
         return True
     title = (raw.get("title") or "").strip().lower()
     if any(title.startswith(p) for p in ADHOC_TITLE_PREFIXES):
         return True
     return any(s in title for s in ADHOC_TITLE_SUBSTRINGS)
+
+
+def schema_kind(raw: dict) -> str:
+    """What KIND of thing this schema is -- a label for the reader, not a gate.
+    First match wins, most specific first:
+
+        modelled       the tenant's own hand-built data model
+        audience-dump  auto-created "Schema for audience 12345" / segment export
+        generated      auto-created for one dataset (CSV upload, SDK write, ...)
+        ajo            Journey Optimizer-managed
+        system         Adobe plumbing (Offer Decisioning, CJA, Audience Portal)
+        test           title looks like a test / PoC / placeholder
+    """
+    title = (raw.get("title") or "").strip().lower()
+    if any(title.startswith(p) for p in ("schema for audience",
+                                         "audience dataset for")):
+        return "audience-dump"
+    if is_ajo(raw):
+        return "ajo"
+    if is_system(raw):
+        return "system"
+    if is_test(raw):
+        return "test"
+    if is_adhoc(raw):
+        return "generated"
+    return "modelled"
 
 
 def is_ajo(raw: dict) -> bool:
@@ -1548,6 +1785,47 @@ def is_system(raw: dict) -> bool:
 
 def is_test(raw: dict) -> bool:
     return bool(_TEST_RE.search(raw.get("title") or ""))
+
+
+# Which tiers each --width setting lets through. See the WIDTH_CHOICES comment.
+WIDTH_INCLUDES = {
+    "core": {"core"},
+    "wide": {"core", "wide"},
+    "all":  {"core", "wide", "dormant", "none"},
+}
+TIER_ORDER = {"core": 0, "wide": 1, "dormant": 2, "none": 3}
+
+
+def schema_tier(kind: str, datasets: list) -> tuple:
+    """(tier, reason) for one schema, from its KIND and the state of the
+    datasets behind it. Evidence beats taxonomy: the only thing that keeps a
+    schema out of the default workbook is having no data to look at.
+
+        core     the tenant's own modelled data model
+        wide     anything else whose datasets hold records
+        dormant  has datasets, but none has ever ingested a record
+        none     no dataset at all
+    """
+    if not datasets:
+        return "none", "no dataset"
+    if kind == "modelled":
+        return "core", "modelled schema"
+    live = [d for d in datasets if d.get("has_data")]
+    if live:
+        n = sum(d.get("rows_recent") or 0 for d in live)
+        return "wide", (f"{kind}; {len(live)} of {len(datasets)} dataset(s) hold "
+                        f"data{f' (~{n:,} recent records)' if n else ''}")
+    # Everything below here is an ABSENCE of evidence, and absence of evidence
+    # is what put us in this mess in the first place. Only a dataset we
+    # positively know is empty gets held back; anything merely inconclusive is
+    # included, because a spurious extra schema costs a few seconds and a
+    # missing one costs an afternoon of looking for a field that is right there.
+    if any(not d.get("activity_read") for d in datasets):
+        return "wide", f"{kind}; batch history not read, kept rather than guessed"
+    if any(d.get("has_batches") for d in datasets):
+        return "wide", (f"{kind}; batches exist but none reported a record "
+                        f"count -- kept rather than assumed empty")
+    return "dormant", f"{kind}; no dataset has ever received a batch"
 
 
 # ----------------------------------------------------------------------------
@@ -1682,16 +1960,23 @@ def resolve_sandboxes_arg(arg: str, sandboxes):
 # ----------------------------------------------------------------------------
 # Per-sandbox collection + filtering
 # ----------------------------------------------------------------------------
-def collect_sandbox(token, conf, sb, with_ingestion=True):
-    """Read one sandbox, filter, and resolve fields for kept schemas.
+def collect_sandbox(token, conf, sb, with_ingestion=True,
+                    width=DEFAULT_WIDTH, with_activity=True):
+    """Read one sandbox, decide how much of it to cover, and resolve fields.
+
+    `width` is one of WIDTH_CHOICES and decides which tiers are included -- see
+    the WIDTH_CHOICES comment. `with_activity` controls the batch-history sweep
+    that produces the evidence the tiers rest on; without it every dataset is
+    treated as possibly-live, which effectively means --width=all.
 
     Returns dict:
       title, name, env
       verdicts  -> list of (title, class_name, datasets, last_mod, status)
-                   status is KEEP / DROP:no-dataset / DROP:adhoc / DROP:ajo
-      kept      -> list of kept schema dicts (see build below)
+                   status is IN:<tier> for included, OUT:<tier> for excluded
+      kept      -> list of included schema dicts (see build below)
       labels_n  -> count of alternateDisplayInfo (dual) labels in the sandbox
-      stats     -> {total, kept, no_dataset, adhoc, ajo, fields, relationships}
+      stats     -> {total, kept, core, wide, dormant, none, <kind counts>,
+                    fields, relationships}
       ingestion -> {dataset_id: how it is populated}  (see build_ingestion_map)
     """
     name = sb.get("name", "?")
@@ -1700,6 +1985,19 @@ def collect_sandbox(token, conf, sb, with_ingestion=True):
 
     raws = get_all_schemas(token, conf, name)
     ds_counts, ds_all = get_all_datasets(token, conf, name)
+
+    # Evidence first: which datasets actually hold data. Everything downstream
+    # -- the tiers, the Datasets tab's Included column, the order the
+    # --data-dict sweep works through -- keys off this.
+    if with_activity:
+        try:
+            fetch_dataset_activity(token, conf, name, ds_all)
+        except Exception as e:
+            logger.warning(f"  {name}: batch-history sweep failed "
+                           f"({type(e).__name__}: {e}); every dataset will be "
+                           f"treated as possibly-live.")
+            logger.debug(traceback.format_exc())
+
     identities, relationships, labels = get_all_descriptors(token, conf, name)
 
     # How each dataset is populated. Isolated behind its own try: this is the
@@ -1724,20 +2022,24 @@ def collect_sandbox(token, conf, sb, with_ingestion=True):
     # SQL table names: every dataset's (friendly name, system table name, id)
     # grouped by the schema it feeds, so each schema knows which table(s) to query.
     tables_by_schema = {}
+    ds_by_schema = {}
     for d in ds_all:
         d["schema_title"] = (id_to_title.get(d["schema_id"])
                              or _id_tail(d["schema_id"]) or "(no schema)")
         if d["schema_id"]:
             tables_by_schema.setdefault(d["schema_id"], []).append(
                 (d["name"], d["table"], d["id"]))
+            ds_by_schema.setdefault(d["schema_id"], []).append(d)
     for v in tables_by_schema.values():
         v.sort(key=lambda t: t[0].lower())
 
+    included_tiers = WIDTH_INCLUDES.get(width, WIDTH_INCLUDES[DEFAULT_WIDTH])
     verdicts = []
     kept = []
-    stats = {"total": len(raws), "kept": 0, "no_dataset": 0, "adhoc": 0,
-             "audience": 0, "ajo": 0, "system": 0, "test": 0, "fields": 0,
-             "relationships": 0}
+    stats = {"total": len(raws), "kept": 0, "width": width,
+             "core": 0, "wide": 0, "dormant": 0, "none": 0,
+             "modelled": 0, "generated": 0, "audience-dump": 0, "ajo": 0,
+             "system": 0, "test": 0, "fields": 0, "relationships": 0}
 
     # Sort by title for a stable, readable listing.
     for raw in sorted(raws, key=lambda r: (r.get("title") or "").lower()):
@@ -1747,28 +2049,24 @@ def collect_sandbox(token, conf, sb, with_ingestion=True):
         n_ds = ds_counts.get(sid, 0)
         lmod = last_modified(raw)
 
-        if is_adhoc(raw):
-            status = "DROP:adhoc"
-            stats["adhoc"] += 1
-            if stitle.strip().lower().startswith("schema for audience"):
-                stats["audience"] += 1
-        elif is_ajo(raw):
-            status = "DROP:ajo"
-            stats["ajo"] += 1
-        elif is_system(raw):
-            status = "DROP:system"
-            stats["system"] += 1
-        elif is_test(raw):
-            status = "DROP:test"
-            stats["test"] += 1
-        elif n_ds < 1:
-            status = "DROP:no-dataset"
-            stats["no_dataset"] += 1
-        else:
-            status = "KEEP"
+        kind = schema_kind(raw)
+        tier, reason = schema_tier(kind, ds_by_schema.get(sid, []))
+        stats[kind] = stats.get(kind, 0) + 1
+        stats[tier] += 1
+        included = tier in included_tiers
+        status = f"{'IN' if included else 'OUT'}:{tier}"
+
+        # Stamp the decision onto the datasets themselves. The Datasets tab is
+        # the complete inventory -- every dataset in the sandbox, in or out --
+        # so it is the honest place to show what the workbook covers and why.
+        for d in ds_by_schema.get(sid, []):
+            d["included"] = included
+            d["tier"] = tier
+            d["kind"] = kind
+            d["reason"] = reason
 
         verdicts.append((stitle, cls, n_ds, lmod, status))
-        if status != "KEEP":
+        if not included:
             continue
 
         # --- Resolve the kept schema's fields + descriptor joins -------------
@@ -1825,6 +2123,7 @@ def collect_sandbox(token, conf, sb, with_ingestion=True):
         stats["fields"] += len(field_rows)
         stats["relationships"] += n_rels
 
+        mine = ds_by_schema.get(sid, [])
         kept.append({
             "title": stitle,
             "class": cls,
@@ -1833,6 +2132,14 @@ def collect_sandbox(token, conf, sb, with_ingestion=True):
             "tables": tables_by_schema.get(sid, []),
             "last_mod": lmod,
             "id": sid,
+            "tier": tier,
+            "kind": kind,
+            "reason": reason,
+            # Ranking inputs for the --data-dict sweep: when data last landed,
+            # and roughly how much of it there is.
+            "last_write": max((d.get("last_write") or 0) for d in mine) if mine else 0,
+            "rows_recent": sum((d.get("rows_recent") or 0) for d in mine),
+            "has_data": any(d.get("has_data") for d in mine),
             "fields": field_rows,
             "n_fields": len(field_rows),
             "n_identities": n_identities,
@@ -1840,12 +2147,48 @@ def collect_sandbox(token, conf, sb, with_ingestion=True):
             "n_labels": n_labels,
         })
 
+    # Datasets whose schemaRef points at something the Schema Registry does not
+    # list -- audience exports, destination staging, Adobe-internal datasets.
+    # They have no schema to read fields from, so they cannot reach the Field
+    # Index, but they ARE part of the estate and the Datasets tab says so
+    # rather than quietly omitting them.
+    orphans = 0
+    for d in ds_all:
+        if "included" in d:
+            continue
+        orphans += 1
+        d["included"] = False
+        d["tier"] = "orphan"
+        d["kind"] = "orphan"
+        d["reason"] = ("schema is not in the Schema Registry (audience export / "
+                       "destination / Adobe-internal dataset)")
+    stats["orphan_datasets"] = orphans
+
+    # Which schemas get their own tab. The Field Index carries every included
+    # schema regardless; tabs are the scarce resource, so they go to the data
+    # model first and then to whatever else holds the most recent data.
+    for i, k in enumerate(sorted(kept, key=_schema_rank)):
+        k["tab"] = i < MAX_SCHEMA_TABS
+    stats["tabs"] = min(len(kept), MAX_SCHEMA_TABS)
+
     return {
         "title": title, "name": name, "env": env,
         "verdicts": verdicts, "kept": kept, "datasets": ds_all,
-        "labels_n": len(labels), "stats": stats,
+        "labels_n": len(labels), "stats": stats, "width": width,
         "ingestion": ingestion, "ingestion_note": ingestion_note,
     }
+
+
+def _schema_rank(k):
+    """Sort key deciding who gets a tab, and the order --data-dict works
+    through. The data model first, then live data before dead data, then
+    volume. Recency outranks size on purpose: a 200M-row one-off import from
+    last year is less use than the order-event stream that landed this
+    morning."""
+    return (TIER_ORDER.get(k.get("tier"), 9),
+            -(k.get("last_write") or 0),
+            -(k.get("rows_recent") or 0),
+            (k.get("title") or "").lower())
 
 
 def _id_tail(sid: str) -> str:
@@ -1856,12 +2199,14 @@ def _id_tail(sid: str) -> str:
 # Console output
 # ----------------------------------------------------------------------------
 STATUS_COLOR = {
-    "KEEP": ANSI["green"],
-    "DROP:no-dataset": ANSI["dim"],
-    "DROP:adhoc": ANSI["yellow"],
-    "DROP:ajo": ANSI["magenta"],
-    "DROP:system": ANSI["blue"],
-    "DROP:test": ANSI["cyan"],
+    "IN:core": ANSI["green"] + ANSI["bold"],
+    "IN:wide": ANSI["green"],
+    "IN:dormant": ANSI["cyan"],
+    "IN:none": ANSI["cyan"],
+    "OUT:core": ANSI["yellow"],
+    "OUT:wide": ANSI["yellow"],
+    "OUT:dormant": ANSI["dim"],
+    "OUT:none": ANSI["dim"],
 }
 
 
@@ -1889,13 +2234,17 @@ def print_sandbox(result):
     s = result["stats"]
     print(ANSI["dim"] + "-" * 100 + ANSI["reset"])
     print(f"  {ANSI['bold']}{s['total']}{ANSI['reset']} schemas seen  ->  "
-          f"{ANSI['green']}{s['kept']} KEEP{ANSI['reset']}  "
-          f"{ANSI['dim']}({s['adhoc']} adhoc, {s['ajo']} ajo, "
-          f"{s['system']} system, {s['test']} test, "
-          f"{s['no_dataset']} no-dataset dropped){ANSI['reset']}")
-    print(f"  {ANSI['dim']}Of the adhoc, {ANSI['reset']}{s['audience']}"
-          f"{ANSI['dim']} were auto-created 'Schema for audience...' schemas "
-          f"-- filtered out.{ANSI['reset']}")
+          f"{ANSI['green']}{s['kept']} included{ANSI['reset']} "
+          f"{ANSI['dim']}(--width={s['width']}){ANSI['reset']}  "
+          f"{ANSI['dim']}tiers: {s['core']} core, {s['wide']} wide, "
+          f"{s['dormant']} dormant, {s['none']} no-dataset{ANSI['reset']}")
+    print(f"  {ANSI['dim']}By kind: {s['modelled']} modelled, "
+          f"{s['generated']} generated, {s['audience-dump']} audience-dump, "
+          f"{s['ajo']} AJO, {s['system']} system, {s['test']} test."
+          f"{ANSI['reset']}")
+    print(f"  {ANSI['dim']}{s.get('tabs', 0)} schema tab(s); the rest are "
+          f"index-only. {s.get('orphan_datasets', 0)} dataset(s) have no "
+          f"registry schema.{ANSI['reset']}")
     dual = result["labels_n"]
     dcolor = ANSI["green"] if dual else ANSI["yellow"]
     print(f"  Dual labels (alternateDisplayInfo) in sandbox: "
@@ -1908,7 +2257,7 @@ def print_sandbox(result):
 # XLSX output
 # ----------------------------------------------------------------------------
 # Columns for the Schemas index tab (one row per kept schema).
-SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Class", "Datasets",
+SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Class", "Tier", "Kind", "Datasets",
                       "SQL table name(s)", "Fields", "Identities",
                       "Relationships", "Dual-labelled fields", "Last Modified",
                       "Schema $id"]
@@ -1976,6 +2325,10 @@ def _coverage_status(k):
                 "(504/timeout); coverage is unknown, not 0%")
     if reason == "empty":
         return ("empty", "empty -- no records ingested into this schema")
+    if reason == "budget":
+        return ("budget", "NOT SAMPLED -- the --data-dict time budget ran out "
+                "before reaching this schema; its fields are listed but have "
+                "no coverage or sample values")
     return ("not_sampled", "not sampled (out of scope or no dataset)")
 
 
@@ -2502,15 +2855,26 @@ def write_xlsx(results, client: str, datestr: str):
 
     wb = Workbook()
 
-    # Unique worksheet name per kept schema (Excel: <=31 chars, unique). Built
+    # Unique worksheet name per TABBED schema (Excel: <=31 chars, unique). Built
     # up front so the Field Index and Schemas index can name each schema's tab.
+    #
+    # v3.6 separated two things the old code conflated. `indexed` is every
+    # included schema and drives the Field Index and the Schemas tab -- the
+    # places you search. `tabbed` is the subset that also gets a sheet of its
+    # own, capped at MAX_SCHEMA_TABS because a 700-tab workbook is not a
+    # document, it is a filing cabinet with the drawers removed.
     used = {"summary", "how to use", "schemas", "field index", "datasets",
             "audiences", "ingestion"}
-    tabbed = []  # (res, k, sheet_name)
+    indexed = []  # (res, k, sheet_name_or_marker)
+    tabbed = []   # (res, k, sheet_name)   -- subset of indexed
     for res in results:
-        for k in res["kept"]:
-            tabbed.append((res, k, _safe_sheet_name(_sheet_label(k["title"]),
-                                                    used)))
+        for k in sorted(res["kept"], key=_schema_rank):
+            if k.get("tab", True):
+                nm = _safe_sheet_name(_sheet_label(k["title"]), used)
+                tabbed.append((res, k, nm))
+            else:
+                nm = "(index only)"
+            indexed.append((res, k, nm))
 
     # ---- Summary tab --------------------------------------------------------
     ws = wb.active
@@ -2544,9 +2908,10 @@ def write_xlsx(results, client: str, datestr: str):
                 "union, not the pre-merge feeding datasets.")
     ws["C5"].font = Font(italic=True, color="666666")
 
-    hdr = ["Sandbox", "Env", "Schemas seen", "Kept", "Dropped: no-dataset",
-           "Dropped: adhoc", "Dropped: AJO", "Dropped: system",
-           "Dropped: test", "Kept fields", "Relationships", "Dual labels"]
+    hdr = ["Sandbox", "Env", "Width", "Schemas seen", "Included",
+           "Tabs", "core", "wide", "dormant", "no dataset",
+           "Datasets", "Not covered", "Included fields", "Relationships",
+           "Dual labels"]
     r = 6
     for c, nm in enumerate(hdr, 1):
         ws.cell(r, c, nm)
@@ -2554,15 +2919,26 @@ def write_xlsx(results, client: str, datestr: str):
     r += 1
     for res in results:
         s = res["stats"]
+        ds = res.get("datasets") or []
         ws.cell(r, 1, res["title"])
         ws.cell(r, 2, res["env"]).alignment = center
-        for c, val in enumerate([s["total"], s["kept"], s["no_dataset"],
-                                 s["adhoc"], s["ajo"], s["system"], s["test"],
+        for c, val in enumerate([s.get("width", ""), s["total"], s["kept"],
+                                 s.get("tabs", 0), s["core"], s["wide"],
+                                 s["dormant"], s["none"], len(ds),
+                                 sum(1 for d in ds if not d.get("included")),
                                  s["fields"], s["relationships"],
                                  res["labels_n"]], 3):
             ws.cell(r, c, val).alignment = center
         r += 1
-    autofit(ws, [24, 6, 13, 7, 19, 15, 13, 15, 13, 12, 14, 12])
+    autofit(ws, [24, 6, 8, 13, 10, 7, 7, 7, 10, 11, 10, 12, 15, 13, 12])
+    r += 1
+    ws.cell(r, 1, "Width decides how much of the estate is covered: core = the "
+                  "modelled data model only; wide = everything whose datasets "
+                  "hold data; all = plus never-written and schema-less "
+                  "datasets. The Datasets tab lists every dataset either way, "
+                  "with an Included column and the reason.").font = Font(
+        italic=True, color="666666")
+    r += 1
 
     # ---- Data completeness: what's MISSING ----------------------------------
     # On a --data-dict run, list every schema whose coverage is not trustworthy
@@ -2579,23 +2955,37 @@ def write_xlsx(results, client: str, datestr: str):
             cell.font = head_font
             cell.fill = head_fill
         r += 1
-        listed = 0
-        for res, k, nm in tabbed:
+        listed = quiet = 0
+        for res, k, nm in indexed:
             code, label = _coverage_status(k)
             if code == "ok":
+                continue
+            # On a wide run most schemas are simply out of the sampling scope.
+            # Naming all several hundred would bury the handful that were
+            # attempted and FAILED, which is what this section exists to show,
+            # so they are counted rather than listed.
+            if code == "not_sampled":
+                quiet += 1
                 continue
             ws.cell(r, 1, k["title"])
             ws.cell(r, 2, nm)
             ws.cell(r, 3, res["title"])
             cell = ws.cell(r, 4, label)
-            if code in ("unreadable", "partial"):
+            if code in ("unreadable", "partial", "budget"):
                 cell.font = Font(color="C00000", bold=True)
             r += 1
             listed += 1
         if not listed:
             ws.cell(r, 1, "(every sampled schema returned coverage)").font = Font(
                 italic=True, color="666666")
-        r += 1
+            r += 1
+        if quiet:
+            ws.cell(r, 1, f"A further {quiet} included schema(s) were never "
+                          f"sampled -- out of --data-dict scope, or nothing to "
+                          f"sample. Their fields are listed; their coverage "
+                          f"columns are blank.").font = Font(
+                italic=True, color="666666")
+            r += 1
 
     # Author / provenance footer, so the file can be traced back to a person as
     # well as to a script.
@@ -2625,17 +3015,23 @@ def write_xlsx(results, client: str, datestr: str):
         ("I want to...", "Go to", "What you'll find"),
         ("...see what data exists at all",
          "Schemas",
-         "Every schema kept, its class, how many datasets feed it, and which "
-         "tab describes it."),
+         "Every schema this workbook includes, its class, its tier and kind, "
+         "how many datasets feed it, and which tab describes it."),
         ("...find one particular field",
          "Field Index",
-         "Every field across every schema in one list. Filter the Field column "
-         "to search; it tells you which schema and tab it belongs to."),
+         "Every field of every included schema in one list -- not just the "
+         "ones with a tab. Filter the Field column to search; it tells you "
+         "which schema and tab it belongs to, or '(index only)'."),
         ("...write SQL against the data",
          "Datasets",
          "Maps each dataset's friendly name to its SQL table name. Use the "
          "TABLE NAME in FROM, not the friendly name -- they differ. The "
          "Profile column flags what feeds Real-Time Customer Profile."),
+        ("...find out whether something is even covered",
+         "Datasets",
+         "Every dataset in the sandbox is listed, in or out. Included = NO "
+         "means its fields are not in this workbook, and Why says what ruled "
+         "it out -- usually that nothing has ever been ingested into it."),
         ("...understand one schema in detail",
          "Its own tab",
          "Every field with its type, friendly label, whether it is an "
@@ -2668,6 +3064,19 @@ def write_xlsx(results, client: str, datestr: str):
          "not read the data at all. Any schema in that state is listed in the "
          "DATA COMPLETENESS block on the Summary tab and banner-flagged on its "
          "own tab."),
+        ("A blank coverage column means NOT SAMPLED",
+         "Field Index",
+         "Sampling is expensive, so it runs in priority order under a time "
+         "budget: the data model first, then whatever was written to most "
+         "recently. A schema the budget did not reach still has all its "
+         "FIELDS here -- it just has no coverage or example values. The "
+         "Summary tab names them."),
+        ("Not every dataset is in this workbook",
+         "Datasets",
+         "By default it covers everything whose datasets hold data. Empty "
+         "datasets, and datasets whose schema Adobe does not publish in the "
+         "registry, are listed with Included = NO. Re-run with --width=all if "
+         "you need those too."),
         ("Some rules are only PARTLY shown",
          "Audiences",
          "Rules marked 'partial' contain an event-sequence or time-window "
@@ -2748,15 +3157,19 @@ def write_xlsx(results, client: str, datestr: str):
     confidential(fi)
     fi["A2"] = f"Field Index  -  {label}"
     fi["A2"].font = title_font
-    fi["A3"] = ("Every field across all schemas. Look up an exact dot-notation "
-                "path (Ctrl-F); the Tab column says which sheet it lives on.")
+    fi["A3"] = ("Every field of every INCLUDED schema -- not just the ones with "
+                "a tab. Look up an exact dot-notation path (Ctrl-F); the Tab "
+                "column says which sheet it lives on, or '(index only)' when "
+                "the schema has no tab of its own. If a field you expect is "
+                "absent, check the Datasets tab: its Included column says what "
+                "this workbook covers and why.")
     fi["A3"].font = Font(italic=True, color="666666")
     hr = 5
     for c, nm in enumerate(FIELD_INDEX_COLUMNS, 1):
         fi.cell(hr, c, nm)
     style_header(fi, len(FIELD_INDEX_COLUMNS), row=hr)
     index_rows = []
-    for res, k, name in tabbed:
+    for res, k, name in indexed:
         dd = k.get("datadict") or {}
         tnames = _sql_table_names(k)
         for (fpath, dtype, friendly, req, ident, rel) in k["fields"]:
@@ -2782,8 +3195,15 @@ def write_xlsx(results, client: str, datestr: str):
     # Last column is Top values -- widened for DD_TOP_N=10. Nothing sits to its
     # right, so the extra width costs the reader nothing.
     autofit(fi, [52, 18, 28, 20, 38, 34, 24, 11, 90])
+    # 10k+ rows on a real tenant: freeze the header and turn on the filter, so
+    # the index behaves like the lookup table it is.
+    fi.freeze_panes = fi.cell(hr + 1, 1).coordinate
+    if ridx > hr + 1:
+        fi.auto_filter.ref = (f"A{hr}:"
+                              f"{get_column_letter(len(FIELD_INDEX_COLUMNS))}"
+                              f"{ridx - 1}")
 
-    # ---- Schemas index tab (one row per kept schema) ------------------------
+    # ---- Schemas index tab (one row per included schema) --------------------
     sh = wb.create_sheet("Schemas")
     confidential(sh)
     index_cols = ["Tab"] + SCHEMA_CSV_COLUMNS
@@ -2792,14 +3212,21 @@ def write_xlsx(results, client: str, datestr: str):
         sh.cell(hr, c, nm)
     style_header(sh, len(index_cols), row=hr)
     rr = hr + 1
-    for res, k, name in tabbed:
-        row = [name, res["title"], k["title"], k["class"], k["datasets"],
+    for res, k, name in indexed:
+        row = [name, res["title"], k["title"], k["class"], k.get("tier", ""),
+               k.get("kind", ""), k["datasets"],
                _sql_table_names(k), k["n_fields"], k["n_identities"],
                k["n_relationships"], k["n_labels"], k["last_mod"], k["id"]]
         for c, val in enumerate(row, 1):
-            sh.cell(rr, c, val)
+            cell = sh.cell(rr, c, val)
+            if c == 5 and val != "core":
+                cell.font = Font(color="666666")
         rr += 1
-    autofit(sh, [26, 18, 38, 22, 9, 40, 7, 10, 13, 16, 16, 58])
+    autofit(sh, [26, 18, 38, 22, 9, 15, 9, 40, 7, 10, 13, 16, 16, 58])
+    sh.freeze_panes = sh.cell(hr + 1, 1).coordinate
+    if rr > hr + 1:
+        sh.auto_filter.ref = (f"A{hr}:"
+                              f"{get_column_letter(len(index_cols))}{rr - 1}")
 
     # ---- Datasets tab: friendly name -> SQL table (system) name -------------
     # EVERY dataset in each sandbox, so a query can be aimed at the right table.
@@ -2809,14 +3236,18 @@ def write_xlsx(results, client: str, datestr: str):
     confidential(dt)
     dt["A2"] = f"Datasets / SQL table names  -  {label}"
     dt["A2"].font = title_font
-    dt["A3"] = ("Every dataset and its AEP Query Service table name. SQL uses the "
-                "SYSTEM table name, not the friendly name: SELECT ... FROM "
-                "<Table Name>. The Profile column flags datasets enabled for "
-                "Unified Profile and the Profile Snapshot Export (the merged union "
-                "to query for whole profiles).")
+    dt["A3"] = ("EVERY dataset in the sandbox -- the complete inventory, whether "
+                "or not this workbook covers it. SQL uses the SYSTEM table name, "
+                "not the friendly name: SELECT ... FROM <Table Name>. Included "
+                "= YES means the schema behind this dataset is in the Field "
+                "Index; NO means it is not, and Why says what ruled it out. "
+                "Filter on Included=NO to see everything the workbook is "
+                "missing, then re-run wider (--width=all) if you need it.")
     dt["A3"].font = Font(italic=True, color="666666")
-    DATASET_COLUMNS = ["Sandbox", "Schema", "Friendly Name (dataset)",
-                       "Table Name (SQL / system)", "Profile", "Dataset ID"]
+    DATASET_COLUMNS = ["Sandbox", "Included", "Tier", "Kind", "Schema",
+                       "Friendly Name (dataset)", "Table Name (SQL / system)",
+                       "Profile", "Records (recent)", "Last write",
+                       "Last batch", "Why", "Dataset ID"]
     hr = 5
     for c, nm in enumerate(DATASET_COLUMNS, 1):
         dt.cell(hr, c, nm)
@@ -2826,23 +3257,49 @@ def write_xlsx(results, client: str, datestr: str):
     # so the tables you need for Profile queries sit at the top.
     def _prof_rank(p):
         return 0 if p.startswith("snapshot") else (1 if p else 2)
+    n_excluded = 0
     for res in results:
         for d in sorted(res.get("datasets") or [],
                         key=lambda x: (_prof_rank(x.get("profile") or ""),
-                                       (x.get("schema_title") or "~").lower(),
+                                       TIER_ORDER.get(x.get("tier"), 8),
+                                       -(x.get("last_write") or 0),
                                        (x.get("name") or "").lower())):
+            inc = bool(d.get("included"))
+            if not inc:
+                n_excluded += 1
             dt.cell(rr, 1, res["title"])
-            dt.cell(rr, 2, d.get("schema_title"))
-            dt.cell(rr, 3, d.get("name"))
-            dt.cell(rr, 4, d.get("table"))
-            pcell = dt.cell(rr, 5, d.get("profile"))
+            icell = dt.cell(rr, 2, "YES" if inc else "NO")
+            icell.alignment = center
+            icell.font = (Font(bold=True, color="2E7D32") if inc
+                          else Font(bold=True, color="C00000"))
+            dt.cell(rr, 3, d.get("tier") or "")
+            dt.cell(rr, 4, d.get("kind") or "")
+            dt.cell(rr, 5, d.get("schema_title"))
+            dt.cell(rr, 6, d.get("name"))
+            dt.cell(rr, 7, d.get("table"))
+            pcell = dt.cell(rr, 8, d.get("profile"))
             if (d.get("profile") or "").startswith("snapshot"):
                 pcell.font = Font(bold=True, color="7030A0")
             elif d.get("profile"):
                 pcell.font = Font(color="2E7D32")
-            dt.cell(rr, 6, d.get("id"))
+            if d.get("rows_recent"):
+                ncell = dt.cell(rr, 9, d["rows_recent"])
+                ncell.number_format = "#,##0"
+                ncell.alignment = center
+            dt.cell(rr, 10, fmt_epoch_ms(d["last_write"])
+                    if d.get("last_write") else "")
+            dt.cell(rr, 11, d.get("last_status") or "")
+            dt.cell(rr, 12, d.get("reason") or "")
+            dt.cell(rr, 13, d.get("id"))
             rr += 1
-    autofit(dt, [18, 40, 42, 44, 26, 34])
+    autofit(dt, [16, 10, 10, 15, 38, 42, 44, 24, 17, 17, 13, 56, 34])
+    dt.freeze_panes = dt.cell(hr + 1, 1).coordinate
+    if rr > hr + 1:
+        dt.auto_filter.ref = (f"A{hr}:"
+                              f"{get_column_letter(len(DATASET_COLUMNS))}{rr - 1}")
+    dt.cell(rr + 1, 1, f"{rr - hr - 1} dataset(s) listed; {n_excluded} not "
+                       f"covered by this workbook (Included = NO).").font = Font(
+        italic=True, color="666666")
 
     # ---- Ingestion tab: how each dataset actually gets populated ------------
     # The Datasets tab says where data lives; this says how it got there, and
@@ -3118,19 +3575,30 @@ def _resolve_profile_snapshot(token, conf, sandbox, profile_snapshot):
 
 
 def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
-                        profile_snapshot=None):
+                        profile_snapshot=None, budget_min=DD_BUDGET_DEFAULT_MIN):
     """Sample real records and attach k['datadict'] + k['dd_rows'] to each kept
     schema in scope. Mutates `results` in place.
 
     Profile-class schemas (the post-merge union) are sampled from the Profile
     Snapshot Export dataset of the default merge policy rather than their
-    pre-merge feeding datasets -- see _resolve_profile_snapshot."""
+    pre-merge feeding datasets -- see _resolve_profile_snapshot.
+
+    Sampling is the one genuinely expensive thing this script does: it
+    downloads and parses Parquet, tens of seconds a schema. Widening the
+    workbook took the in-scope population from tens of schemas to hundreds, so
+    it is now WORKED IN PRIORITY ORDER (_schema_rank: data model first, then
+    most-recently-written, then largest) under a wall-clock ceiling of
+    `budget_min` minutes. Whatever the clock runs out on keeps its fields and
+    is marked NOT SAMPLED -- never silently reported as 0% coverage."""
     try:
         import pyarrow  # noqa: F401  (fail early if the reader is missing)
     except ImportError:
         logger.error("--data-dict needs pyarrow (pip install pyarrow). "
                      "Skipping the data dictionary; the rest still ran.")
         return
+
+    budget_s = max(0, float(budget_min or 0)) * 60
+    t_budget_start = time.perf_counter()
 
     for res in results:
         in_scope = [k for k in res["kept"] if _in_dd_scope(k["title"], dd_scope)]
@@ -3139,8 +3607,14 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
                            f"scope '{dd_scope}'. Kept titles include: "
                            f"{', '.join(k['title'] for k in res['kept'][:3])}...")
             continue
+        in_scope.sort(key=_schema_rank)
+        preview = ", ".join(k["title"] for k in in_scope[:8])
         logger.info(f"  data dict: {len(in_scope)} schema(s) in scope for "
-                    f"{res['name']}: {', '.join(k['title'] for k in in_scope)}")
+                    f"{res['name']}, in priority order: {preview}"
+                    f"{', ...' if len(in_scope) > 8 else ''}")
+        if budget_s:
+            logger.info(f"  data dict: wall-clock budget "
+                        f"{budget_s/60:.0f} min (--dd-budget=0 to remove it).")
         ds_index = get_dataset_ids_by_schema(token, conf, res["name"])
         snap_resolved = None     # per-sandbox cache: (dsid, label) | False
         # Every Profile-class schema reads the SAME union dataset, so the
@@ -3170,6 +3644,25 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
                             f"the workbook.")
             n_scope = len(targets)
             for i, k in enumerate(targets, 1):
+                # Out of time. Mark the whole tail so the workbook says NOT
+                # SAMPLED rather than implying these schemas hold no data, and
+                # name what was dropped -- a silent cap reads as "we covered
+                # everything" when we did not.
+                if budget_s and (time.perf_counter() - t_budget_start) > budget_s:
+                    skipped = targets[i - 1:]
+                    for s in skipped:
+                        s.setdefault("dd_empty_reason", "budget")
+                    logger.warning(
+                        f"  {ANSI['bold']}data dict: TIME BUDGET SPENT"
+                        f"{ANSI['reset']} after "
+                        f"{(time.perf_counter()-t_budget_start)/60:.0f} min. "
+                        f"{len(skipped)} schema(s) NOT sampled in {res['name']}: "
+                        f"{', '.join(s['title'] for s in skipped[:10])}"
+                        f"{', ...' if len(skipped) > 10 else ''}. Their fields "
+                        f"are still in the workbook; only coverage and sample "
+                        f"values are missing. Re-run with --dd-budget=0 (no "
+                        f"ceiling) or a narrower --data-dict=<scope>.")
+                    break
                 # Overall progress so an overnight all-schemas run is easy to
                 # track: how far through we are and how long we've been going.
                 elapsed = time.perf_counter() - t_dd_start
@@ -3296,10 +3789,13 @@ def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
     bar = ANSI["yellow"] + "-" * 60 + ANSI["reset"]
     print(bar)
     print(f"  {ANSI['bold']}Full data dictionary?{ANSI['reset']}")
-    print(f"  {ANSI['dim']}Samples up to {dd_rows} real records per kept schema "
-          f"(downloads + parses\n  Parquet) to add COVERAGE % and TOP-{DD_TOP_N} values "
-          f"per field.\n  This can take several minutes -- much longer on big "
-          f"tenants.{ANSI['reset']}")
+    print(f"  {ANSI['dim']}Samples up to {dd_rows} real records per included "
+          f"schema (downloads +\n  parses Parquet) to add COVERAGE % and "
+          f"TOP-{DD_TOP_N} values per field.\n  Worked in priority order -- the "
+          f"data model first, then whatever was\n  written to most recently -- "
+          f"and capped at {DD_BUDGET_DEFAULT_MIN} minutes "
+          f"(--dd-budget=).\n  Anything the clock does not reach is marked NOT "
+          f"SAMPLED, not 0%.{ANSI['reset']}")
     print(bar)
     try:
         raw = input(
@@ -3318,7 +3814,9 @@ def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
 
 def run(service: str, sandbox_arg: str | None,
         dd_scope: str | None = None, dd_rows: int = DD_DEFAULT_ROWS,
-        profile_snapshot: str | None = None, with_ingestion: bool = True):
+        profile_snapshot: str | None = None, with_ingestion: bool = True,
+        width: str = DEFAULT_WIDTH, with_activity: bool = True,
+        dd_budget: float = DD_BUDGET_DEFAULT_MIN):
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print()
     print(bar)
@@ -3371,7 +3869,8 @@ def run(service: str, sandbox_arg: str | None,
         logger.info(f"Collecting {sb.get('name', '?')} ...")
         try:
             res = collect_sandbox(token, conf, sb,
-                                  with_ingestion=with_ingestion)
+                                  with_ingestion=with_ingestion,
+                                  width=width, with_activity=with_activity)
         except urllib.error.HTTPError as e:
             logger.error(f"  {sb.get('name')}: HTTP {e.code} "
                          f"{flatten_err(e.read().decode(errors='replace'))}")
@@ -3399,7 +3898,8 @@ def run(service: str, sandbox_arg: str | None,
                     f"(scope: '{dd_scope}', up to {dd_rows} records per schema). "
                     f"This downloads and parses Parquet -- expect minutes.")
         add_data_dictionary(token, conf, results, dd_scope, dd_rows,
-                             profile_snapshot=profile_snapshot)
+                             profile_snapshot=profile_snapshot,
+                             budget_min=dd_budget)
     elif not sys.stdin.isatty():
         # Non-interactive run that wasn't offered the prompt above.
         logger.info(f"{ANSI['dim']}Data dictionary not requested -- pass "
@@ -3410,15 +3910,21 @@ def run(service: str, sandbox_arg: str | None,
     client = client_label(conf)
     xlsx_path = write_xlsx(results, client, datestr)
     if xlsx_path:
-        n_tabs = sum(len(r["kept"]) for r in results)
+        n_tabs = sum(r["stats"].get("tabs", 0) for r in results)
+        n_idx = sum(len(r["kept"]) for r in results)
         logger.info(f"XLSX written: {xlsx_path}  "
-                    f"({n_tabs} schema tab(s) + Summary + Field Index + "
-                    f"Schemas index + Datasets + Ingestion)")
+                    f"({n_tabs} schema tab(s), {n_idx} schema(s) in the Field "
+                    f"Index, + Summary + Schemas index + Datasets + Ingestion)")
 
     total_kept = sum(r["stats"]["kept"] for r in results)
     total_seen = sum(r["stats"]["total"] for r in results)
-    logger.info(f"Done. {total_kept} kept of {total_seen} schemas across "
-                f"{len(results)} sandbox(es).")
+    total_ds = sum(len(r.get("datasets") or []) for r in results)
+    total_out = sum(1 for r in results for d in (r.get("datasets") or [])
+                    if not d.get("included"))
+    logger.info(f"Done. --width={width}: {total_kept} of {total_seen} schemas "
+                f"included across {len(results)} sandbox(es); {total_ds} "
+                f"dataset(s) listed, {total_out} not covered (see the Datasets "
+                f"tab's Included column).")
 
 
 def print_banner() -> None:
@@ -3440,10 +3946,34 @@ def main():
     dd_rows = DD_DEFAULT_ROWS
     profile_snapshot = None
     with_ingestion = True
+    width = DEFAULT_WIDTH
+    with_activity = True
+    dd_budget = DD_BUDGET_DEFAULT_MIN
     positional = []
     for a in args:
         if a.startswith("--sandbox="):
             sandbox_arg = a.split("=", 1)[1]
+        elif a.startswith("--width="):
+            w = a.split("=", 1)[1].strip().lower()
+            if w in WIDTH_CHOICES:
+                width = w
+            else:
+                logger.warning(f"Ignoring --width={w!r}; choose one of "
+                               f"{', '.join(WIDTH_CHOICES)}.")
+        elif a in ("--no-activity", "--no-batch-history"):
+            # Skips the per-dataset batch sweep. Without that evidence nothing
+            # can be called dormant, so the run behaves as --width=all.
+            with_activity = False
+        elif a.startswith("--max-tabs="):
+            try:
+                globals()["MAX_SCHEMA_TABS"] = max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                logger.warning(f"Ignoring bad --max-tabs value in {a!r}.")
+        elif a.startswith("--dd-budget="):
+            try:
+                dd_budget = max(0.0, float(a.split("=", 1)[1]))
+            except ValueError:
+                logger.warning(f"Ignoring bad --dd-budget value in {a!r}.")
         elif a in ("--data-dict", "--dd"):
             dd_scope = DD_DEFAULT_SCOPE          # ALL kept schemas, by default
         elif a.startswith("--data-dict="):
@@ -3485,7 +4015,8 @@ def main():
         return
 
     run(chosen, sandbox_arg, dd_scope, dd_rows,
-        profile_snapshot=profile_snapshot, with_ingestion=with_ingestion)
+        profile_snapshot=profile_snapshot, with_ingestion=with_ingestion,
+        width=width, with_activity=with_activity, dd_budget=dd_budget)
 
 
 if __name__ == "__main__":

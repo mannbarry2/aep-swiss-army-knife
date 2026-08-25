@@ -7,6 +7,57 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.6 — 2026-08-21
+
+**Stop guessing which schemas matter. Gate on evidence instead.**
+
+The filter deciding what went into the workbook rested on a rule written at the
+very beginning and never revisited: any schema whose `meta:class` id ended in a
+long hex blob was assumed to be an auto-generated ingestion dump. It was a
+reasonable first guess that quietly became load-bearing — and it is wrong.
+Adobe hex-ids **every** tenant-created custom class, so a hand-modelled lookup
+schema sitting on a shared custom class looked exactly like an import dump.
+
+On a live prod tenant that rule dropped 20 modelled schemas — most of the
+estate's lookup tables among them — from the Field Index. Their fields were
+simply absent, with nothing anywhere to say they were missing. Of 2,495 schemas
+and 850 datasets, **36 schemas survived the filter.**
+
+- **Adobe already labels this, and we were ignoring it.** `schemaType` is
+  `standard` for a modelled schema and `adhoc` for a generated one;
+  `meta:tenantNamespace` vs `meta:datasetNamespace` says the same thing again.
+  Those are read first now. The hex-class heuristic survives only as a last
+  resort, for records carrying neither marker.
+- **KEEP/DROP became `--width`, and taxonomy became a column rather than a
+  gate.** Every dataset's batch history is read to establish which ones
+  actually hold data, and *that* — not what a schema looks like — decides what
+  the workbook covers. `core` is the modelled data model only; `wide` (the
+  default) is everything whose datasets hold records, whoever created them;
+  `all` adds never-written datasets and schemas with no dataset. Where the
+  evidence is merely inconclusive the schema is kept, not dropped: a spurious
+  extra schema costs seconds, a missing one costs an afternoon.
+- **The Datasets tab is now the honest inventory.** Every dataset in the
+  sandbox, in or out, with **Included YES/NO**, its tier and kind, recent
+  record count, when it was last written to, and the reason it is in or out.
+  Filter `Included = NO` to see precisely what the workbook does not cover.
+- **Widening is nearly free, so the Field Index no longer gates at all.** A
+  full-schema fetch is ~0.15s; the whole schemas-with-datasets population of a
+  large prod tenant resolves in about two minutes. Tabs are the scarce
+  resource, not fields, so they are capped (`--max-tabs`, default 120) and
+  everything else is index-only — the Field Index is what anyone actually
+  searches.
+- **Sampling is prioritised and budgeted.** `--data-dict` now works in priority
+  order — the data model first, then most-recently-written, then largest — under
+  a wall-clock ceiling (`--dd-budget`, default 180 minutes). Whatever it does
+  not reach is named in the log and marked **NOT SAMPLED** in the workbook,
+  never reported as 0% coverage.
+
+New flags: `--width=core|wide|all`, `--dd-budget=<minutes>` (0 = no ceiling),
+`--max-tabs=<n>`, `--no-activity` (skip the batch sweep; behaves as
+`--width=all`).
+
+---
+
 ## v3.5 — 2026-08-17
 
 **An Ingestion tab: how each dataset actually gets populated.**
