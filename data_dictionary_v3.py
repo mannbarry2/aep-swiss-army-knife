@@ -2,7 +2,7 @@
 """
 data_dictionary_v3.py  (AEP Swiss Army Knife)
 =============================================
-Data Dictionary v3.7. Sucks every XDM schema out of an AEP sandbox, works out
+Data Dictionary v3.8. Sucks every XDM schema out of an AEP sandbox, works out
 which ones hold data worth reading, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
@@ -26,7 +26,7 @@ folder where keyring is unavailable) and the tool will:
      an IN / OUT verdict per schema so you can see exactly what was excluded.
   6. For each INCLUDED schema, resolve its full field list (dot notation + data
      type), join identities / relationships / dual labels, and write
-        output/Data Dictionary - <Client> - <YYYY-MM-DD>.xlsx
+        output/AEP Data Dictionary - <Sandbox> - <YYYY-MM-DD>.xlsx
      (Summary, a master Field Index, a Schemas index, a Datasets / table-name
      map, then one tab per schema).
 
@@ -217,7 +217,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.7"
+SCRIPT_VERSION = "3.8"
 SCRIPT_DATE    = "2026-08-21"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -329,6 +329,14 @@ MAX_SCHEMA_TABS = 120
 # out the remaining schemas are marked NOT SAMPLED rather than silently reported
 # as 0% coverage. 0 disables the ceiling.
 DD_BUDGET_DEFAULT_MIN = 180
+
+# Output filename prefix. "AEP" up front because these land in a shared folder
+# next to dictionaries for other systems, and "Data Dictionary - prod" alone
+# does not say whose. LEGACY_PREFIX keeps the archive sweep able to see files
+# written before v3.8, so upgrading does not strand the previous run in the
+# output folder forever.
+WORKBOOK_PREFIX = "AEP Data Dictionary"
+LEGACY_WORKBOOK_PREFIX = "Data Dictionary"
 
 # --- Taxonomy knobs (labels now, not filters) -------------------------------
 ADHOC_CLASS = "https://ns.adobe.com/xdm/data/adhoc"
@@ -3072,7 +3080,9 @@ def provenance_line(prov: dict) -> str:
 def _archive_previous(out_dir: Path, safe_client: str) -> int:
     """Move any prior dictionary for this client into out_dir/archive/ so the
     output folder only ever holds the newest. Returns how many were moved."""
-    prev = sorted(out_dir.glob(f"Data Dictionary - {safe_client} - *.xlsx"))
+    prev = sorted(set(
+        list(out_dir.glob(f"{WORKBOOK_PREFIX} - {safe_client} - *.xlsx"))
+        + list(out_dir.glob(f"{LEGACY_WORKBOOK_PREFIX} - {safe_client} - *.xlsx"))))
     if not prev:
         return 0
     arch = out_dir / "archive"
@@ -3114,7 +3124,7 @@ def write_xlsx(results, client: str, datestr: str):
     sbs = [str(res.get("name") or "") for res in results if res.get("name")]
     where = "-".join(sbs) if 0 < len(sbs) <= 2 else f"{len(sbs)}-sandboxes"
     safe_client = re.sub(r"[^0-9A-Za-z _-]+", "", where).strip() or "sandbox"
-    path = OUTPUT_DIR / f"Data Dictionary - {safe_client} - {datestr}.xlsx"
+    path = OUTPUT_DIR / f"{WORKBOOK_PREFIX} - {safe_client} - {datestr}.xlsx"
 
     # ...and the titles INSIDE the workbook say the same thing as the filename.
     # `client` is filled only when the credential record carries an explicit
@@ -3146,6 +3156,58 @@ def write_xlsx(results, client: str, datestr: str):
     def autofit(ws, widths):
         for idx, w in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(idx)].width = w
+
+    def fit(ws, header_row, caps=None, min_w=7, sample=4000):
+        """Size every column to what is ACTUALLY in it, rather than to a
+        hand-guessed number.
+
+        The old fixed width lists were a guess made once and never revisited,
+        so every sandbox got the same widths regardless of its data: a column
+        of two-character codes sat 20 wide while a column of long dataset names
+        was cut off. Both cost the reader the same thing -- dragging column
+        edges before they can read the sheet.
+
+        Widths come from the content, not the header, because a long header
+        over short values is the classic way a column ends up three times wider
+        than it needs to be. Headers wrap instead (see style_header). `caps`
+        bounds the prose columns -- a PQL rule or a list of journey names would
+        otherwise demand a width no screen has.
+        """
+        caps = caps or {}
+        lens, headers = {}, {}
+        for cell in ws[header_row]:
+            if cell.value is not None:
+                headers[cell.column] = len(str(cell.value))
+        for i, row in enumerate(ws.iter_rows(min_row=header_row + 1)):
+            if i > sample:          # a few thousand rows settle the width
+                break
+            for cell in row:
+                v = cell.value
+                if v is None:
+                    continue
+                if isinstance(v, bool):
+                    ln = 5
+                elif isinstance(v, (int, float)):
+                    ln = len(f"{v:,.0f}")
+                else:
+                    ln = max((len(s) for s in str(v).split("\n")), default=0)
+                lens.setdefault(cell.column, []).append(ln)
+        for col in set(lens) | set(headers):
+            vals = sorted(lens.get(col, []))
+            # The 90th percentile, not the maximum. One freak value -- a single
+            # merge-policy GUID in a column of the word "Profile-enabled", one
+            # 300-character audience name -- would otherwise drag the whole
+            # column out to its cap and push everything after it off screen.
+            # Sizing to the 90th percentile fits what is actually there and
+            # lets the handful of outliers overflow, which is what a reader
+            # widening one column by hand would have done anyway.
+            body = vals[int(len(vals) * 0.9)] if vals else 0
+            # Floor: enough of the header to stay recognisable once wrapped,
+            # never so much that a short column is padded out to its title.
+            floor = max(min_w, min(headers.get(col, 0), 15))
+            want = max(body + 2.4, floor)
+            ws.column_dimensions[get_column_letter(col)].width = round(
+                min(want, caps.get(col, 52)), 1)
 
     def confidential(ws, cell="A1"):
         # Visible banner + a print header on every page.
@@ -3517,7 +3579,7 @@ def write_xlsx(results, client: str, datestr: str):
         ridx += 1
     # Last column is Top values -- widened for DD_TOP_N=10. Nothing sits to its
     # right, so the extra width costs the reader nothing.
-    autofit(fi, [52, 18, 28, 20, 38, 34, 24, 11, 90])
+    fit(fi, hr, caps={1: 46, 3: 34, 5: 40, 6: 36, 9: 62})
     # 10k+ rows on a real tenant: freeze the header and turn on the filter, so
     # the index behaves like the lookup table it is.
     fi.freeze_panes = fi.cell(hr + 1, 1).coordinate
@@ -3545,7 +3607,7 @@ def write_xlsx(results, client: str, datestr: str):
             if c == 5 and val != "core":
                 cell.font = Font(color="666666")
         rr += 1
-    autofit(sh, [26, 18, 38, 22, 9, 15, 9, 40, 7, 10, 13, 16, 16, 58])
+    fit(sh, hr, caps={3: 44, 4: 30, 8: 38, 14: 40})
     sh.freeze_panes = sh.cell(hr + 1, 1).coordinate
     if rr > hr + 1:
         sh.auto_filter.ref = (f"A{hr}:"
@@ -3615,7 +3677,7 @@ def write_xlsx(results, client: str, datestr: str):
             dt.cell(rr, 12, d.get("reason") or "")
             dt.cell(rr, 13, d.get("id"))
             rr += 1
-    autofit(dt, [16, 10, 10, 15, 38, 42, 44, 24, 17, 17, 13, 56, 34])
+    fit(dt, hr, caps={5: 40, 6: 44, 7: 44, 8: 28, 12: 50, 13: 26})
     dt.freeze_panes = dt.cell(hr + 1, 1).coordinate
     if rr > hr + 1:
         dt.auto_filter.ref = (f"A{hr}:"
@@ -3719,7 +3781,7 @@ def write_xlsx(results, client: str, datestr: str):
         elif quiet:
             vcell.font = quiet_font
         rr += 1
-    autofit(ing, [18, 38, 40, 42, 38, 26, 34, 20, 15, 12, 18, 12, 28, 36])
+    fit(ing, hr, caps={2: 38, 3: 42, 4: 44, 5: 36, 7: 36, 13: 26, 14: 26})
 
     # ---- Audiences tab: what the business does WITH the data ----------------
     # Completes the chain: schema -> dataset -> audience -> the rule behind it.
@@ -3791,8 +3853,8 @@ def write_xlsx(results, client: str, datestr: str):
                     if names:
                         cell.font = Font(bold=True, color="2E7D32")
             rr += 1
-        autofit(at, [16, 46, 36, 12, 14, 9, 52, 34, 10, 20, 32, 32, 70, 13, 50,
-                     22, 12])
+        fit(at, hr, caps={2: 44, 3: 26, 7: 46, 8: 34, 11: 26, 12: 26,
+                          13: 60, 15: 40, 16: 22})
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
                               f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
@@ -3845,8 +3907,7 @@ def write_xlsx(results, client: str, datestr: str):
                 if c == 16 and str(val).startswith(("NOT READ", "unreadable")):
                     cell.font = Font(color="C00000", bold=True)
             rr += 1
-        autofit(jt, [16, 52, 12, 9, 30, 46, 16, 14, 36, 24, 17, 24, 17, 17, 38,
-                     20])
+        fit(jt, hr, caps={2: 48, 5: 30, 6: 42, 9: 26, 15: 26})
         jt.freeze_panes = jt.cell(hr + 1, 1).coordinate
         if rr > hr + 1:
             jt.auto_filter.ref = (f"A{hr}:"
@@ -3917,7 +3978,7 @@ def write_xlsx(results, client: str, datestr: str):
                 cov.number_format = '0"%"'
                 sheet.cell(ridx, 8, info.get("top"))
             ridx += 1
-        autofit(sheet, [50, 20, 28, 9, 22, 42] + ([11, 100] if dd else []))
+        fit(sheet, hr, caps={1: 46, 3: 32, 6: 40, 8: 62})
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship

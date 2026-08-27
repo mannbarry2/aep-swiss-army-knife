@@ -7,6 +7,33 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.8 — 2026-08-27
+
+**Readability: measured column widths, and a clearer filename.**
+
+- **Columns are sized to what is in them.** The widths were a list of numbers
+  guessed once and never revisited, so every sandbox got the same layout
+  whatever its data — a column of two-character codes sitting 20 wide while a
+  column of long dataset names was cut off. Both cost the reader the same
+  thing: dragging column edges before they can read the sheet. Widths are now
+  measured from the content of each column in each workbook.
+- **Sized to the 90th percentile, not the maximum.** One freak value — a single
+  merge-policy GUID in a column of the word `Profile-enabled` — would otherwise
+  drag a column out to its cap and push everything after it off screen. Fitting
+  the 90th percentile and letting the few outliers overflow is what someone
+  widening one column by hand would have done anyway. On a live sandbox this
+  took the Field Index from 315 characters of total width to 228.
+- Widths come from the content, not the header, since a long title over short
+  values is the classic way a column ends up three times wider than it needs to
+  be. Headers already wrap, so they lose nothing.
+- **Files are now `AEP Data Dictionary - <sandbox> - <date>.xlsx`.** They land
+  in a shared folder next to dictionaries for other systems, and
+  `Data Dictionary - prod` alone does not say whose. The archive sweep still
+  recognises the old prefix, so upgrading does not strand the previous run in
+  the output folder.
+
+---
+
 ## v3.7 — 2026-08-25
 
 **The Journeys half of the audience census, finally merged in.**
