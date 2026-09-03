@@ -100,9 +100,15 @@ PLATFORM = "https://platform.adobe.io"
 UPS = f"{PLATFORM}/data/core/ups"
 PREVIEW_URL = f"{UPS}/previewsamplestatus"
 DATASET_OVERLAP_URL = f"{PREVIEW_URL}/report/dataset/overlap"
-# Adobe documents NO namespace *overlap* endpoint -- this is the namespace
-# DISTRIBUTION report, whose rows are not mutually exclusive. See module docstring.
+# The namespace DISTRIBUTION report, whose rows are not mutually exclusive.
 NAMESPACE_URL = f"{PREVIEW_URL}/report/namespace"
+# Undocumented as of Sept 2026 -- absent from the preview-sample-status guide,
+# the OpenAPI reference and the pseudonymous-profiles page, though the latter
+# cross-links an "identity overlap report" anchor that does not resolve. The
+# `probe` subcommand exists to settle empirically whether they are live.
+NAMESPACE_OVERLAP_URL = f"{PREVIEW_URL}/report/namespace/overlap"
+UNSTITCHED_URL = f"{PREVIEW_URL}/report/unstitchedProfiles"
+DATASET_DIST_URL = f"{PREVIEW_URL}/report/dataset"
 DATASETS_URL = f"{PLATFORM}/data/foundation/catalog/dataSets"
 
 DEFAULT_SANDBOX = "prod"
@@ -719,6 +725,247 @@ def write_json(payload, target: Path) -> Path:
 
 
 # ----------------------------------------------------------------------------
+# probe -- is the whole overlap family gone, or only the dataset report?
+# ----------------------------------------------------------------------------
+def probe_endpoint(headers, label: str, url: str, date: str | None = None) -> dict:
+    """Call one endpoint and RECORD what happened. Never raises for a non-200 --
+    a status is the finding here, not a failure."""
+    full = f"{url}?date={urllib.parse.quote(date)}" if date else url
+    rec = {"label": label, "url": full, "date": date, "status": None,
+           "reportTimestamp": None, "count": None, "error": None, "body": None}
+    try:
+        raw = http(full, headers=headers)
+        rec["status"] = 200
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            rec["error"] = "200 but body was not JSON"
+            return rec
+        rec["body"] = body
+        if isinstance(body, dict):
+            rec["reportTimestamp"] = body.get("reportTimestamp")
+            data = body.get("data")
+            if isinstance(data, dict):
+                rec["count"] = len(data)
+            elif isinstance(data, list):
+                rec["count"] = len(data)
+            else:
+                rec["count"] = len(body)
+    except urllib.error.HTTPError as e:
+        rec["status"] = e.code
+        try:
+            text = e.read().decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        rec["body"] = text
+        # First line of the error body -- these come back as pretty-printed
+        # JSON, so pull the message out when we can.
+        msg = ""
+        try:
+            msg = str(json.loads(text).get("message", "")).strip()
+        except Exception:
+            msg = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        rec["error"] = msg[:160]
+    except Exception as exc:
+        rec["status"] = 0
+        rec["error"] = f"{type(exc).__name__}: {exc}"[:160]
+    return rec
+
+
+def _probe_line(rec: dict) -> None:
+    C = ANSI
+    st = rec["status"]
+    if st == 200:
+        colour, tag = C["green"], "200"
+    elif st in (404, 500):
+        colour, tag = C["yellow"], str(st)
+    elif st == 0:
+        colour, tag = C["red"], "ERR"
+    else:
+        colour, tag = C["red"], str(st)
+    when = "dated  " if rec["date"] else "undated"
+    ts = rec["reportTimestamp"] or ""
+    cnt = "" if rec["count"] is None else f"{rec['count']:,} row/key(s)"
+    print(f"    {colour}{C['bold']}{tag:>4}{C['reset']}  {C['dim']}{when}{C['reset']}  "
+          f"{rec['label']:<34} {cnt:<16} {C['dim']}{ts}{C['reset']}")
+    if rec["error"]:
+        print(f"          {C['dim']}-> {rec['error']}{C['reset']}")
+
+
+def print_reconciliation(unstitched_body, total_rows, licensed) -> None:
+    """Show the three competing profile numbers side by side WITHOUT picking a
+    winner -- which one is authoritative is a question for Adobe, not for this
+    tool to assume."""
+    C = ANSI
+    data = (unstitched_body or {}).get("data") or {}
+    tnp = _as_int(data.get("totalNumberOfProfiles"))
+    tne = _as_int(data.get("totalNumberOfEvents"))
+
+    print()
+    print(f"  {C['bold']}Reconciliation -- three profile numbers, side by side"
+          f"{C['reset']}")
+    print(f"  {C['dim']}Shown, not adjudicated. Which is authoritative for "
+          f"Addressable Audience is an Adobe question.{C['reset']}")
+    print()
+    rows = [
+        ("unstitchedProfiles.totalNumberOfProfiles", tnp,
+         "documented as equivalent to the addressable audience count"),
+        ("previewsamplestatus.totalRows", total_rows,
+         "the sampled Profile-store total"),
+        ("licensed entitlement", licensed, "as supplied on the command line"),
+    ]
+    width = max(len(r[0]) for r in rows)
+    for name, val, note in rows:
+        shown = commas(val) if val is not None else "(unavailable)"
+        print(f"    {name:<{width}}  {C['bold']}{shown:>16}{C['reset']}   "
+              f"{C['dim']}{note}{C['reset']}")
+
+    print()
+    pairs = [
+        ("totalNumberOfProfiles", tnp, "totalRows", total_rows),
+        ("totalNumberOfProfiles", tnp, "licensed", licensed),
+        ("totalRows", total_rows, "licensed", licensed),
+    ]
+    for an, a, bn, b in pairs:
+        if a is None or b is None:
+            continue
+        delta = a - b
+        colour = C["red"] if delta > 0 else C["green"]
+        sign = "+" if delta > 0 else ""
+        pct = (delta / b * 100) if b else 0
+        print(f"    {an} - {bn}:  {colour}{sign}{commas(delta)}{C['reset']} "
+              f"{C['dim']}({sign}{pct:.1f}%){C['reset']}")
+    if tne is not None:
+        print()
+        print(f"    {C['dim']}totalNumberOfEvents: {commas(tne)}{C['reset']}")
+
+    buckets = data.get("unstitchedProfiles")
+    if isinstance(buckets, dict) and buckets:
+        print()
+        print(f"  {C['bold']}Unstitched profiles by age{C['reset']}")
+        print(f"    {C['bold']}{'BUCKET':<10} {'PROFILES':>16} {'EVENTS':>18}"
+              f"{C['reset']}")
+        for key in ("7days", "30days", "60days", "90days", "120days"):
+            b = buckets.get(key)
+            if not isinstance(b, dict):
+                continue
+            cp = _as_int(b.get("countOfProfiles"))
+            ev = _as_int(b.get("eventsAssociated"))
+            print(f"    {key:<10} {commas(cp):>16} {commas(ev):>18}")
+            ns = b.get("nsDistribution")
+            if isinstance(ns, dict):
+                for code, nsv in sorted(
+                        ns.items(),
+                        key=lambda kv: -(_as_int((kv[1] or {}).get(
+                            "countOfProfiles")) or 0)):
+                    if not isinstance(nsv, dict):
+                        continue
+                    ncp = _as_int(nsv.get("countOfProfiles"))
+                    nev = _as_int(nsv.get("eventsAssociated"))
+                    print(f"      {C['dim']}{code:<8}{C['reset']} "
+                          f"{commas(ncp):>16} {commas(nev):>18}")
+
+
+def run_probe(headers, sandbox, date, licensed, json_target) -> int:
+    """Hit every endpoint in the family and report what each one does."""
+    C = ANSI
+    # An explicit recent date, because undated and dated behave differently:
+    # undated currently 500s while dated 404s, and both are worth recording.
+    probe_date = date or (datetime.now(timezone.utc).date()
+                          - timedelta(days=1)).isoformat()
+
+    print()
+    bar = C["cyan"] + "=" * 78 + C["reset"]
+    print(bar)
+    print(f"  {C['bold']}Preview-sample-status family probe{C['reset']}   "
+          f"{C['dim']}sandbox={sandbox}  dated-attempts={probe_date}{C['reset']}")
+    print(bar)
+    print()
+
+    print(f"  {C['bold']}Baseline -- endpoints known to work here{C['reset']}")
+    base = [
+        probe_endpoint(headers, "previewsamplestatus", PREVIEW_URL),
+        probe_endpoint(headers, "report/dataset", DATASET_DIST_URL),
+        probe_endpoint(headers, "report/namespace", NAMESPACE_URL),
+    ]
+    for rec in base:
+        _probe_line(rec)
+
+    print()
+    print(f"  {C['bold']}Overlap family{C['reset']}")
+    fam = [
+        probe_endpoint(headers, "report/dataset/overlap", DATASET_OVERLAP_URL),
+        probe_endpoint(headers, "report/dataset/overlap", DATASET_OVERLAP_URL,
+                       probe_date),
+        probe_endpoint(headers, "report/namespace/overlap", NAMESPACE_OVERLAP_URL),
+        probe_endpoint(headers, "report/namespace/overlap", NAMESPACE_OVERLAP_URL,
+                       probe_date),
+        # No date parameter is documented for this one.
+        probe_endpoint(headers, "report/unstitchedProfiles", UNSTITCHED_URL),
+    ]
+    for rec in fam:
+        _probe_line(rec)
+
+    def ok(label) -> bool:
+        return any(r["status"] == 200 for r in fam if r["label"].endswith(label))
+
+    ds_ok = ok("dataset/overlap")
+    ns_ok = ok("namespace/overlap")
+    un_ok = ok("unstitchedProfiles")
+
+    print()
+    print(f"  {C['bold']}Verdict{C['reset']}")
+    if not (ds_ok or ns_ok or un_ok):
+        print(f"    {C['red']}{C['bold']}FAMILY RETIRED{C['reset']} {C['red']}-- "
+              f"all three overlap-family endpoints fail in this sandbox. The "
+              f"problem is the family, not the dataset report.{C['reset']}")
+    elif un_ok and not (ds_ok or ns_ok):
+        print(f"    {C['yellow']}{C['bold']}DATASET/NAMESPACE OVERLAP BROKEN IN "
+              f"THIS ORG{C['reset']} {C['yellow']}-- unstitchedProfiles answers, "
+              f"so the family is live and only the two overlap reports are "
+              f"missing.{C['reset']}")
+    elif ns_ok and not ds_ok:
+        print(f"    {C['yellow']}{C['bold']}DATASET OVERLAP ONLY{C['reset']} "
+              f"{C['yellow']}-- namespace/overlap answers, so the overlap "
+              f"machinery works and only the dataset report is missing."
+              f"{C['reset']}")
+    else:
+        got = ", ".join(n for n, v in (("dataset/overlap", ds_ok),
+                                       ("namespace/overlap", ns_ok),
+                                       ("unstitchedProfiles", un_ok)) if v)
+        print(f"    {C['green']}{C['bold']}PARTIAL/WORKING{C['reset']} "
+              f"{C['green']}-- answering: {got}.{C['reset']}")
+
+    if un_ok:
+        body = next(r["body"] for r in fam
+                    if r["label"].endswith("unstitchedProfiles")
+                    and r["status"] == 200)
+        status_body = base[0]["body"] if base[0]["status"] == 200 else {}
+        total_rows = _as_int((status_body or {}).get("totalRows"))
+        print_reconciliation(body, total_rows, licensed)
+
+    if json_target is not None:
+        target = resolve_target(json_target, f"probe_{sandbox}")
+        if target.suffix.lower() != ".json":
+            target = target.with_suffix(".json")
+        dump = {
+            "probedAt": datetime.now(timezone.utc).isoformat(),
+            "sandbox": sandbox,
+            "datedAttempts": probe_date,
+            "endpoints": [
+                {k: v for k, v in r.items() if k != "body"} | {"body": r["body"]}
+                for r in base + fam
+            ],
+        }
+        written = write_json(dump, target)
+        print()
+        logger.info(f"Raw probe JSON written: {written}")
+
+    print()
+    return 0
+
+
+# ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
 def parse_args(argv):
@@ -771,6 +1018,10 @@ def parse_args(argv):
     sub.add_parser("identity", parents=[common],
                    help="Identity namespace distribution (NOT an overlap "
                         "report -- see --help notes).")
+    sub.add_parser("probe", parents=[common],
+                   help="Call every preview-sample-status endpoint and report "
+                        "what each does: is the whole overlap family gone, or "
+                        "only the dataset report?")
     return ap.parse_args(argv)
 
 
@@ -825,6 +1076,11 @@ def main() -> int:
         logger.error(f"Authentication failed: {exc}")
         return 1
     headers = aep_headers(token, conf, args.sandbox)
+
+    # `probe` is a diagnostic and shares nothing with the report paths below.
+    if args.command == "probe":
+        return run_probe(headers, args.sandbox, args.date, args.licensed,
+                         args.json)
 
     is_dataset = args.command == "dataset"
     want_overlap = is_dataset and not args.distribution
