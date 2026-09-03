@@ -1,0 +1,13 @@
+{
+    "_comment_1": "Template for a credential set. Copy to creds/<tenant>.json and fill in.",
+    "_comment_2": "All real creds/*.json are gitignored - only this example is tracked.",
+    "client_id": "<adobe-ims-client-id>",
+    "client_secret": "<adobe-ims-client-secret>",
+    "_comment_api_key": "Optional. Defaults to client_id if omitted. Some older integrations have a separate x-api-key.",
+    "api_key": "<adobe-api-key-or-omit>",
+    "org_id": "<your-org-id>@AdobeOrg",
+    "oauth_url": "https://ims-na1.adobelogin.com/ims/token",
+    "scopes": "openid,AdobeID,read_organizations,additional_info.projectedProductContext,session",
+    "_comment_sandbox": "Default sandbox to use if a script asks. Optional.",
+    "sandbox": "prod"
+}
