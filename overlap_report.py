@@ -915,7 +915,21 @@ def run_probe(headers, sandbox, date, licensed, json_target) -> int:
 
     print()
     print(f"  {C['bold']}Verdict{C['reset']}")
-    if not (ds_ok or ns_ok or un_ok):
+
+    # If the BASELINE endpoints are locked out too, we cannot see this sandbox
+    # at all and know nothing about the overlap family here. Saying anything
+    # about the family would be a false finding -- and this output is meant to
+    # go into a support ticket.
+    denied = {401, 403}
+    if all(r["status"] in denied for r in base):
+        print(f"    {C['red']}{C['bold']}NO ACCESS TO THIS SANDBOX{C['reset']} "
+              f"{C['red']}-- every endpoint including the baseline returns "
+              f"403/401, so this run says nothing about the overlap family."
+              f"{C['reset']}")
+        print(f"    {C['dim']}Add the technical account to a product profile "
+              f"covering '{sandbox}', then re-run. Compare with a sandbox where "
+              f"the baseline answers.{C['reset']}")
+    elif not (ds_ok or ns_ok or un_ok):
         print(f"    {C['red']}{C['bold']}FAMILY RETIRED{C['reset']} {C['red']}-- "
               f"all three overlap-family endpoints fail in this sandbox. The "
               f"problem is the family, not the dataset report.{C['reset']}")
