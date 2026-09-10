@@ -17,7 +17,9 @@ import aep_creds  # noqa: E402
 
 # Postman variable name -> aep_creds key. First match wins.
 MAPPING = {
-    "client_id":       ("CLIENT_ID", "CLIENTID"),
+    # Adobe's OAuth S2S Postman env has no CLIENT_ID -- the API key *is* the
+    # client id, so fall back to it before declaring the field missing.
+    "client_id":       ("CLIENT_ID", "CLIENTID", "API_KEY"),
     "client_secret":   ("CLIENT_SECRET", "CLIENTSECRET"),
     "org_id":          ("IMS_ORG", "ORG_ID", "IMS_ORG_ID", "ORGID"),
     "tech_account_id": ("TECHNICAL_ACCOUNT_ID", "TECH_ACCOUNT_ID"),
@@ -27,6 +29,14 @@ MAPPING = {
 }
 
 
+def _scalar(raw) -> str:
+    """Adobe ships some values as JSON arrays (SCOPES, CLIENT_SECRETS).
+    str() on those would silently store a Python repr, so join them."""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(v).strip() for v in raw if str(v).strip())
+    return str(raw or "").strip()
+
+
 def flatten(doc: dict) -> dict[str, str]:
     """Postman env {'values':[{key,value,enabled}]} -> {KEY: value}."""
     out = {}
@@ -34,9 +44,27 @@ def flatten(doc: dict) -> dict[str, str]:
         if item.get("enabled") is False:
             continue
         key = str(item.get("key", "")).strip().upper()
-        val = str(item.get("value", "") or "").strip()
+        val = _scalar(item.get("value"))
         if key and val:
             out[key] = val
+    return out
+
+
+def flatten_oauth(doc: dict) -> dict[str, str]:
+    """Console "OAuth Server-to-Server" JSON -- a flat top-level dict, with a
+    plural CLIENT_SECRETS array -- to the same flat {KEY: value} shape."""
+    out = {}
+    for key, raw in doc.items():
+        key = str(key).strip().upper()
+        val = _scalar(raw)
+        if key and val:
+            out[key] = val
+    # Only the first secret is the live one; any others are rotation spares,
+    # and comma-joining them would store a value that authenticates as nothing.
+    secrets = doc.get("CLIENT_SECRETS") or []
+    out.pop("CLIENT_SECRETS", None)
+    if secrets and not out.get("CLIENT_SECRET"):
+        out["CLIENT_SECRET"] = str(secrets[0]).strip()
     return out
 
 
@@ -78,6 +106,8 @@ def load_any(doc: dict) -> tuple[dict[str, str], str]:
         return flatten(doc), "Postman environment"
     if "project" in doc:
         return flatten_console(doc), "Developer Console JSON"
+    if "CLIENT_ID" in doc or "CLIENT_SECRETS" in doc:
+        return flatten_oauth(doc), "OAuth Server-to-Server JSON"
     return {}, "unrecognised"
 
 
@@ -107,7 +137,8 @@ def main() -> int:
 
     print(f"Source : {path.name}")
     print(f"Format : {fmt}")
-    label = doc.get("name") or doc.get("project", {}).get("title", "(unnamed)")
+    label = (doc.get("name") or doc.get("project", {}).get("title")
+             or doc.get("TECHNICAL_ACCOUNT_EMAIL") or "(unnamed)")
     print(f"Env    : {label}")
     print(f"Service: {args.service}\n")
 
@@ -133,7 +164,7 @@ def main() -> int:
 
     missing = [k for k in aep_creds.REQUIRED_KEYS if not conf.get(k)]
     unmapped = sorted(set(pm) - {c for cs in MAPPING.values() for c in cs}
-                      - {"IMS", "ACCESS_TOKEN"})
+                      - {"IMS", "ACCESS_TOKEN", "TECHNICAL_ACCOUNT_EMAIL"})
     if unmapped:
         print(f"\n  (ignored Postman vars: {', '.join(unmapped)})")
 
