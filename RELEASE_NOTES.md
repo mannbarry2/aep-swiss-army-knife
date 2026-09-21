@@ -7,6 +7,56 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.2 — 2026-09-21
+
+**A tab colour system that means something.**
+
+Purple used to mean only "built on the XDM Individual Profile class". A
+Profile-class schema whose datasets were all disabled for Unified Profile was
+still purple — five tabs in a prod run (raw feeds, backups, pattern experiments)
+— and, worse, its coverage was sampled from the Profile Snapshot Export, where
+its rows never land, so it read as empty.
+
+Every schema tab is now coloured on two axes:
+
+| | In Profile (≥1 dataset enabled) | Not in Profile |
+|---|---|---|
+| XDM Individual Profile class | dark purple | light purple |
+| XDM ExperienceEvent class | dark blue | light blue |
+| Other / lookup class | dark green | light green |
+
+- "In Profile" is read from each dataset's `tags.unifiedProfile` — the same
+  signal the Datasets tab's Profile column shows.
+- Only **dark purple** schemas are in the merged union and sample coverage
+  from the Profile Snapshot Export; every other schema samples its own
+  datasets (the tab header's `source:` note says which).
+- A six-swatch **colour key** at the top of the Summary tab explains the system.
+
+**Data-hygiene columns on the Schemas and Datasets tabs.** Picking the
+profile-enabled datasets and their sizes out of the UI is painful, so the
+workbook now carries, straight from Catalog's `extensions`:
+
+- **Kind** — Profile / Event / Custom (the class of the schema the dataset
+  feeds) and, on Schemas, **In Profile** (Y/N).
+- **Data lake GB** and **Data lake rows** (`adobe_lakeHouse.metrics`).
+- **Data lake TTL (days)** (`adobe_lakeHouse.rowExpiration.ttlValue`).
+- **Profile GB** and **Profile TTL (days)** (`adobe_unifiedProfile.metrics` /
+  `rowExpiration`).
+
+TTLs are shown in days (months = 30, years = 365) so they sort; blank means no
+expiration is set. Schemas roll their datasets up: sizes sum, TTL is the
+longest. Every table already has header filters, so reverse-sort by GB or TTL
+and filter by Kind straight from the header row.
+
+**Honest completeness statuses.** A partition that parses to 0 rows no longer
+marks a schema PARTIAL ("0 batch(es) failed to read") — only real read
+failures do. MISSING no longer blames "504/timeout" unconditionally: the same
+status is produced by a 403 when the credential is denied a dataset's labelled
+fields, and the text now says so. The run log prints full batch ids (they were
+truncated to 24 of 26 characters, so they could not be pasted into the API).
+
+---
+
 ## v3.4.1 — 2026-08-14
 
 **Complete coverage on Profile schemas.**

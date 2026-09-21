@@ -6,7 +6,9 @@ Data Dictionary v3.4. Sucks every XDM schema out of an AEP sandbox, filters down
 to the ones that actually matter, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
-SQL table (system) name, and -- with --data-dict -- real field coverage + top-5
+S
+
+e, and -- with --data-dict -- real field coverage + top-5
 example values sampled from ingested data.
 
 The workbook is marked STRICTLY CONFIDENTIAL: with --data-dict it contains
@@ -100,6 +102,21 @@ what the filename has said since v3.3. Every tab also carries a link to the
 release notes, so a dictionary found months later can be traced to what the
 version that produced it actually did.
 
+v3.4.2 -- A tab colour system that means something. Purple used to mean only
+"built on the Profile class": a Profile-class schema whose datasets were all
+DISABLED for Unified Profile was still purple, and -- worse -- its coverage was
+sampled from the Profile Snapshot Export, where its rows never land, so it read
+as empty. Every schema tab is now coloured on two axes: HUE = class (purple
+Profile record, blue ExperienceEvent, green other/lookup), SHADE = dark when at
+least one dataset is enabled for Profile, light when none is. Only dark purple
+is in the merged union and sampled from the snapshot; everything else samples
+its own datasets. A six-swatch key on the Summary tab explains it.
+Also: data-hygiene columns. The Schemas and Datasets tabs now carry, from
+Catalog's extensions, the data lake size (GB) and row count, the data lake
+retention TTL, the Profile store size and the Profile TTL (days), plus a Kind
+(Profile / Event / Custom) and In Profile (Y/N) flag -- so the sheet can be
+sorted by GB or TTL and filtered by kind, which the UI makes hard to do.
+
 v3.4.1 -- Complete coverage on Profile schemas. Every Profile-class schema reads
 the SAME union dataset, but each one used to re-download the snapshot partition
 (~127MB) for itself: slow, and one gateway 504 anywhere in that sequence was
@@ -151,8 +168,8 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.1"
-SCRIPT_DATE    = "2026-08-14"
+SCRIPT_VERSION = "3.4.2"
+SCRIPT_DATE    = "2026-09-21"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -184,7 +201,65 @@ PROFILE_UNION = "https://ns.adobe.com/xdm/context/profile__union"
 # Worksheet tab colour for Profile-class schemas (they stand out from the
 # event/lookup tabs; their coverage is sampled from the Profile Snapshot Export
 # union, not pre-merge feeds). Explained in the Summary tab's colour key.
-PROFILE_TAB_COLOR = "7030A0"   # purple
+# Tab colour system (explained in the Summary tab's colour key):
+#   HUE   = the schema's class   -- purple: XDM Individual Profile (record),
+#                                   blue: XDM ExperienceEvent, green: any other
+#                                   (lookup / custom) class.
+#   SHADE = whether its data reaches Unified Profile -- dark: at least one of
+#           its datasets is enabled for Profile (tags.unifiedProfile), light:
+#           none is. Only dark-purple schemas are in the merged union, so only
+#           they sample coverage from the Profile Snapshot Export.
+EVENT_CLASS = "https://ns.adobe.com/xdm/context/experienceevent"
+TAB_COLOURS = {
+    ("profile", True):  "7030A0",   # dark purple
+    ("profile", False): "C9B8E8",   # light purple
+    ("event",   True):  "0070C0",   # dark blue
+    ("event",   False): "9DC3E6",   # light blue
+    ("other",   True):  "548235",   # dark green
+    ("other",   False): "C5E0B4",   # light green
+}
+TAB_COLOUR_KEY = [
+    (("profile", True),  "Profile-class schema whose data IS in Unified Profile "
+                         "(at least one dataset enabled for Profile). Its fields "
+                         "are part of the merged profile, so coverage is sampled "
+                         "from the Profile Snapshot Export union, not the "
+                         "pre-merge feeding datasets."),
+    (("profile", False), "Profile-class schema NOT in Unified Profile (none of its "
+                         "datasets is enabled for Profile: raw feeds, backups, "
+                         "experiments). Its rows never reach the union; coverage "
+                         "is sampled from its own datasets."),
+    (("event",   True),  "ExperienceEvent-class schema whose datasets feed "
+                         "Unified Profile (events are attached to profiles and "
+                         "usable in audiences). Coverage is sampled from its own "
+                         "datasets."),
+    (("event",   False), "ExperienceEvent-class schema not enabled for Profile "
+                         "(data lake / query only)."),
+    (("other",   True),  "Other class (lookup / custom) enabled for Profile -- "
+                         "reference data joined to profiles via a relationship."),
+    (("other",   False), "Other class (lookup / custom) not enabled for Profile."),
+]
+PROFILE_TAB_COLOR = TAB_COLOURS[("profile", True)]
+
+
+# Human labels for schema_kind(), used as the filterable "Kind" column on the
+# Schemas and Datasets tabs (same axis as the tab colour hue).
+KIND_LABEL = {"profile": "Profile", "event": "Event", "other": "Custom"}
+
+
+def schema_kind(meta_class: str) -> str:
+    """'profile' / 'event' / 'other' -- the HUE axis of the tab colour system."""
+    if meta_class == PROFILE_CLASS:
+        return "profile"
+    if meta_class == EVENT_CLASS:
+        return "event"
+    return "other"
+
+
+def tab_colour(k: dict) -> str:
+    """Hex tab colour for a kept schema: hue from its class, shade from whether
+    any of its datasets is enabled for Unified Profile."""
+    return TAB_COLOURS[(schema_kind(k.get("meta_class") or ""),
+                        bool(k.get("profile_enabled")))]
 
 # Data dictionary (phase 2): default schema scope when --data-dict is given
 # with no value, and the default sample size. Default is "all" -- a bare
@@ -426,6 +501,46 @@ def get_full_schema(token, conf, sandbox, ref):
     return json.loads(body)
 
 
+def _iso_duration_days(v) -> int | None:
+    """ISO-8601 duration (P13M, P2Y, P90D, P6W) -> whole days, for sorting.
+    Months count as 30 days and years as 365 -- an approximation, but the UI
+    shows the same value as '13 months', and what matters here is ordering."""
+    if not v or not isinstance(v, str):
+        return None
+    mt = re.fullmatch(r"P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?", v.strip())
+    if not mt or not any(mt.groups()):
+        return None
+    y, mo, w, d = (int(g) if g else 0 for g in mt.groups())
+    return y * 365 + mo * 30 + w * 7 + d
+
+
+def _dataset_metrics(ds: dict) -> dict:
+    """Data-hygiene facts Catalog keeps under extensions.*, surfaced so the
+    workbook can be sorted by size and retention without opening the UI:
+        adobe_lakeHouse.metrics.storageSize / rowCount   -> data lake GB / rows
+        adobe_lakeHouse.rowExpiration.ttlValue           -> data lake TTL
+        adobe_unifiedProfile.metrics.storageSize         -> profile store GB
+        adobe_unifiedProfile.rowExpiration.ttlValue      -> profile TTL
+    GB is bytes / 1024^3. Missing metrics come back as None, not 0."""
+    ext = ds.get("extensions") or {}
+    lake = ext.get("adobe_lakeHouse") or {}
+    prof = ext.get("adobe_unifiedProfile") or {}
+    lm, pm = lake.get("metrics") or {}, prof.get("metrics") or {}
+    def gb(b):
+        return round(b / 1024 ** 3, 3) if isinstance(b, (int, float)) else None
+    lttl = (lake.get("rowExpiration") or {}).get("ttlValue")
+    pttl = (prof.get("rowExpiration") or {}).get("ttlValue")
+    return {
+        "lake_gb": gb(lm.get("storageSize")),
+        "lake_rows": lm.get("rowCount") if isinstance(lm.get("rowCount"), int) else None,
+        "lake_ttl": lttl or "",
+        "lake_ttl_days": _iso_duration_days(lttl),
+        "profile_gb": gb(pm.get("storageSize")),
+        "profile_ttl": pttl or "",
+        "profile_ttl_days": _iso_duration_days(pttl),
+    }
+
+
 def _pqs_table(ds: dict) -> str:
     """The dataset's AEP Query Service table name (tags['adobe/pqs/table']) -- the
     normalized SYSTEM name you SELECT ... FROM, distinct from the friendly 'name'
@@ -477,7 +592,7 @@ def get_all_datasets(token, conf, sandbox):
     start, limit = 0, 100
     while True:
         url = (f"{DATASETS_URL}?limit={limit}&start={start}"
-               f"&properties=name,schemaRef,tags")
+               f"&properties=name,schemaRef,tags,extensions")
         body, _ = http(url, headers=headers)
         data = json.loads(body)
         if not isinstance(data, dict) or not data:
@@ -494,6 +609,7 @@ def get_all_datasets(token, conf, sandbox):
                 "id": dsid,
                 "schema_id": ref or "",
                 "profile": _profile_status(ds),
+                **_dataset_metrics(ds),
             })
         if len(data) < limit:
             break
@@ -1030,7 +1146,7 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
             except Exception as e:
                 consec_fail += 1
                 failed += 1
-                logger.warning(f"      batch {bid[:24]}: skipped ({e})")
+                logger.warning(f"      batch {bid}: skipped ({e})")
                 continue
             total_bytes += nbytes
             if not chunk:
@@ -1040,7 +1156,7 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
             consec_fail = 0
             rows.extend(chunk)
             got += len(chunk)
-            logger.info(f"      batch {bid[:24]} -> {len(chunk)} rows "
+            logger.info(f"      batch {bid} -> {len(chunk)} rows "
                         f"{ANSI['dim']}(dataset {got}/{need}, "
                         f"overall {len(rows)}/{target}){ANSI['reset']}")
     logger.info(f"    sampled {len(rows)} rows from {total_batches} batch(es), "
@@ -1333,6 +1449,10 @@ def collect_sandbox(token, conf, sb):
 
     # id -> title, for resolving relationship destinations to readable names.
     id_to_title = {r.get("$id"): (r.get("title") or r.get("$id")) for r in raws}
+    # id -> Profile / Event / Custom, so the Datasets tab can be filtered by
+    # the kind of schema a dataset feeds (the same axis as the tab colours).
+    id_to_kind = {r.get("$id"): KIND_LABEL[schema_kind(r.get("meta:class") or "")]
+                  for r in raws}
 
     # SQL table names: every dataset's (friendly name, system table name, id)
     # grouped by the schema it feeds, so each schema knows which table(s) to query.
@@ -1340,11 +1460,38 @@ def collect_sandbox(token, conf, sb):
     for d in ds_all:
         d["schema_title"] = (id_to_title.get(d["schema_id"])
                              or _id_tail(d["schema_id"]) or "(no schema)")
+        d["schema_kind"] = id_to_kind.get(d["schema_id"], "")
         if d["schema_id"]:
             tables_by_schema.setdefault(d["schema_id"], []).append(
                 (d["name"], d["table"], d["id"]))
     for v in tables_by_schema.values():
         v.sort(key=lambda t: t[0].lower())
+
+    # Which schemas actually feed Unified Profile: at least one of their
+    # datasets has tags.unifiedProfile enabled (or is a snapshot export). A
+    # Profile-CLASS schema whose datasets are all disabled for Profile never
+    # reaches the merged union -- it must not be coloured or sampled as if it did.
+    profile_by_schema = {d["schema_id"] for d in ds_all
+                         if d["schema_id"] and d.get("profile")}
+    # Data-hygiene roll-up per schema across its datasets: sizes SUM, TTLs take
+    # the LONGEST retention (the value that actually governs how long any of the
+    # schema's data lives). None where no dataset reports the metric.
+    metrics_by_schema = {}
+    for d in ds_all:
+        if not d["schema_id"]:
+            continue
+        agg = metrics_by_schema.setdefault(d["schema_id"], {
+            "lake_gb": None, "lake_rows": None, "lake_ttl_days": None,
+            "profile_gb": None, "profile_ttl_days": None, "ttls": set()})
+        for key in ("lake_gb", "lake_rows", "profile_gb"):
+            if d.get(key) is not None:
+                agg[key] = (agg[key] or 0) + d[key]
+        for key in ("lake_ttl_days", "profile_ttl_days"):
+            if d.get(key) is not None:
+                agg[key] = max(agg[key] or 0, d[key])
+        for key in ("lake_ttl", "profile_ttl"):
+            if d.get(key):
+                agg["ttls"].add(d[key])
 
     verdicts = []
     kept = []
@@ -1437,6 +1584,11 @@ def collect_sandbox(token, conf, sb):
             "title": stitle,
             "class": cls,
             "meta_class": raw.get("meta:class") or "",
+            "profile_enabled": sid in profile_by_schema,
+            "kind": KIND_LABEL[schema_kind(raw.get("meta:class") or "")],
+            **{key: (metrics_by_schema.get(sid) or {}).get(key)
+               for key in ("lake_gb", "lake_rows", "lake_ttl_days",
+                           "profile_gb", "profile_ttl_days")},
             "datasets": n_ds,
             "tables": tables_by_schema.get(sid, []),
             "last_mod": lmod,
@@ -1515,7 +1667,9 @@ def print_sandbox(result):
 # XLSX output
 # ----------------------------------------------------------------------------
 # Columns for the Schemas index tab (one row per kept schema).
-SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Class", "Datasets",
+SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Class", "Kind", "In Profile",
+                      "Datasets", "Data lake GB", "Data lake rows",
+                      "Data lake TTL (days)", "Profile GB", "Profile TTL (days)",
                       "SQL table name(s)", "Fields", "Identities",
                       "Relationships", "Dual-labelled fields", "Last Modified",
                       "Schema $id"]
@@ -1563,13 +1717,16 @@ def _coverage_status(k):
     kept schema. So a partial/missing dictionary is never mistaken for gospel:
         ok          sampled fine
         partial     sampled, but some batches failed -- coverage understated
-        unreadable  data EXISTS but couldn't be sampled (504/timeout) -- MISSING
+        unreadable  data EXISTS but couldn't be read (504 / 403) -- MISSING
         empty       genuinely no ingested records
         not_sampled out of --data-dict scope, or no dataset to sample
     """
     if k.get("datadict"):
         st = k.get("dd_sample_stats") or {}
-        if st.get("failed") or st.get("empty_reads") or st.get("list_failed"):
+        # Only READ failures make coverage untrustworthy. A partition that
+        # parses to 0 rows (empty_reads) is normal -- control / empty batches
+        # -- and the rows that WERE sampled are still a fair sample.
+        if st.get("failed") or st.get("list_failed"):
             lf = st.get("list_failed", 0)
             return ("partial", f"PARTIAL -- {st.get('failed', 0)} batch(es) failed "
                     f"to read"
@@ -1579,8 +1736,9 @@ def _coverage_status(k):
         return ("ok", "")
     reason = k.get("dd_empty_reason")
     if reason == "unreadable":
-        return ("unreadable", "MISSING -- data exists but could not be sampled "
-                "(504/timeout); coverage is unknown, not 0%")
+        return ("unreadable", "MISSING -- data exists but could not be read "
+                "(gateway timeout, or the credential is denied the dataset's "
+                "labelled fields -- see the run log); coverage is unknown, not 0%")
     if reason == "empty":
         return ("empty", "empty -- no records ingested into this schema")
     return ("not_sampled", "not sampled (out of scope or no dataset)")
@@ -2141,20 +2299,32 @@ def write_xlsx(results, client: str, datestr: str):
     ws["A4"].alignment = Alignment(wrap_text=True, vertical="top")
     ws.row_dimensions[4].height = 46
 
-    # Tab colour key: a coloured swatch cell + its meaning, so readers know what
-    # the purple schema tabs signify without having to ask.
+    # Tab colour key: one swatch + meaning per colour, so readers know what
+    # each schema tab's colour signifies without having to ask. Two axes:
+    # hue = class, shade = whether the data reaches Unified Profile.
+    key_font = Font(italic=True, color="666666")
     ws["A5"] = "Tab colour key:"
     ws["A5"].font = Font(italic=True, bold=True, color="666666")
-    ws["B5"].fill = PatternFill("solid", fgColor=PROFILE_TAB_COLOR)
-    ws["C5"] = ("Purple tab = XDM Individual Profile (Profile-class) schema. "
-                "Coverage for these is sampled from the Profile Snapshot Export "
-                "union, not the pre-merge feeding datasets.")
-    ws["C5"].font = Font(italic=True, color="666666")
+    ws["C5"] = ("Every schema tab is coloured. HUE = the schema's class "
+                "(purple = XDM Individual Profile record, blue = "
+                "ExperienceEvent, green = any other / lookup class). SHADE = "
+                "whether its data reaches Unified Profile (dark = at least one "
+                "of its datasets is enabled for Profile, light = none is). "
+                "'Enabled for Profile' is read from each dataset's "
+                "tags.unifiedProfile -- see the Profile column on the Datasets "
+                "tab.")
+    ws["C5"].font = key_font
+    r = 6
+    for (kind, enabled), meaning in TAB_COLOUR_KEY:
+        ws.cell(r, 2).fill = PatternFill("solid",
+                                         fgColor=TAB_COLOURS[(kind, enabled)])
+        ws.cell(r, 3, meaning).font = key_font
+        r += 1
 
     hdr = ["Sandbox", "Env", "Schemas seen", "Kept", "Dropped: no-dataset",
            "Dropped: adhoc", "Dropped: AJO", "Dropped: system",
            "Dropped: test", "Kept fields", "Relationships", "Dual labels"]
-    r = 6
+    r += 1
     for c, nm in enumerate(hdr, 1):
         ws.cell(r, c, nm)
     style_header(ws, len(hdr), row=r)
@@ -2378,13 +2548,21 @@ def write_xlsx(results, client: str, datestr: str):
     style_header(sh, len(index_cols), row=hr)
     rr = hr + 1
     for res, k, name in tabbed:
-        row = [name, res["title"], k["title"], k["class"], k["datasets"],
+        row = [name, res["title"], k["title"], k["class"], k.get("kind"),
+               "Y" if k.get("profile_enabled") else "N", k["datasets"],
+               k.get("lake_gb"), k.get("lake_rows"), k.get("lake_ttl_days"),
+               k.get("profile_gb"), k.get("profile_ttl_days"),
                _sql_table_names(k), k["n_fields"], k["n_identities"],
                k["n_relationships"], k["n_labels"], k["last_mod"], k["id"]]
         for c, val in enumerate(row, 1):
-            sh.cell(rr, c, val)
+            cell = sh.cell(rr, c, val)
+            if c in (8, 11) and val is not None:
+                cell.number_format = "#,##0.00"
+            elif c in (9, 10, 12) and val is not None:
+                cell.number_format = "#,##0"
         rr += 1
-    autofit(sh, [26, 18, 38, 22, 9, 40, 7, 10, 13, 16, 16, 58])
+    autofit(sh, [26, 18, 38, 22, 9, 10, 9, 13, 15, 13, 11, 13, 40, 7, 10, 13,
+                 16, 16, 58])
 
     # ---- Datasets tab: friendly name -> SQL table (system) name -------------
     # EVERY dataset in each sandbox, so a query can be aimed at the right table.
@@ -2396,12 +2574,19 @@ def write_xlsx(results, client: str, datestr: str):
     dt["A2"].font = title_font
     dt["A3"] = ("Every dataset and its AEP Query Service table name. SQL uses the "
                 "SYSTEM table name, not the friendly name: SELECT ... FROM "
-                "<Table Name>. The Profile column flags datasets enabled for "
-                "Unified Profile and the Profile Snapshot Export (the merged union "
-                "to query for whole profiles).")
+                "<Table Name>. Kind = the class of the schema the dataset feeds "
+                "(Profile / Event / Custom). The Profile column flags datasets "
+                "enabled for Unified Profile and the Profile Snapshot Export (the "
+                "merged union to query for whole profiles). Data hygiene columns "
+                "come from Catalog: data lake size and row count, the data lake "
+                "retention (TTL) and the Profile store size and TTL -- TTLs in "
+                "days (months = 30, years = 365), blank where no expiration is "
+                "set. Use the header filters to sort by GB or TTL.")
     dt["A3"].font = Font(italic=True, color="666666")
-    DATASET_COLUMNS = ["Sandbox", "Schema", "Friendly Name (dataset)",
-                       "Table Name (SQL / system)", "Profile", "Dataset ID"]
+    DATASET_COLUMNS = ["Sandbox", "Schema", "Kind", "Friendly Name (dataset)",
+                       "Table Name (SQL / system)", "Profile", "Data lake GB",
+                       "Data lake rows", "Data lake TTL (days)", "Profile GB",
+                       "Profile TTL (days)", "Dataset ID"]
     hr = 5
     for c, nm in enumerate(DATASET_COLUMNS, 1):
         dt.cell(hr, c, nm)
@@ -2418,16 +2603,24 @@ def write_xlsx(results, client: str, datestr: str):
                                        (x.get("name") or "").lower())):
             dt.cell(rr, 1, res["title"])
             dt.cell(rr, 2, d.get("schema_title"))
-            dt.cell(rr, 3, d.get("name"))
-            dt.cell(rr, 4, d.get("table"))
-            pcell = dt.cell(rr, 5, d.get("profile"))
+            dt.cell(rr, 3, d.get("schema_kind"))
+            dt.cell(rr, 4, d.get("name"))
+            dt.cell(rr, 5, d.get("table"))
+            pcell = dt.cell(rr, 6, d.get("profile"))
             if (d.get("profile") or "").startswith("snapshot"):
                 pcell.font = Font(bold=True, color="7030A0")
             elif d.get("profile"):
                 pcell.font = Font(color="2E7D32")
-            dt.cell(rr, 6, d.get("id"))
+            for c, key, fmt in ((7, "lake_gb", "#,##0.00"),
+                                (8, "lake_rows", "#,##0"),
+                                (9, "lake_ttl_days", "#,##0"),
+                                (10, "profile_gb", "#,##0.00"),
+                                (11, "profile_ttl_days", "#,##0")):
+                if d.get(key) is not None:
+                    dt.cell(rr, c, d[key]).number_format = fmt
+            dt.cell(rr, 12, d.get("id"))
             rr += 1
-    autofit(dt, [18, 40, 42, 44, 26, 34])
+    autofit(dt, [18, 40, 9, 42, 44, 26, 13, 15, 13, 11, 13, 34])
 
     # ---- Audiences tab: what the business does WITH the data ----------------
     # Completes the chain: schema -> dataset -> audience -> the rule behind it.
@@ -2481,12 +2674,12 @@ def write_xlsx(results, client: str, datestr: str):
     # ---- One tab per schema, listing its individual fields ------------------
     for res, k, name in tabbed:
         sheet = wb.create_sheet(name)
-        # Profile-class schema (the post-merge union) -> coloured tab so it
-        # stands out from the event/lookup schemas; its coverage is sampled
-        # differently (Profile Snapshot Export, not the pre-merge feeds). The
-        # colour is explained in the Summary tab's colour key.
-        if k.get("meta_class") == PROFILE_CLASS:
-            sheet.sheet_properties.tabColor = PROFILE_TAB_COLOR
+        # Every schema tab is coloured: hue = class (purple Profile, blue
+        # ExperienceEvent, green other), shade = dark when at least one of its
+        # datasets is enabled for Unified Profile, light when none is. Only
+        # dark purple is in the merged union and sampled from the snapshot.
+        # The system is explained in the Summary tab's colour key.
+        sheet.sheet_properties.tabColor = tab_colour(k)
         confidential(sheet)
         dd = k.get("datadict")
         sheet["A2"] = k["title"]
@@ -2671,9 +2864,18 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
                 k.pop("dd_empty_reason", None)   # this attempt re-decides it
                 # Profile-class coverage must come from the merged union
                 # snapshot, not the pre-merge feeds. Falls back to feeding
-                # datasets if unresolvable.
+                # datasets if unresolvable -- and deliberately uses the feeding
+                # datasets when the schema is Profile-CLASS but none of its
+                # datasets is enabled for Profile: those rows never reach the
+                # union, so the snapshot would (wrongly) read 0% for them.
                 smallest_first, file_timeout = False, 75
-                if k.get("meta_class") == PROFILE_CLASS:
+                if (k.get("meta_class") == PROFILE_CLASS
+                        and not k.get("profile_enabled")):
+                    dsids = ds_index.get(k["id"], [])
+                    k["dd_source"] = ("own datasets (Profile-class schema, but "
+                                      "none of its datasets is enabled for "
+                                      "Profile -- not in the merged union)")
+                elif k.get("meta_class") == PROFILE_CLASS:
                     if snap_resolved is None:
                         snap_resolved = _resolve_profile_snapshot(
                             token, conf, res["name"], profile_snapshot) or False
