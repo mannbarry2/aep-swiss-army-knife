@@ -1,0 +1,37 @@
+{
+  "_comment": "Hand-measured figures from the AEP Guardrail Audit one-pager (UK Prod). Shown as the 'before' columns by guardrail_audit.py. Keys match the check keys in guardrail_audit.py.",
+  "columns": [
+    {
+      "label": "Before -- 4 Aug 2026 (audit v1.1)",
+      "values": {
+        "profile_datasets_record": {"status": "red", "display": "33 of 20"},
+        "profile_datasets_event": {"status": "red", "display": "21 of 20"},
+        "relationships": {"status": "red", "display": "9 of 5"},
+        "events_per_profile": {"status": "red", "display": "max 91,452 of 5,000 -- 82 IDs over"},
+        "largest_audience": {"status": "red", "display": "52.6M = 75% of base (guide 30%)"},
+        "total_audiences": {"status": "red", "display": "2,454 of 4,000, rising 262/month -- forecast to exceed Jan 2027"},
+        "streaming_audiences": {"status": "green", "display": "72 of 500"},
+        "edge_audiences": {"status": "green", "display": "0 of 150 -- Edge arrives September"},
+        "batch_audiences": {"status": "green", "display": "1,785 of 4,000"},
+        "identities_per_graph": {"status": "green", "display": "max 50 (cap); 202 profiles at cap"},
+        "profile_storage": {"status": "green", "display": "attributes max ~3.8 KB vs 50 MB"},
+        "batches_per_day_profile": {"status": "green", "display": "14 of 90"},
+        "batch_throughput": {"status": "green", "display": "3.18M records/24h -- ceiling << limits"},
+        "hard_size_drops_30d": {"status": "green", "display": "0 on production profile feeds"},
+        "edge_throughput": {"status": "green", "display": "N/A -- no Edge until September"},
+        "streaming_rps": {"status": "amber", "display": "pending -- ceiling 5,800; HTS -> 11,500"},
+        "new_capacity_metric": {"status": "amber", "display": "pending -- scope with Adobe"}
+      }
+    },
+    {
+      "label": "After -- 28 Aug 2026",
+      "values": {
+        "profile_datasets_record": {"status": "red", "display": "26 of 20"},
+        "profile_datasets_event": {"status": "green", "display": "15 of 20"},
+        "relationships": {"status": "amber", "display": "6 of 5"},
+        "events_per_profile": {"status": "amber", "display": "90-day retention live; 2.03 TB -> 470 GB -- re-query pending"},
+        "profile_storage": {"status": "green", "display": "profile store ~5 TB -> ~3.2 TB (-36%)"}
+      }
+    }
+  ]
+}

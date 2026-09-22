@@ -354,6 +354,49 @@ python dataset_census.py my-tenant --all-datasets     # census every dataset, no
 python dataset_census.py my-tenant --limit=25 --warn=22   # your guardrail, not the default 20
 ```
 
+## guardrail_audit.py  *(beta)*
+
+**AEP Guardrail Estimator.** Re-measures the guardrail scoreboard for a sandbox
+straight from the APIs — the monthly "are we still inside Adobe's guardrails?"
+check that used to be done by hand — and writes a before/after one-pager.
+Read-only. Every check is tagged by *how* it can be measured:
+
+- **api** — measured on every run: profile-enabled datasets per class (customer
+  scope by default; `--include-system` counts Adobe's hidden AJO/Journey
+  datasets too), multi-entity relationships, largest audience as % of the
+  profile base, total / streaming / edge / batch audiences with a growth
+  forecast, Profile store size (customer and all), batches per day into
+  Profile-enabled feeds, batch ingest throughput, hard size-limit drops over 30
+  days, and streaming ingestion RPS. Streaming is separated from batch using
+  Catalog's own marker: streaming micro-batches are tagged
+  `acp_workflow=ValveWorkflow`, real batch loads are not.
+- **query** — events per profile and identities per graph need a Query
+  Service pass over the data; the tool leaves the row *pending* and puts the
+  SQL to run in the JSON (deliberately not run — it costs compute).
+- **manual** — Edge segmentation throughput and Adobe's new capacity metric
+  have no API surface; carried forward.
+
+Each run writes `output/guardrail_audit_<sandbox>_<date>.md` (scoreboard with
+RAG: red over the guardrail, amber within 20%, green clear, grey not measured),
+a `.json` with the detail behind every number, and appends to
+`output/guardrail_audit_history_<sandbox>.json` so the next run shows the
+previous one as its "before" column. A hand-measured baseline in
+`baselines/guardrail_baseline_<sandbox>.json` is shown as extra columns when
+present. Guardrails are Adobe's published defaults in `GUARDRAILS` — edit them
+if your contract differs.
+
+```
+python guardrail_audit.py aep-prod --sandbox=prod
+python guardrail_audit.py aep-prod --sandbox=prod --days=7 --include-system
+python guardrail_audit.py aep-prod --sandbox=prod --no-batches     # skip the batch scans
+python guardrail_audit_pptx.py                                     # one-slide deck from the latest audit
+```
+
+`guardrail_audit_pptx.py` (needs `python-pptx`) turns the latest audit JSON
+into a single-slide **scoreboard deck** in `output/`: RAG dot, check, how things
+stood at the start of the project (first baseline column), and Now on the right.
+`--all-columns` adds every baseline column and the previous run.
+
 ## data_dictionary_v3.py
 
 **Data Dictionary v3.4.** Sucks every XDM schema out of an AEP sandbox, **filters
