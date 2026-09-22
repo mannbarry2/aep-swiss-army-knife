@@ -382,10 +382,19 @@ def run_checks(headers, sandbox, days, exclude_system, do_batches) -> list:
     logger.info("Schema Registry: relationship descriptors...")
     rels = read_relationships(headers)
     schemas_with_data = {v["schema_id"] for v in datasets.values()}
-    live = [r for r in rels if r.get("xdm:sourceSchema") in schemas_with_data]
+    # Adobe ships relationships of its own (Segment definition -> Destinations
+    # Segment Mapping, Journey Step Event -> journey) on schemas under its
+    # xdm/ and experience/ namespaces. They are not the customer's model and
+    # the audit never counted them; only tenant-namespace sources count.
+    def adobe_owned(r):
+        return str(r.get("xdm:sourceSchema", "")).startswith(("https://ns.adobe.com/xdm/",
+                                                             "https://ns.adobe.com/experience/"))
+    customer_rels = [r for r in rels if not adobe_owned(r)]
+    live = [r for r in customer_rels if r.get("xdm:sourceSchema") in schemas_with_data]
     checks.append(check("relationships", "Multi-entity relationships", len(live), GUARDRAILS["relationships"],
                         f"{len(live)} of {GUARDRAILS['relationships']}",
-                        note=f"{len(rels)} descriptors in total; {len(live)} on schemas that have a dataset",
+                        note=f"{len(rels)} descriptors in total: {len(rels) - len(customer_rels)} Adobe-owned excluded, "
+                             f"{len(live)} customer relationships on schemas that have a dataset",
                         detail={"relationships": [{"source": r.get("xdm:sourceSchema", "").rsplit("/", 1)[-1][:16],
                                                    "property": r.get("xdm:sourceProperty"),
                                                    "target": r.get("xdm:destinationSchema", "").rsplit("/", 1)[-1][:16]}
