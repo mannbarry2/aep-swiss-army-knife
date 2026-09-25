@@ -378,20 +378,49 @@ export AJO_BEARER_TOKEN="eyJ..." AJO_ORG_ID="...@AdobeOrg" AJO_SANDBOX=prod
 node ajo-journey-export.mjs --out ./export-2026-09
 ```
 
-**Python port: `ajo_journey_export.py`.** Same endpoint, same output (per-journey
-JSON + `index.csv` with Craig's columns — the two are interchangeable), in the
-knife's house style: the org id comes from the keyring credential, the sandbox
-from the usual picker, output lands in `output/ajo-journeys_<sandbox>_<date>/`.
-What does **not** change is the authentication: this endpoint only accepts a
-*user* session token lifted from the browser, so you still paste one in each
-run (masked prompt, `AJO_BEARER_TOKEN`, or `--token=`) — the script prints the
-DevTools steps at the prompt and again on a 401/403.
+**Python port: `ajo_journey_export.py`.** Same endpoint, same raw output
+(per-journey JSON + `index.csv` with Craig's columns — the two are
+interchangeable), in the knife's house style, **plus a readable workbook**
+`output/AJO Journeys - <sandbox> - <date>.xlsx` in the Data Dictionary style:
+
+- **Journeys** — one row per journey: state, description, how it starts
+  (schedule / event / audience qualification, in plain English), channels used,
+  the audiences it reads **by name** (UUIDs alongside), step counts by type,
+  who created / changed / deployed / stopped it and when, and the stale list
+  name where duplication left one.
+- **Steps** — one row per node in flow order from the start: type, name, a
+  plain-English detail (`wait 15 min`, `email message (marketing) -- tracking:
+  click, open`, conditions with each branch's rule rendered and the audiences
+  named), and where each branch leads. Filter on a journey to read it top to
+  bottom.
+- **Audiences** — every audience any journey references: name, description,
+  evaluation (Batch / Streaming / Edge), lifecycle, UUID, which journeys use it.
+- **Summary** and **Failed** (journeys the list knew but `/latest` could not
+  return — abandoned duplications, typically).
+
+Audience names come from the audiences API, which *does* accept the keyring
+credential; only the journey definitions need the browser token. What does
+**not** change is that authentication: this endpoint only accepts a *user*
+session token lifted from the browser, so you paste one in each run (masked
+prompt, `AJO_BEARER_TOKEN`, or `--token=`) — the script prints the DevTools
+steps at the prompt and again on a 401/403. A screenshot of exactly where the
+token sits in DevTools lives in `screenshots/ajo-journey-export-token.png`.
 
 ```
 python ajo_journey_export.py aep-prod --sandbox=prod            # paste token at the prompt
 python ajo_journey_export.py aep-prod --sandbox=dev --journey=<uid>
 python ajo_journey_export.py --org-id=...@AdobeOrg --sandbox=prod --token=eyJ...
+python ajo_journey_export.py aep-prod --from-dir=output/ajo-journeys_dev_2026-09-25   # rebuild the workbook, no token
+python ajo_journey_export.py aep-prod --sandbox=prod --no-xlsx  # Craig's raw output only
 ```
+
+**Known limit — lineage.** Because this is scraped from the UI's private API,
+a journey's audience references are UUIDs that the workbook resolves to names,
+but they do not join through to the rest of the Data Dictionary's lineage
+(schema → dataset → audience → journey) the way the supported endpoints do.
+**Where this is heading:** an extra tab at the end of the Data Dictionary
+workbook, with the dictionary's workflow asking for the browser token when you
+want journeys included.
 
 ## guardrail_audit.py  *(beta)*
 
