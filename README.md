@@ -354,6 +354,30 @@ python dataset_census.py my-tenant --all-datasets     # census every dataset, no
 python dataset_census.py my-tenant --limit=25 --warn=22   # your guardrail, not the default 20
 ```
 
+## ajo-journey-export/  *(Node, contributed by Craig)*
+
+A dependency-free **Node 18+** script, `ajo-journey-export.mjs`, that pulls
+every **Adobe Journey Optimizer journey definition** — all nodes/steps, the same
+content as the UI's *Copy technical details* — for a whole sandbox, and writes
+one JSON per journey plus an `index.csv` (node counts, audiences referenced in
+`inSegment` / `inAudience` conditions). Read-only.
+
+It is a **UI hack**: it calls `journey-private.adobe.io/authoring`, the private
+API behind the AJO canvas, using a user bearer token and org id lifted from the
+browser's DevTools and the UI's own `x-api-key` (`voyager_ui`). Service-account
+credentials are not entitled for it, the token dies within ~24h, and Adobe can
+change the endpoint without notice — so it's for inspection and reporting, not
+automation. See [its README](ajo-journey-export/README.md) for the token dance
+and the gotchas (lowercase sandbox name, stale list names vs `/latest` names).
+Complements `journey_audience_census.py`, which uses the supported gateway but
+cannot see inside the journey.
+
+```
+cd ajo-journey-export
+export AJO_BEARER_TOKEN="eyJ..." AJO_ORG_ID="...@AdobeOrg" AJO_SANDBOX=prod
+node ajo-journey-export.mjs --out ./export-2026-09
+```
+
 ## guardrail_audit.py  *(beta)*
 
 **AEP Guardrail Estimator.** Re-measures the guardrail scoreboard for a sandbox
