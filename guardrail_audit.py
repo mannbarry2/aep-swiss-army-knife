@@ -383,12 +383,15 @@ def run_checks(headers, sandbox, days, exclude_system, do_batches) -> list:
     rels = read_relationships(headers)
     schemas_with_data = {v["schema_id"] for v in datasets.values()}
     # Adobe ships relationships of its own (Segment definition -> Destinations
-    # Segment Mapping, Journey Step Event -> journey) on schemas under its
-    # xdm/ and experience/ namespaces. They are not the customer's model and
-    # the audit never counted them; only tenant-namespace sources count.
+    # Segment Mapping, Journey Step Event -> journey). At least one end of each
+    # sits in an Adobe namespace (xdm/, experience/) -- the Journey Step Event
+    # SOURCE is an Adobe-created schema in the tenant namespace, but its
+    # target is Adobe's. They are not the customer's model and the audit never
+    # counted them; a customer relationship has tenant schemas at both ends.
+    ADOBE_NS = ("https://ns.adobe.com/xdm/", "https://ns.adobe.com/experience/")
     def adobe_owned(r):
-        return str(r.get("xdm:sourceSchema", "")).startswith(("https://ns.adobe.com/xdm/",
-                                                             "https://ns.adobe.com/experience/"))
+        return (str(r.get("xdm:sourceSchema", "")).startswith(ADOBE_NS)
+                or str(r.get("xdm:destinationSchema", "")).startswith(ADOBE_NS))
     customer_rels = [r for r in rels if not adobe_owned(r)]
     live = [r for r in customer_rels if r.get("xdm:sourceSchema") in schemas_with_data]
     checks.append(check("relationships", "Multi-entity relationships", len(live), GUARDRAILS["relationships"],
