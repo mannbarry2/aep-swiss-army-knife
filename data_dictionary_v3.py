@@ -186,7 +186,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
 SCRIPT_VERSION = "3.4.3"
-SCRIPT_DATE    = "2026-09-21"
+SCRIPT_DATE    = "2026-09-25"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
