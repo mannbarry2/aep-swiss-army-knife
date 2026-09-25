@@ -21,11 +21,11 @@ folder where keyring is unavailable) and the tool will:
   3. Prompt you to pick which sandbox(es) to read (Enter = prod by default).
   4. Per chosen sandbox: list all tenant schemas, count datasets per schema
      (Catalog), and pull every descriptor (identities, relationships, and the
-     friendly "dual" labels).
+     friendly-name labels).
   5. FILTER the schemas (see below), print the full list to screen with a
      KEEP / DROP verdict per schema so you can see exactly what was excluded.
   6. For each KEPT schema, resolve its full field list (dot notation + data
-     type), join identities / relationships / dual labels, and write
+     type), join identities / relationships / friendly-name labels, and write
         output/Data Dictionary - <Client> - <YYYY-MM-DD>.xlsx
      (Summary, a master Field Index, a Schemas index, a Datasets / table-name
      map, then one tab per schema).
@@ -39,9 +39,12 @@ Filtering (phase 1 -- transparent and reported, tune the constants below):
   DROP   ajo          Adobe Journey Optimizer-managed schema (title / extends
                       heuristic) -- out of scope for now.
 
-The dual-label (alternateDisplayInfo) count is reported per sandbox so you can
-see whether this tenant uses friendly field labels at all. The Friendly Name
-column is always present (blank when a field has no alternate label).
+The friendly-name label (alternateDisplayInfo) count is reported per sandbox so
+you can see whether this tenant uses friendly field labels at all. The Friendly
+Name column is always present (blank when a field has no alternate label).
+These are NOT DULE labels: DULE (Data Usage Labeling and Enforcement) is
+Adobe's governance framework that controls access to objects and data via
+labels such as C8 / C12, and is not in the workbook yet.
 
 Phase 2 -- data dictionary (--data-dict): for each field, sample real ingested
 records (Snappy-Parquet) via the Data Access API and tally COVERAGE (% of
@@ -101,6 +104,20 @@ explicit "client" key, and otherwise identify the workbook by SANDBOX, matching
 what the filename has said since v3.3. Every tab also carries a link to the
 release notes, so a dictionary found months later can be traced to what the
 version that produced it actually did.
+
+v3.4.3 -- "Dual labels" is gone. The alternateDisplayInfo friendly-name count
+was headed "Dual labels" on the Summary tab and "Dual-labelled fields" on the
+Schemas tab, which reads as a misspelling of DULE -- Adobe's Data Usage
+Labeling and Enforcement framework for object and data access control -- and
+those are a different thing entirely. The columns now say "Friendly labels" /
+"Friendly-labelled fields", and the How to Use tab explains what DULE is and
+that DULE labels are not in this workbook yet.
+Also: friendly names and descriptions everywhere. Every field row (schema tabs
+and the Field Index) gains a Friendly Path (display names from the root down,
+"Person > Full name > First name") and a Description (the field's own, or its
+alternateDisplayInfo description where the field has none). Schemas, datasets
+and audiences each gain a Description column, and every schema tab shows its
+schema's description under the title.
 
 v3.4.2 -- A tab colour system that means something. Purple used to mean only
 "built on the Profile class": a Profile-class schema whose datasets were all
@@ -168,7 +185,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.2"
+SCRIPT_VERSION = "3.4.3"
 SCRIPT_DATE    = "2026-09-21"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -592,7 +609,7 @@ def get_all_datasets(token, conf, sandbox):
     start, limit = 0, 100
     while True:
         url = (f"{DATASETS_URL}?limit={limit}&start={start}"
-               f"&properties=name,schemaRef,tags,extensions")
+               f"&properties=name,description,schemaRef,tags,extensions")
         body, _ = http(url, headers=headers)
         data = json.loads(body)
         if not isinstance(data, dict) or not data:
@@ -605,6 +622,7 @@ def get_all_datasets(token, conf, sandbox):
                 counts[ref] = counts.get(ref, 0) + 1
             datasets.append({
                 "name": ds.get("name") or dsid,
+                "description": _plain_text(ds.get("description")),
                 "table": _pqs_table(ds),
                 "id": dsid,
                 "schema_id": ref or "",
@@ -719,10 +737,22 @@ def _localized(v):
 # ----------------------------------------------------------------------------
 # Field flattening
 # ----------------------------------------------------------------------------
-def flatten_fields(node, prefix="", depth=0):
+def _plain_text(v) -> str:
+    """A schema title/description as one readable line: strings pass through,
+    locale maps pick English, anything else is stringified. Newlines collapse
+    so a description never breaks an Excel row."""
+    s = _localized(v) if v is not None else ""
+    return " ".join(str(s).split()) if s else ""
+
+
+def flatten_fields(node, prefix="", depth=0, tprefix=""):
     """Walk a resolved xed-full 'properties' tree to leaf dot-notation paths.
-    Returns [(path, data_type, title, required_bool), ...], where 'title' is the
-    field's display name carried in the schema itself (blank if absent).
+    Returns [(path, data_type, title, friendly_path, description, required_bool),
+    ...], where 'title' is the field's display name carried in the schema
+    itself (blank if absent), 'friendly_path' is the chain of display names
+    from the root down to the field (e.g. "Person > Full name > First name" for
+    person.name.firstName -- a level with no title falls back to its key), and
+    'description' is the field's own description from the schema.
     Array-of-object paths get a '[]' marker (e.g. orders[].id)."""
     rows = []
     if depth > 18:
@@ -736,22 +766,25 @@ def flatten_fields(node, prefix="", depth=0):
             continue
         path = f"{prefix}.{key}" if prefix else key
         req = key in required
-        title = sub.get("title") or ""
+        title = _plain_text(sub.get("title"))
+        desc = _plain_text(sub.get("description"))
+        fpath = f"{tprefix} > {title or key}" if tprefix else (title or key)
         t = sub.get("type")
         if t == "object" and isinstance(sub.get("properties"), dict):
-            rows.extend(flatten_fields(sub, path, depth + 1))
+            rows.extend(flatten_fields(sub, path, depth + 1, fpath))
         elif t == "array":
             items = sub.get("items") or {}
             if (isinstance(items, dict) and items.get("type") == "object"
                     and isinstance(items.get("properties"), dict)):
-                rows.extend(flatten_fields(items, path + "[]", depth + 1))
+                rows.extend(flatten_fields(items, path + "[]", depth + 1, fpath))
             else:
                 itype = (items.get("meta:xdmType") or items.get("format")
                          or items.get("type") or "any")
-                rows.append((path + "[]", f"array<{itype}>", title, req))
+                rows.append((path + "[]", f"array<{itype}>", title, fpath,
+                             desc, req))
         else:
             disp = sub.get("meta:xdmType") or sub.get("format") or t or "object"
-            rows.append((path, disp, title, req))
+            rows.append((path, disp, title, fpath, desc, req))
     return rows
 
 
@@ -1436,7 +1469,8 @@ def collect_sandbox(token, conf, sb):
       verdicts  -> list of (title, class_name, datasets, last_mod, status)
                    status is KEEP / DROP:no-dataset / DROP:adhoc / DROP:ajo
       kept      -> list of kept schema dicts (see build below)
-      labels_n  -> count of alternateDisplayInfo (dual) labels in the sandbox
+      labels_n  -> count of alternateDisplayInfo (friendly-name) labels in the
+                   sandbox -- not DULE governance labels
       stats     -> {total, kept, no_dataset, adhoc, ajo, fields, relationships}
     """
     name = sb.get("name", "?")
@@ -1543,7 +1577,7 @@ def collect_sandbox(token, conf, sb):
 
         field_rows = []
         n_identities = n_rels = n_labels = 0
-        for path, dtype, title, req in fields:
+        for path, dtype, title, fpath, desc, req in fields:
             mkey = (sid, path.replace("[]", "").lower())
             ident = identities.get(mkey)
             rel = relationships.get(mkey)
@@ -1573,8 +1607,11 @@ def collect_sandbox(token, conf, sb):
             friendly = title or (lab["title"] if lab else "")
             if friendly:
                 n_labels += 1
-            field_rows.append((path, dtype, friendly, "Y" if req else "",
-                               id_disp, rel_disp))
+            # Same rule for the description: the schema's own text first, an
+            # alternateDisplayInfo description only where the field has none.
+            desc = desc or (_plain_text(lab["description"]) if lab else "")
+            field_rows.append((path, dtype, friendly, fpath, desc,
+                               "Y" if req else "", id_disp, rel_disp))
 
         stats["kept"] += 1
         stats["fields"] += len(field_rows)
@@ -1582,6 +1619,10 @@ def collect_sandbox(token, conf, sb):
 
         kept.append({
             "title": stitle,
+            # The description as typed into the UI's "Schema properties"
+            # panel. The listing carries it; the resolved schema is a fallback.
+            "description": _plain_text(raw.get("description")
+                                       or full.get("description")),
             "class": cls,
             "meta_class": raw.get("meta:class") or "",
             "profile_enabled": sid in profile_by_schema,
@@ -1655,11 +1696,11 @@ def print_sandbox(result):
     print(f"  {ANSI['dim']}Of the adhoc, {ANSI['reset']}{s['audience']}"
           f"{ANSI['dim']} were auto-created 'Schema for audience...' schemas "
           f"-- filtered out.{ANSI['reset']}")
-    dual = result["labels_n"]
-    dcolor = ANSI["green"] if dual else ANSI["yellow"]
-    print(f"  Dual labels (alternateDisplayInfo) in sandbox: "
-          f"{dcolor}{dual}{ANSI['reset']}"
-          f"{'' if dual else '  -- this tenant has none'}")
+    friendly = result["labels_n"]
+    fcolor = ANSI["green"] if friendly else ANSI["yellow"]
+    print(f"  Friendly-name labels (alternateDisplayInfo) in sandbox: "
+          f"{fcolor}{friendly}{ANSI['reset']}"
+          f"{'' if friendly else '  -- this tenant has none'}")
     print(f"  Kept fields: {s['fields']}   relationships: {s['relationships']}")
 
 
@@ -1667,18 +1708,20 @@ def print_sandbox(result):
 # XLSX output
 # ----------------------------------------------------------------------------
 # Columns for the Schemas index tab (one row per kept schema).
-SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Class", "Kind", "In Profile",
+SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Description", "Class", "Kind",
+                      "In Profile",
                       "Datasets", "Data lake GB", "Data lake rows",
                       "Data lake TTL (days)", "Profile GB", "Profile TTL (days)",
                       "SQL table name(s)", "Fields", "Identities",
-                      "Relationships", "Dual-labelled fields", "Last Modified",
+                      "Relationships", "Friendly-labelled fields", "Last Modified",
                       "Schema $id"]
 
 
 # Per-schema tab: one field per row (the schema's own metadata lives in the
 # tab's title block, so it isn't repeated on every row).
 SCHEMA_FIELD_COLUMNS = ["Field (dot notation)", "Data Type", "Friendly Name",
-                        "Required", "Identity", "Relationship -> target"]
+                        "Friendly Path", "Description", "Required", "Identity",
+                        "Relationship -> target"]
 _HEADER_BG = "1F4E78"
 
 
@@ -1700,7 +1743,7 @@ def _sheet_label(title: str) -> str:
     t = (title or "").strip()
     low = t.lower()
     if low.startswith("acme "):
-        t = t[6:]
+        t = t[len("acme "):]
     if t.lower().endswith(" schema"):
         t = t[:-7]
     return t.strip() or (title or "").strip() or "schema"
@@ -1746,8 +1789,9 @@ def _coverage_status(k):
 
 CONFIDENTIAL = "STRICTLY CONFIDENTIAL"
 FIELD_INDEX_COLUMNS = ["Field (dot notation)", "Data Type", "Friendly Name",
-                       "Identity", "Schema", "SQL table name(s)", "Tab",
-                       "Coverage %", "Top values (count)"]
+                       "Friendly Path", "Description", "Identity", "Schema",
+                       "SQL table name(s)", "Tab", "Coverage %",
+                       "Top values (count)"]
 
 
 
@@ -2106,7 +2150,8 @@ def attach_audiences(token, conf, res, caches):
             n_pql += 1
             n_partial += bool(partial)
         rows.append([
-            sandbox, a.get("name") or "", a.get("id") or "",
+            sandbox, a.get("name") or "", _plain_text(a.get("description")),
+            a.get("id") or "",
             audience_eval_type(a), a.get("lifecycleState") or "",
             ", ".join(named), len(named), a.get("namespace") or "",
             resolve_actor(a.get("createdBy"), directory),
@@ -2323,7 +2368,7 @@ def write_xlsx(results, client: str, datestr: str):
 
     hdr = ["Sandbox", "Env", "Schemas seen", "Kept", "Dropped: no-dataset",
            "Dropped: adhoc", "Dropped: AJO", "Dropped: system",
-           "Dropped: test", "Kept fields", "Relationships", "Dual labels"]
+           "Dropped: test", "Kept fields", "Relationships", "Friendly labels"]
     r += 1
     for c, nm in enumerate(hdr, 1):
         ws.cell(r, c, nm)
@@ -2415,9 +2460,17 @@ def write_xlsx(results, client: str, datestr: str):
          "Profile column flags what feeds Real-Time Customer Profile."),
         ("...understand one schema in detail",
          "Its own tab",
-         "Every field with its type, friendly label, whether it is an "
+         "The schema's description, then every field with its type, friendly "
+         "name, friendly path (the display names from the root down, e.g. "
+         "Person > Full name > First name), description, whether it is an "
          "identity, and (when the coverage pass ran) how often it is actually "
          "populated plus its five commonest values."),
+        ("...read it in plain English",
+         "Friendly Name / Description",
+         "Every tab carries the human-readable name next to the technical one: "
+         "fields (Friendly Name, Friendly Path), schemas, datasets and "
+         "audiences. Descriptions are shown wherever Adobe holds one -- a "
+         "blank means nobody has written one yet, not that we dropped it."),
         ("...see who is being targeted, and how",
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
@@ -2450,6 +2503,14 @@ def write_xlsx(results, client: str, datestr: str):
          "Audiences",
          "Entries like (Adobe service: pathos) are Adobe's own automation, not "
          "a colleague. Only email addresses are people."),
+        ("Friendly labels are not DULE labels",
+         "Summary / Schemas",
+         "'Friendly labels' counts fields that carry a human-readable display "
+         "name (Adobe's alternateDisplayInfo) -- the Friendly Name column on "
+         "each schema tab. DULE (Data Usage Labeling and Enforcement, often "
+         "misread as 'dual') is a different thing: Adobe's governance "
+         "framework that controls access to objects and data through labels "
+         "such as C8 and C12. DULE labels are not in this workbook yet."),
         ("", "", ""),
         ("EVERY TAB", "", ""),
         ("Filters and frozen headers are on",
@@ -2516,27 +2577,31 @@ def write_xlsx(results, client: str, datestr: str):
     for res, k, name in tabbed:
         dd = k.get("datadict") or {}
         tnames = _sql_table_names(k)
-        for (fpath, dtype, friendly, req, ident, rel) in k["fields"]:
+        for (fpath, dtype, friendly, fpath_t, desc, req, ident, rel) in k["fields"]:
             info = dd.get(fpath, {})
-            index_rows.append((fpath, dtype, friendly, ident, k["title"], tnames,
-                               name, info.get("coverage"), info.get("top")))
-    index_rows.sort(key=lambda x: (x[0].lower(), x[4].lower()))
+            index_rows.append((fpath, dtype, friendly, fpath_t, desc, ident,
+                               k["title"], tnames, name, info.get("coverage"),
+                               info.get("top")))
+    index_rows.sort(key=lambda x: (x[0].lower(), x[6].lower()))
     ridx = hr + 1
-    for (fpath, dtype, friendly, ident, sch, tnames, tab, cov, top) in index_rows:
+    for (fpath, dtype, friendly, fpath_t, desc, ident, sch, tnames, tab, cov,
+         top) in index_rows:
         fi.cell(ridx, 1, fpath)
         fi.cell(ridx, 2, dtype)
         fi.cell(ridx, 3, friendly)
-        fi.cell(ridx, 4, ident)
-        fi.cell(ridx, 5, sch)
-        fi.cell(ridx, 6, tnames)
-        fi.cell(ridx, 7, tab)
+        fi.cell(ridx, 4, fpath_t)
+        fi.cell(ridx, 5, desc)
+        fi.cell(ridx, 6, ident)
+        fi.cell(ridx, 7, sch)
+        fi.cell(ridx, 8, tnames)
+        fi.cell(ridx, 9, tab)
         if cov is not None:
-            cc = fi.cell(ridx, 8, cov)
+            cc = fi.cell(ridx, 10, cov)
             cc.alignment = center
             cc.number_format = '0"%"'
-        fi.cell(ridx, 9, top)
+        fi.cell(ridx, 11, top)
         ridx += 1
-    autofit(fi, [52, 18, 28, 20, 38, 34, 24, 11, 60])
+    autofit(fi, [52, 18, 28, 40, 50, 20, 38, 34, 24, 11, 60])
 
     # ---- Schemas index tab (one row per kept schema) ------------------------
     sh = wb.create_sheet("Schemas")
@@ -2548,7 +2613,8 @@ def write_xlsx(results, client: str, datestr: str):
     style_header(sh, len(index_cols), row=hr)
     rr = hr + 1
     for res, k, name in tabbed:
-        row = [name, res["title"], k["title"], k["class"], k.get("kind"),
+        row = [name, res["title"], k["title"], k.get("description", ""),
+               k["class"], k.get("kind"),
                "Y" if k.get("profile_enabled") else "N", k["datasets"],
                k.get("lake_gb"), k.get("lake_rows"), k.get("lake_ttl_days"),
                k.get("profile_gb"), k.get("profile_ttl_days"),
@@ -2556,13 +2622,13 @@ def write_xlsx(results, client: str, datestr: str):
                k["n_relationships"], k["n_labels"], k["last_mod"], k["id"]]
         for c, val in enumerate(row, 1):
             cell = sh.cell(rr, c, val)
-            if c in (8, 11) and val is not None:
+            if c in (9, 12) and val is not None:
                 cell.number_format = "#,##0.00"
-            elif c in (9, 10, 12) and val is not None:
+            elif c in (10, 11, 13) and val is not None:
                 cell.number_format = "#,##0"
         rr += 1
-    autofit(sh, [26, 18, 38, 22, 9, 10, 9, 13, 15, 13, 11, 13, 40, 7, 10, 13,
-                 16, 16, 58])
+    autofit(sh, [26, 18, 38, 50, 22, 9, 10, 9, 13, 15, 13, 11, 13, 40, 7, 10,
+                 13, 16, 16, 58])
 
     # ---- Datasets tab: friendly name -> SQL table (system) name -------------
     # EVERY dataset in each sandbox, so a query can be aimed at the right table.
@@ -2584,9 +2650,9 @@ def write_xlsx(results, client: str, datestr: str):
                 "set. Use the header filters to sort by GB or TTL.")
     dt["A3"].font = Font(italic=True, color="666666")
     DATASET_COLUMNS = ["Sandbox", "Schema", "Kind", "Friendly Name (dataset)",
-                       "Table Name (SQL / system)", "Profile", "Data lake GB",
-                       "Data lake rows", "Data lake TTL (days)", "Profile GB",
-                       "Profile TTL (days)", "Dataset ID"]
+                       "Description", "Table Name (SQL / system)", "Profile",
+                       "Data lake GB", "Data lake rows", "Data lake TTL (days)",
+                       "Profile GB", "Profile TTL (days)", "Dataset ID"]
     hr = 5
     for c, nm in enumerate(DATASET_COLUMNS, 1):
         dt.cell(hr, c, nm)
@@ -2605,22 +2671,23 @@ def write_xlsx(results, client: str, datestr: str):
             dt.cell(rr, 2, d.get("schema_title"))
             dt.cell(rr, 3, d.get("schema_kind"))
             dt.cell(rr, 4, d.get("name"))
-            dt.cell(rr, 5, d.get("table"))
-            pcell = dt.cell(rr, 6, d.get("profile"))
+            dt.cell(rr, 5, d.get("description", ""))
+            dt.cell(rr, 6, d.get("table"))
+            pcell = dt.cell(rr, 7, d.get("profile"))
             if (d.get("profile") or "").startswith("snapshot"):
                 pcell.font = Font(bold=True, color="7030A0")
             elif d.get("profile"):
                 pcell.font = Font(color="2E7D32")
-            for c, key, fmt in ((7, "lake_gb", "#,##0.00"),
-                                (8, "lake_rows", "#,##0"),
-                                (9, "lake_ttl_days", "#,##0"),
-                                (10, "profile_gb", "#,##0.00"),
-                                (11, "profile_ttl_days", "#,##0")):
+            for c, key, fmt in ((8, "lake_gb", "#,##0.00"),
+                                (9, "lake_rows", "#,##0"),
+                                (10, "lake_ttl_days", "#,##0"),
+                                (11, "profile_gb", "#,##0.00"),
+                                (12, "profile_ttl_days", "#,##0")):
                 if d.get(key) is not None:
                     dt.cell(rr, c, d[key]).number_format = fmt
-            dt.cell(rr, 12, d.get("id"))
+            dt.cell(rr, 13, d.get("id"))
             rr += 1
-    autofit(dt, [18, 40, 9, 42, 44, 26, 13, 15, 13, 11, 13, 34])
+    autofit(dt, [18, 40, 9, 42, 50, 44, 26, 13, 15, 13, 11, 13, 34])
 
     # ---- Audiences tab: what the business does WITH the data ----------------
     # Completes the chain: schema -> dataset -> audience -> the rule behind it.
@@ -2648,7 +2715,8 @@ def write_xlsx(results, client: str, datestr: str):
         at["A3"] = note
         at["A3"].font = Font(italic=True,
                              color="C00000" if aud_incomplete else "666666")
-        AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Audience id",
+        AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Description",
+                            "Audience id",
                             "Evaluation", "Lifecycle", "Tags", "Tag count",
                             "Origin", "Created by", "Last modified by",
                             "PQL (readable)", "PQL rendered",
@@ -2661,12 +2729,13 @@ def write_xlsx(results, client: str, datestr: str):
         rr = hr + 1
         # Tagged and rule-bearing audiences first: the ones anyone came to read.
         for row in sorted(aud_rows,
-                          key=lambda r: (0 if r[5] else 1, 0 if r[10] else 1,
+                          key=lambda r: (0 if r[6] else 1, 0 if r[11] else 1,
                                          str(r[1]).lower())):
             for c, val in enumerate(row, 1):
                 at.cell(rr, c, val)
             rr += 1
-        autofit(at, [16, 46, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 22, 12])
+        autofit(at, [16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 22,
+                     12])
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
                               f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
@@ -2704,38 +2773,46 @@ def write_xlsx(results, client: str, datestr: str):
         sheet["A3"] = a3
         sheet["A3"].font = Font(italic=True, color=a3_color,
                                 bold=(a3_color == "C00000"))
-        sheet["A4"] = k["id"]
-        sheet["A4"].font = Font(italic=True, color="999999", size=9)
+        # The schema's own description, as written in the Schema Registry --
+        # blank line kept when there is none, so the layout is the same on
+        # every tab.
+        sheet["A4"] = k.get("description") or ""
+        sheet["A4"].font = Font(italic=True, color="444444")
+        sheet["A5"] = k["id"]
+        sheet["A5"].font = Font(italic=True, color="999999", size=9)
         # SQL table (system) name(s) for this schema's dataset(s) -- the FROM
         # target(s), right next to the field list so a query can be formed here.
         tnames = _sql_table_names(k)
         if tnames:
-            sheet["A5"] = f"SQL table name(s):  {tnames}"
-            sheet["A5"].font = Font(italic=True, bold=True, color="C55A11")
+            sheet["A6"] = f"SQL table name(s):  {tnames}"
+            sheet["A6"].font = Font(italic=True, bold=True, color="C55A11")
 
         cols = list(SCHEMA_FIELD_COLUMNS)
         if dd:
             cols += ["Coverage %", "Top values (count)"]
-        hr = 6
+        hr = 7
         for c, nm in enumerate(cols, 1):
             sheet.cell(hr, c, nm)
         style_header(sheet, len(cols), row=hr)
         ridx = hr + 1
-        for (fpath, dtype, friendly, req, ident, rel) in k["fields"]:
+        for (fpath, dtype, friendly, fpath_t, desc, req, ident, rel) in k["fields"]:
             sheet.cell(ridx, 1, fpath)
             sheet.cell(ridx, 2, dtype)
             sheet.cell(ridx, 3, friendly)
-            sheet.cell(ridx, 4, req).alignment = center
-            sheet.cell(ridx, 5, ident)
-            sheet.cell(ridx, 6, rel)
+            sheet.cell(ridx, 4, fpath_t)
+            sheet.cell(ridx, 5, desc)
+            sheet.cell(ridx, 6, req).alignment = center
+            sheet.cell(ridx, 7, ident)
+            sheet.cell(ridx, 8, rel)
             if dd:
                 info = dd.get(fpath, {})
-                cov = sheet.cell(ridx, 7, info.get("coverage"))
+                cov = sheet.cell(ridx, 9, info.get("coverage"))
                 cov.alignment = center
                 cov.number_format = '0"%"'
-                sheet.cell(ridx, 8, info.get("top"))
+                sheet.cell(ridx, 10, info.get("top"))
             ridx += 1
-        autofit(sheet, [50, 20, 28, 9, 22, 42] + ([11, 70] if dd else []))
+        autofit(sheet, [50, 20, 28, 40, 50, 9, 22, 42]
+                + ([11, 70] if dd else []))
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship

@@ -7,6 +7,45 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.3 — 2026-09-25
+
+**"Dual labels" is gone.** The count of fields carrying an
+`alternateDisplayInfo` friendly display name was headed *Dual labels* on the
+Summary tab and *Dual-labelled fields* on the Schemas tab. That reads as a
+misspelling of **DULE** — Data Usage Labeling and Enforcement, Adobe's
+governance framework that controls access to objects and data through labels
+such as C8 and C12 — and the two are entirely different things.
+
+- Columns are now **Friendly labels** (Summary) and **Friendly-labelled
+  fields** (Schemas); the run log says *Friendly-name labels*.
+- The How to Use tab gains a "Friendly labels are not DULE labels" row that
+  spells out what DULE is and notes that DULE labels are not in the workbook
+  yet (still planned as a per-field column).
+
+**Friendly names and descriptions everywhere.** The workbook now carries the
+human-readable name and the description next to every technical name it
+shows:
+
+- **Fields** (every schema tab and the Field Index): a **Friendly Path**
+  column — the display names from the root down, e.g.
+  *Person > Full name > First name* for `person.name.firstName`, with a
+  level's key standing in where no title is set — and a **Description**
+  column. Both come from the schema itself; where a field carries no
+  description of its own, its `alternateDisplayInfo` description is used.
+- **Schemas**: a Description column on the Schemas tab, and each schema's
+  description under the title on its own tab (the field header row moves
+  from row 6 to row 7).
+- **Datasets**: a Description column (Catalog's `description`).
+- **Audiences**: a Description column next to the audience name.
+
+A blank description means Adobe holds none for that object, not that it was
+dropped.
+
+Also fixed: a schema titled "Acme …" lost the first letter of its tab name
+(the prefix strip took one character too many).
+
+---
+
 ## v3.4.2 — 2026-09-21
 
 **A tab colour system that means something.**

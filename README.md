@@ -438,10 +438,16 @@ down to 27.)
 
 For each kept schema it resolves the **full field list** (dot notation + data
 type), and joins the sandbox's **descriptors**: identity fields, relationships
-(the ERD edges → target schema), and the **dual labels**
-(`alternateDisplayInfo` friendly names). The dual-label count is reported per
+(the ERD edges → target schema), and the **friendly-name labels**
+(`alternateDisplayInfo`). The friendly-label count is reported per
 sandbox so you can see whether the tenant uses them at all; the *Friendly
-Name* column is always present (blank when absent).
+Name* column is always present (blank when absent), alongside a *Friendly
+Path* (display names from the root down, e.g. *Person > Full name > First
+name*) and a *Description*; schemas, datasets and audiences carry their
+descriptions too. These are not **DULE**
+labels — Data Usage Labeling and Enforcement, Adobe's governance framework
+for object and data access control (C8, C12 …) — which the workbook does
+not yet carry.
 
 The output is a single tabbed workbook in `./output/`,
 **`Data Dictionary - <Client> - <YYYY-MM-DD>.xlsx`** (client name from the creds
