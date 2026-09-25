@@ -378,6 +378,21 @@ export AJO_BEARER_TOKEN="eyJ..." AJO_ORG_ID="...@AdobeOrg" AJO_SANDBOX=prod
 node ajo-journey-export.mjs --out ./export-2026-09
 ```
 
+**Python port: `ajo_journey_export.py`.** Same endpoint, same output (per-journey
+JSON + `index.csv` with Craig's columns — the two are interchangeable), in the
+knife's house style: the org id comes from the keyring credential, the sandbox
+from the usual picker, output lands in `output/ajo-journeys_<sandbox>_<date>/`.
+What does **not** change is the authentication: this endpoint only accepts a
+*user* session token lifted from the browser, so you still paste one in each
+run (masked prompt, `AJO_BEARER_TOKEN`, or `--token=`) — the script prints the
+DevTools steps at the prompt and again on a 401/403.
+
+```
+python ajo_journey_export.py aep-prod --sandbox=prod            # paste token at the prompt
+python ajo_journey_export.py aep-prod --sandbox=dev --journey=<uid>
+python ajo_journey_export.py --org-id=...@AdobeOrg --sandbox=prod --token=eyJ...
+```
+
 ## guardrail_audit.py  *(beta)*
 
 **AEP Guardrail Estimator.** Re-measures the guardrail scoreboard for a sandbox
