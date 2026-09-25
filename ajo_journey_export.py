@@ -500,6 +500,7 @@ def build_workbook(records, failures, sandbox, service, out_path: Path, source_d
     conf_font = Font(bold=True, size=11, color="C00000")
     note_font = Font(italic=True, color="666666")
     wrap = Alignment(wrap_text=True, vertical="top")
+    ROW_H = 30          # two lines; uniform rows read better than Excel's per-row autofit
     tables = []
 
     def confidential(ws):
@@ -627,10 +628,10 @@ def build_workbook(records, failures, sandbox, service, out_path: Path, source_d
             "Tags", "List name (stale)", "Journey UID", "Format", "File"]
     header(js, cols, 5)
     for i, row in enumerate(journeys_rows, 6):
+        js.row_dimensions[i].height = ROW_H
         for c, v in enumerate(row, 1):
             cell = js.cell(i, c, v)
-            if c in (4, 5, 7):
-                cell.alignment = wrap
+            cell.alignment = wrap if c in (4, 5, 7) else Alignment(vertical="top")
     widths(js, [46, 11, 14, 40, 44, 16, 50, 40, 7, 10, 7, 9, 8, 7, 22, 16, 22, 16, 16, 16, 18, 40, 38, 7, 40])
 
     # ---- Steps ----------------------------------------------------------------
@@ -643,10 +644,10 @@ def build_workbook(records, failures, sandbox, service, out_path: Path, source_d
     ss["A3"].font = note_font
     header(ss, ["Journey", "#", "Type", "Node name", "Detail", "Branches → next node", "Audiences (names)", "Node id"], 5)
     for i, row in enumerate(steps_rows, 6):
+        ss.row_dimensions[i].height = ROW_H
         for c, v in enumerate(row, 1):
             cell = ss.cell(i, c, v)
-            if c in (5, 6, 7):
-                cell.alignment = wrap
+            cell.alignment = wrap if c in (5, 6, 7) else Alignment(vertical="top")
     widths(ss, [40, 5, 14, 40, 70, 46, 40, 38])
 
     # ---- Audiences ------------------------------------------------------------
@@ -664,10 +665,10 @@ def build_workbook(records, failures, sandbox, service, out_path: Path, source_d
         a_rows.append([a["name"] if a else "(not found)", a["description"] if a else "", a["eval"] if a else "",
                        a["lifecycle"] if a else "", i, len(aud_use.get(i, ())), "; ".join(sorted(aud_use.get(i, ())))])
     for i, row in enumerate(a_rows, 6):
+        au.row_dimensions[i].height = ROW_H
         for c, v in enumerate(row, 1):
             cell = au.cell(i, c, v)
-            if c in (2, 7):
-                cell.alignment = wrap
+            cell.alignment = wrap if c in (2, 7) else Alignment(vertical="top")
     widths(au, [50, 60, 11, 12, 38, 9, 70])
 
     # ---- Failed ---------------------------------------------------------------
