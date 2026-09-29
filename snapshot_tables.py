@@ -22,14 +22,13 @@ For each sandbox it:
      snapshot is exported off the back of that run, so the two are shown side by
      side.
 
-Writes ./output/snapshot_tables_<service>_<stamp>.xlsx -- a workbook in the Data
-Dictionary house style (Summary tab + Snapshot Tables tab, one row per snapshot
-table) -- and the same rows as a .csv. A sandbox that can't be read is reported
+Writes ONE file, ./output/snapshot_tables_<service>.xlsx, overwritten each run
+-- a workbook in the Data Dictionary house style (Summary tab + Snapshot Tables
+tab, one row per snapshot table). A sandbox that can't be read is reported
 as UNREADABLE, never as "no snapshots".
 
 Read-only: it never creates, edits or deletes anything in AEP. Standard library
-only, plus the repo's aep_creds for the keyring vault and openpyxl for the XLSX
-(without it the CSV is still written).
+only, plus the repo's aep_creds for the keyring vault and openpyxl for the XLSX.
 
 Usage:
     python snapshot_tables.py                       # interactive cred menu, all sandboxes
@@ -39,7 +38,6 @@ Usage:
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import ssl
@@ -56,7 +54,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "snapshot_tables"
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_DATE = "2026-09-29"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -75,6 +73,7 @@ SEGMENT_JOBS_URL = f"{PLATFORM}/data/core/ups/segment/jobs"
 # The CORRECT snapshots are the ones on the sandbox's DEFAULT merge policy
 # (default == true). Snapshots on other merge policies (added for debugging
 # etc.) and datasets with no merge policy are listed but are not highlighted.
+_SNAPSHOT_TAB = "7030A0"                # the Data Dictionary's Profile purple
 _CORRECT_BG = "C6EFCE"                  # Excel's 'Good' green
 _CORRECT_FG = "006100"
 
@@ -622,48 +621,6 @@ def print_rows(rows: list[dict]) -> None:
           f"segment job start){ANSI['reset']}")
 
 
-def write_csv(rows: list[dict], unreadable: list[tuple[str, str]],
-              label: str, stamp: str) -> Path:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"snapshot_tables_{label}_{stamp}.csv"
-    cols = ["sandbox", "sandbox_type", "correct_table", "snapshot_name",
-            "table_name", "dataset_id",
-            "snapshot_type", "merge_policy_name", "merge_policy_id",
-            "merge_policy_default", "snapshot_status", "snapshot_batch_id",
-            "snapshot_started_utc", "snapshot_completed_utc",
-            "time_to_run", "time_to_run_seconds", "time_to_run_rag",
-            "snapshot_records", "system_eval_schedule_state", "system_eval_schedule_cron",
-            "system_eval_schedule_time_utc", "system_eval_last_job_id",
-            "system_eval_last_job_status", "system_eval_last_started_utc",
-            "system_eval_last_ended_utc", "system_eval_error"]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for r in rows:
-            s = r["sys"]
-            w.writerow([
-                r["sandbox"], r["sandbox_type"], r["correct_table"],
-                r["snapshot_name"], r["table_name"], r["dataset_id"],
-                r["snapshot_type"],
-                r["merge_policy_name"], r["merge_policy_id"],
-                r["merge_policy_default"], r["snapshot_status"],
-                r["snapshot_batch_id"], fmt_dt(r["snapshot_started"]),
-                fmt_dt(r["snapshot_completed"]), fmt_dur(r["run_seconds"]),
-                "" if r["run_seconds"] is None else int(r["run_seconds"]),
-                r["run_rag"], r["snapshot_records"],
-                s["state"], s["cron"], s["time"], s["job_id"], s["job_status"],
-                fmt_dt(s["job_started"]), fmt_dt(s["job_ended"]), s["error"],
-            ])
-        # An unreadable sandbox gets a row of its own so it can't be mistaken
-        # for a sandbox with no snapshots.
-        for name, err in unreadable:
-            row = [""] * len(cols)
-            row[0] = name
-            row[cols.index("snapshot_status")] = f"SANDBOX UNREADABLE: {err}"
-            w.writerow(row)
-    return path
-
-
 def fmt_lag(start: datetime | None, end: datetime | None) -> str:
     """Evaluation start -> snapshot written, e.g. '5h 25m'. '' when the snapshot
     predates the evaluation (it belongs to an earlier run)."""
@@ -673,19 +630,32 @@ def fmt_lag(start: datetime | None, end: datetime | None) -> str:
     return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
 
 
-def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
-               sandboxes: list[dict], conf: dict, label: str, stamp: str):
-    """The workbook, in the Data Dictionary house style: confidential banner,
-    title + italic note, header-blue filter row, frozen panes, fixed column
-    widths and uniform two-line rows. Returns the path, or None when openpyxl
-    isn't installed (the CSV is still written)."""
-    try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        logger.warning("openpyxl not installed -- skipping XLSX (CSV still written).")
-        return None
+def sandbox_order(sb: dict):
+    """Sort key: production sandboxes first ('prod' leading), development / PPE
+    at the bottom."""
+    return (not is_production(sb), sb["name"] != "prod", sb["name"])
+
+
+def add_sheets(wb, rows: list[dict], unreadable: list[tuple[str, str]],
+               sandboxes: list[dict], *, summary_ws=None,
+               summary_name: str = "Snapshot Summary", title: str | None = None,
+               scope: str = "every sandbox the credential can see",
+               facts_before=(), facts_after=()):
+    """Add the two snapshot tabs to `wb`, in the Data Dictionary house style:
+    confidential banner, title + italic note, header-blue filter row, frozen
+    panes, fixed column widths and uniform two-line rows.
+
+    This is the fold-in point: snapshot_tables.py calls it for its own workbook
+    and data_dictionary_v3.py calls it to put the same tabs in the dictionary.
+    `summary_ws` reuses an existing sheet (a new workbook's first one) for the
+    per-sandbox summary; otherwise a sheet named `summary_name` is created.
+    Returns (summary sheet, detail sheet)."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    sandboxes = sorted(sandboxes, key=sandbox_order)
+    rows = sorted(rows, key=lambda r: (not r["production"], r["sandbox"] != "prod",
+                                       r["sandbox"], not r["correct"]))
 
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor=_HEADER_BG)
@@ -739,19 +709,16 @@ def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
         for i, w in enumerate(ws_widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = w
 
-    wb = Workbook()
-    # House rule: the file's author is Barry, not the library ('openpyxl').
-    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
     # ---- Summary --------------------------------------------------------------
-    ws = wb.active
-    ws.title = "Summary"
-    ws.sheet_properties.tabColor = _HEADER_BG
+    ws = summary_ws if summary_ws is not None else wb.create_sheet(summary_name)
+    ws.title = summary_name
+    ws.sheet_properties.tabColor = _SNAPSHOT_TAB
     confidential(ws)
-    ws["A2"] = f"AEP Snapshot Tables -- all sandboxes  ({datestr})"
+    ws["A2"] = title or f"AEP Snapshot Tables  ({datestr})"
     ws["A2"].font = title_font
-    note(ws, "Every Profile / Segment snapshot export table in every sandbox the "
-             "credential can see, with the merge policy it belongs to and when the "
-             "system last evaluated it. Production sandboxes are at the top; "
+    note(ws, f"Every Profile / Segment snapshot export table in {scope}, with "
+             "the merge policy it belongs to and when the system last evaluated "
+             "it. Production sandboxes are at the top; "
              "development / PPE sandboxes are in their own section at the bottom. "
              "'Scheduled evaluation' is the time the sandbox's batch segmentation "
              "schedule is set to fire; 'Last system evaluation' is when the "
@@ -761,17 +728,13 @@ def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
              f"min, RED {RAG_RED_MIN} min or more. All times are UTC. Read-only.",
          8, 94)
     r0 = 5
-    facts = [
-        ("Org", conf["org_id"]),
-        ("Credential", label),
+    facts = list(facts_before) + [
         ("Sandboxes read", len(sandboxes) - len(unreadable)),
         ("Sandboxes unreadable", len(unreadable)),
         ("Snapshot tables", len(rows)),
         ("Merge policies in use",
          len({(r["sandbox"], r["merge_policy_id"]) for r in rows if r["merge_policy_id"]})),
-        ("Generated (UTC)", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
-        ("Generated by", f"{SCRIPT_NAME}.py v{SCRIPT_VERSION} ({SCRIPT_DATE})"),
-    ]
+    ] + list(facts_after)
     for i, (k, v) in enumerate(facts):
         ws.cell(r0 + i, 1, k).font = Font(bold=True)
         ws.cell(r0 + i, 2, v).alignment = Alignment(horizontal="left")
@@ -830,7 +793,7 @@ def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
 
     # ---- Snapshot Tables ------------------------------------------------------
     st = wb.create_sheet("Snapshot Tables")
-    st.sheet_properties.tabColor = "7030A0"      # the Data Dictionary's Profile purple
+    st.sheet_properties.tabColor = _SNAPSHOT_TAB
     confidential(st)
     st["A2"] = "Snapshot tables -- one row per snapshot export table"
     st["A2"].font = title_font
@@ -900,8 +863,37 @@ def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
     for w, row, ncols in tables:
         if w.max_row > row:
             w.auto_filter.ref = f"A{row}:{get_column_letter(ncols)}{w.max_row}"
+    return ws, st
+
+
+def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
+               sandboxes: list[dict], conf: dict, label: str):
+    """The standalone workbook (Summary + Snapshot Tables). One file per
+    credential, OVERWRITTEN each run -- no timestamped copies and no CSV, so
+    the output folder doesn't fill up. Returns the path, or None when openpyxl
+    isn't installed."""
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        logger.error("openpyxl not installed -- nothing written "
+                     "(pip install -r requirements.txt).")
+        return None
+
+    wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
+    add_sheets(
+        wb, rows, unreadable, sandboxes, summary_ws=wb.active,
+        summary_name="Summary",
+        title=f"AEP Snapshot Tables -- all sandboxes  ({datetime.now():%Y-%m-%d})",
+        facts_before=[("Org", conf["org_id"]), ("Credential", label)],
+        facts_after=[
+            ("Generated (UTC)",
+             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
+            ("Generated by", f"{SCRIPT_NAME}.py v{SCRIPT_VERSION} ({SCRIPT_DATE})"),
+        ])
     OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"snapshot_tables_{label}_{stamp}.xlsx"
+    path = OUTPUT_DIR / f"snapshot_tables_{label}.xlsx"
     try:
         wb.save(path)
     except PermissionError:
@@ -1001,8 +993,7 @@ def main():
         sandboxes = [{"name": fallback}]
 
     # Production sandboxes first ('prod' leading), development / PPE at the bottom.
-    sandboxes.sort(key=lambda s: (not is_production(s), s["name"] != "prod",
-                                  s["name"]))
+    sandboxes.sort(key=sandbox_order)
 
     rows, unreadable = [], []
     for sb in sandboxes:
@@ -1023,10 +1014,7 @@ def main():
               + ", ".join(n for n, _ in unreadable))
 
     if rows or unreadable:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        path = write_csv(rows, unreadable, chosen, stamp)
-        logger.info(f"Wrote {len(rows)} row(s) to {path}")
-        xlsx = write_xlsx(rows, unreadable, sandboxes, conf, chosen, stamp)
+        xlsx = write_xlsx(rows, unreadable, sandboxes, conf, chosen)
         if xlsx:
             logger.info(f"Wrote workbook {xlsx}")
 

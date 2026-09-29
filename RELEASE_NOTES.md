@@ -7,6 +7,33 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.4 — 2026-09-29
+
+**Snapshot tabs.** The first standalone tool to be folded into the dictionary:
+[`snapshot_tables.py`](snapshot_tables.py). The workbook gains two tabs,
+covering each sandbox it was run for:
+
+- **Snapshot Summary** — one row per sandbox: the correct snapshot tables,
+  when the system evaluation is scheduled, when it last actually ran, when the
+  snapshot was written and how long that took.
+- **Snapshot Tables** — one row per snapshot export table, with its Query
+  Service table name and merge policy.
+
+Rows on the sandbox's **default merge policy** are green: those are the
+correct tables. The rest sit on other merge policies (added for debugging
+etc.) or carry none. **Time to run** is tagged RED / AMBER / GREEN (under 60
+min, 60 to 180 min, 180 min or more). Production sandboxes come first,
+development / PPE at the bottom. All times are UTC.
+
+The dictionary calls the tool's own collector and tab writer rather than
+copying them, so the standalone script produces identical tabs and there is
+one copy of the logic. This is the pattern for folding in further tools.
+
+Also: the workbook's author property is now *Barry Mann (barrymann.com)*
+rather than the library's name.
+
+---
+
 ## v3.4.3 — 2026-09-25
 
 **"Dual labels" is gone.** The count of fields carrying an

@@ -6,10 +6,10 @@ Data Dictionary v3.4. Sucks every XDM schema out of an AEP sandbox, filters down
 to the ones that actually matter, and writes a tabbed Excel workbook: a master
 field index, one tab per schema (full field list, ready to paste into Claude
 for a Mermaid ERD), a Datasets tab mapping every dataset's friendly name to its
-S
-
-e, and -- with --data-dict -- real field coverage + top-5
-example values sampled from ingested data.
+SQL table name, an Audiences tab, two Snapshot tabs (every snapshot export
+table with its merge policy, system evaluation time and time to run -- folded
+in from snapshot_tables.py), and -- with --data-dict -- real field coverage +
+top-5 example values sampled from ingested data.
 
 The workbook is marked STRICTLY CONFIDENTIAL: with --data-dict it contains
 real sampled customer data.
@@ -180,13 +180,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+# Tools are developed standalone and then folded in: the dictionary calls the
+# tool's own collector and tab writer, so there is one copy of the logic and the
+# standalone script keeps working.
+import snapshot_tables
 
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.3"
-SCRIPT_DATE    = "2026-09-25"
+SCRIPT_VERSION = "3.4.4"
+SCRIPT_DATE    = "2026-09-29"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -2253,7 +2257,9 @@ def _archive_previous(out_dir: Path, safe_client: str) -> int:
     return moved
 
 
-def write_xlsx(results, client: str, datestr: str):
+def write_xlsx(results, client: str, datestr: str, snapshots=None):
+    """`snapshots` is (rows, unreadable, sandboxes) from snapshot_tables, or None
+    to leave the Snapshot tabs out."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -2317,7 +2323,7 @@ def write_xlsx(results, client: str, datestr: str):
     # Unique worksheet name per kept schema (Excel: <=31 chars, unique). Built
     # up front so the Field Index and Schemas index can name each schema's tab.
     used = {"summary", "how to use", "schemas", "field index", "datasets",
-            "audiences"}
+            "audiences", "snapshot summary", "snapshot tables"}
     tabbed = []  # (res, k, sheet_name)
     for res in results:
         for k in res["kept"]:
@@ -2477,8 +2483,24 @@ def write_xlsx(results, client: str, datestr: str):
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
          "the rule behind it in readable form."),
+        ("...know which Profile snapshot table to query",
+         "Snapshot Tables",
+         "Every snapshot export table with its merge policy. The GREEN rows "
+         "are the correct ones -- on the DEFAULT merge policy. The rest sit on "
+         "other merge policies (added for debugging etc.) or carry none."),
+        ("...know how fresh the snapshot is",
+         "Snapshot Summary",
+         "Per sandbox: when the system evaluation is scheduled, when it last "
+         "actually ran, when the snapshot was written and how long that took, "
+         "tagged RED / AMBER / GREEN. Production first, development / PPE at "
+         "the bottom. All times UTC."),
         ("", "", ""),
         ("THINGS THAT WILL CATCH YOU OUT", "", ""),
+        ("More than one Profile snapshot table",
+         "Snapshot Tables",
+         "A sandbox has one snapshot table PER MERGE POLICY, all with similar "
+         "names. Query the one on the default merge policy (green) unless you "
+         "mean to use another."),
         ("Coverage % is a SAMPLE",
          "schema tabs",
          "Taken from up to a thousand real records, not the whole dataset. "
@@ -2741,6 +2763,16 @@ def write_xlsx(results, client: str, datestr: str):
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
                               f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
+
+    # ---- Snapshot tabs: which snapshot table to query, and how fresh it is ---
+    # Folded in from snapshot_tables.py, which owns the layout -- the tabs here
+    # are the same ones its standalone workbook carries.
+    if snapshots:
+        snap_rows, snap_unreadable, snap_sandboxes = snapshots
+        snapshot_tables.add_sheets(
+            wb, snap_rows, snap_unreadable, snap_sandboxes,
+            title=f"Snapshot tables  -  {label}",
+            scope="each sandbox in this workbook")
 
     # ---- One tab per schema, listing its individual fields ------------------
     for res, k, name in tabbed:
@@ -3136,7 +3168,19 @@ def run(service: str, sandbox_arg: str | None,
     # Org-level lookups shared across sandboxes: the tag vocabulary and the user
     # directory are the same wherever you stand, so they are fetched once.
     aud_caches = {"vocab": None, "directory": None}
+    # Snapshot tables are read for every chosen sandbox, including one whose
+    # schema collection fails below -- the two reads are independent.
+    snap_rows, snap_unreadable = [], []
     for sb in chosen:
+        try:
+            got, err = snapshot_tables.collect_sandbox(token, conf, sb)
+        except Exception as e:
+            got, err = [], f"{type(e).__name__}: {e}"
+        if err:
+            logger.warning(f"  {sb.get('name')}: snapshot tables UNREADABLE "
+                           f"-- {err}")
+            snap_unreadable.append((sb.get("name"), err))
+        snap_rows.extend(got)
         logger.info(f"Collecting {sb.get('name', '?')} ...")
         try:
             res = collect_sandbox(token, conf, sb)
@@ -3176,12 +3220,14 @@ def run(service: str, sandbox_arg: str | None,
 
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     client = client_label(conf)
-    xlsx_path = write_xlsx(results, client, datestr)
+    xlsx_path = write_xlsx(results, client, datestr,
+                           snapshots=(snap_rows, snap_unreadable, chosen))
     if xlsx_path:
         n_tabs = sum(len(r["kept"]) for r in results)
         logger.info(f"XLSX written: {xlsx_path}  "
                     f"({n_tabs} schema tab(s) + Summary + Field Index + "
-                    f"Schemas index + Datasets)")
+                    f"Schemas index + Datasets + Snapshot Summary + "
+                    f"Snapshot Tables)")
 
     total_kept = sum(r["stats"]["kept"] for r in results)
     total_seen = sum(r["stats"]["total"] for r in results)

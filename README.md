@@ -132,8 +132,9 @@ Every tool that writes a workbook or deck follows these:
 - **Data Dictionary style.** Confidential banner, title and italic note, blue
   header row with filters, frozen panes, fixed column widths and uniform row
   heights. A Summary tab first, then the detail tabs.
-- **CSV alongside.** The flat CSV is always written, so a machine without
-  `openpyxl` still gets the data.
+- **One file, overwritten.** New tools write a single workbook with a stable
+  name and replace it on each run: no timestamped copies and no CSV alongside,
+  so `output/` doesn't fill up.
 
 ---
 
