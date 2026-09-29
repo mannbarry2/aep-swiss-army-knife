@@ -488,6 +488,8 @@ def write_xlsx(per_sandbox, summary, stem: str):
             ws.column_dimensions[get_column_letter(idx)].width = w
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
 
     # ---- Summary tab --------------------------------------------------------
     ws = wb.active

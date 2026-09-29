@@ -109,6 +109,7 @@ import journey_audience_census as census   # http(), pick_sandbox(), audiences, 
 
 SCRIPT_VERSION = "1.1"
 SCRIPT_DATE = "2026-09-25"
+SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"
 
@@ -573,6 +574,8 @@ def build_workbook(records, failures, sandbox, service, out_path: Path, source_d
                                s.get("nodeId") or s.get("uid") or ""])
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
     # ---- Summary --------------------------------------------------------------
     ws = wb.active
     ws.title = "Summary"

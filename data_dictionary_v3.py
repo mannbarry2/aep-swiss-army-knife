@@ -2311,6 +2311,8 @@ def write_xlsx(results, client: str, datestr: str):
         ws.evenHeader.center.text = ws.oddHeader.center.text
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
 
     # Unique worksheet name per kept schema (Excel: <=31 chars, unique). Built
     # up front so the Field Index and Schemas index can name each schema's tab.

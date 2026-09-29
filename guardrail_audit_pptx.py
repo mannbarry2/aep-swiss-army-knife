@@ -115,6 +115,9 @@ def build(rep, cols, out: Path):
     checks = rep["checks"]
     sandbox, date = rep["sandbox"], rep["date"]
     prs = Presentation()
+    # House rule: the file's author is Barry, not the library.
+    prs.core_properties.author = 'Barry Mann (barrymann.com)'
+    prs.core_properties.last_modified_by = 'Barry Mann (barrymann.com)'
     prs.slide_width, prs.slide_height = Inches(SLIDE_W), Inches(SLIDE_H)
     slide = prs.slides.add_slide(prs.slide_layouts[6])   # blank
     width = SLIDE_W - 2 * MARGIN

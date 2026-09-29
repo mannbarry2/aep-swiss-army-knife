@@ -949,6 +949,8 @@ def write_xlsx(rows, summary, sandbox, stamp, snapshot, outdir) -> "Path | None"
     center = Alignment(horizontal="center")
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
     ws = wb.active
     ws.title = "Streaming audiences"
 

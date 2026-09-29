@@ -115,6 +115,26 @@ them all:
 - **Nothing secret is committed.** `creds/*.json` and all generated exports are
   gitignored; only `creds/example.json` is tracked.
 
+### House rules for generated files
+
+Every tool that writes a workbook or deck follows these:
+
+- **Author is Barry Mann (barrymann.com).** Set the file's author and
+  last-modified-by properties to `SCRIPT_AUTHOR` straight after creating it.
+  Left alone, the library signs the file as itself (`openpyxl` /
+  `python-pptx`), which is what shows under File > Info in Office.
+
+  ```python
+  wb = Workbook()
+  wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
+  ```
+
+- **Data Dictionary style.** Confidential banner, title and italic note, blue
+  header row with filters, frozen panes, fixed column widths and uniform row
+  heights. A Summary tab first, then the detail tabs.
+- **CSV alongside.** The flat CSV is always written, so a machine without
+  `openpyxl` still gets the data.
+
 ---
 
 # Babelfish range

@@ -825,6 +825,8 @@ def write_audience_xlsx(rows, tally, sandboxes, out_path, incomplete=(),
             ws.column_dimensions[get_column_letter(i)].width = w
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
 
     # --- Every audience, with its tags. FIRST sheet on purpose: this is the
     # one people came for, and a workbook that opens on a summary tab reads as
@@ -1101,6 +1103,8 @@ def write_xlsx(rows, out_path, subtitle=""):
     from openpyxl.utils import get_column_letter
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
     ws = wb.active
     ws.title = "Journeys"
     headers = ["Journey id", "Journey name", "Status", "Tags",

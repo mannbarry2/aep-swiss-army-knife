@@ -740,6 +740,8 @@ def write_xlsx(rows: list[dict], unreadable: list[tuple[str, str]],
             ws.column_dimensions[get_column_letter(i)].width = w
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
     # ---- Summary --------------------------------------------------------------
     ws = wb.active
     ws.title = "Summary"

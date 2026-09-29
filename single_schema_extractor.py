@@ -931,6 +931,8 @@ def write_workbook(infos, client: str, datestr: str, label: str = ""):
         ws.evenHeader.center.text = ws.oddHeader.center.text
 
     wb = Workbook()
+    # House rule: the file's author is Barry, not the library ('openpyxl').
+    wb.properties.creator = wb.properties.lastModifiedBy = SCRIPT_AUTHOR
 
     # Name each dataset's tab up front so the Summary can point at it.
     used = {"summary"}
