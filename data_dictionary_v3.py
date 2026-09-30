@@ -189,8 +189,8 @@ import snapshot_tables
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.4"
-SCRIPT_DATE    = "2026-09-29"
+SCRIPT_VERSION = "3.4.5"
+SCRIPT_DATE    = "2026-09-30"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -202,7 +202,10 @@ RELEASE_NOTES_URL = ("https://github.com/mannbarry2/aep-swiss-army-knife"
                      "/blob/main/RELEASE_NOTES.md")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+# The dictionary (and its sidecars / archive) gets its own folder: output/ is
+# shared with every other tool in the repo and this is the file that matters.
+OUTPUT_DIR = SCRIPT_DIR / "output" / "data_dictionary"
+PQL_DIR = OUTPUT_DIR / "pql"          # full-PQL sidecars, one per sandbox per run
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 PLATFORM = "https://platform.adobe.io"
@@ -1962,6 +1965,18 @@ PQL_COMPLEX = {"chain", "occurs", "timeQualification", "duration", "select",
                "varDecl", "element", "gap", "range"}
 
 XL_CELL_LIMIT = 32000          # Excel's hard ceiling is 32767
+# A cell that had to be cut ends with this, so it can never pass for a whole
+# rule. The full text is in the sidecar (see write_pql_sidecar).
+PQL_TRUNCATED_MARK = "…[TRUNCATED – see sidecar]"
+
+
+def fit_cell(text: str) -> tuple[str, bool]:
+    """(cell_text, truncated). Cuts to the Excel limit with the marker on the
+    end; leaves shorter text untouched."""
+    if len(text) <= XL_CELL_LIMIT:
+        return text, False
+    return text[:XL_CELL_LIMIT - len(PQL_TRUNCATED_MARK)] + PQL_TRUNCATED_MARK, True
+
 
 def _pql_literal(node):
     v = node.get("value")
@@ -2056,26 +2071,30 @@ def _render_node(node, state):
     return f"{fn}({args})"
 
 def render_pql(expression, segments):
-    """(readable_text, raw_text, partial) for an audience's expression.
+    """(readable_text, raw_text, partial, format) for an audience's expression.
 
     partial=True means at least one node could not be rendered faithfully and
     appears as a <marker>; the row is labelled so nobody reads it as complete.
+    format is 'json' (Adobe's pql/json syntax tree) or 'pql-text' (the rule as
+    PQL text -- complete, but not parseable as JSON), '' when there is no rule.
     """
     if not expression:
-        return "", "", False
+        return "", "", False, ""
     raw = expression.get("value")
     raw_text = raw if isinstance(raw, str) else json.dumps(raw)
     if expression.get("format") == "pql/text":
-        return str(raw_text), str(raw_text), False
+        return str(raw_text), str(raw_text), False, "pql-text"
     try:
         tree = json.loads(raw_text) if isinstance(raw_text, str) else raw_text
     except (ValueError, TypeError):
-        return "", str(raw_text), True
+        # Declared json but isn't: PQL text under the wrong label. Keep it as
+        # the readable form too, since that is what it is.
+        return str(raw_text), str(raw_text), False, "pql-text"
     state = {"segments": segments, "partial": False, "complex": set()}
     text = _render_node(tree, state)
     if state["partial"] and state["complex"]:
         text = f"[PARTIAL: {', '.join(sorted(state['complex']))}] {text}"
-    return text, str(raw_text), state["partial"]
+    return text, str(raw_text), state["partial"], "json"
 
 def audience_eval_type(aud: dict) -> str:
     """Streaming / Edge / Batch from the evaluationInfo carried on the LIST
@@ -2145,14 +2164,22 @@ def attach_audiences(token, conf, res, caches):
             if a.get(key):
                 seg_names[a[key]] = a.get("name") or ""
 
-    rows, n_pql, n_partial, tagged = [], 0, 0, 0
+    rows, full, n_pql, n_partial, n_trunc, tagged = [], [], 0, 0, 0, 0
     for a in auds:
         named, system, unresolved = split_audience_tags(a, vocab)
         tagged += bool(named)
-        pql, pql_raw, partial = render_pql(a.get("expression"), seg_names)
+        pql, pql_raw, partial, fmt = render_pql(a.get("expression"), seg_names)
         if pql:
             n_pql += 1
             n_partial += bool(partial)
+        # The sheet gets what fits in a cell; the sidecar gets everything.
+        pql_cell, cut_readable = fit_cell(pql)
+        raw_cell, cut_raw = fit_cell(pql_raw)
+        truncated = cut_readable or cut_raw
+        n_trunc += truncated
+        full.append({"audience_id": a.get("id") or "",
+                     "audience_name": a.get("name") or "",
+                     "format": fmt, "raw_pql": pql_raw, "readable_pql": pql})
         rows.append([
             sandbox, a.get("name") or "", _plain_text(a.get("description")),
             a.get("id") or "",
@@ -2160,15 +2187,35 @@ def attach_audiences(token, conf, res, caches):
             ", ".join(named), len(named), a.get("namespace") or "",
             resolve_actor(a.get("createdBy"), directory),
             resolve_actor(a.get("lastModifiedBy"), directory),
-            pql[:XL_CELL_LIMIT],
+            pql_cell,
             "partial" if partial else ("yes" if pql else ""),
-            pql_raw[:XL_CELL_LIMIT],
+            raw_cell,
+            len(pql_raw), "yes" if truncated else "no", fmt,
             ", ".join(t[:8] for t in unresolved), len(system),
         ])
     res["audiences"] = rows
+    res["audiences_pql"] = full            # one entry per row, same order
     res["audiences_complete"] = complete
     logger.info(f"  audiences: {len(rows)} ({tagged} tagged, {n_pql} with a "
-                f"rule, {n_partial} of those only partly renderable).")
+                f"rule, {n_partial} of those only partly renderable, "
+                f"{n_trunc} too long for a cell -- full text in the sidecar).")
+
+
+def write_pql_sidecar(res, out_dir: Path, datestr: str) -> Path | None:
+    """Every audience's FULL rule, untruncated, one JSON object per line, next
+    to the workbook: audiences_pql_<sandbox>_<yyyymmdd>.jsonl. Excel cuts a
+    cell at 32,767 characters and a hard-coded store list can pass that, so
+    the sheet cannot be the audit copy -- this is. The PQL is written exactly
+    as Adobe returned it (json.dumps escapes only what JSONL needs)."""
+    entries = res.get("audiences_pql") or []
+    if not entries:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"audiences_pql_{res['name']}_{datestr.replace('-', '')}.jsonl"
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        for e in entries:
+            fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+    return path
 
 
 def script_provenance() -> dict:
@@ -2229,10 +2276,14 @@ def provenance_line(prov: dict) -> str:
     return line
 
 
-def _archive_previous(out_dir: Path, safe_client: str) -> int:
-    """Move any prior dictionary for this client into out_dir/archive/ so the
-    output folder only ever holds the newest. Returns how many were moved."""
-    prev = sorted(out_dir.glob(f"Data Dictionary - {safe_client} - *.xlsx"))
+def _archive_previous(out_dir: Path, safe_client: str,
+                      kind: str = "dictionary") -> int:
+    """Move any prior dictionary for this client (or, kind='sidecar', any prior
+    audiences_pql sidecar for this sandbox) into out_dir/archive/ so the output
+    folder only ever holds the newest. Returns how many were moved."""
+    pattern = (f"audiences_pql_{safe_client}_*.jsonl" if kind == "sidecar"
+               else f"Data Dictionary - {safe_client} - *.xlsx")
+    prev = sorted(out_dir.glob(pattern))
     if not prev:
         return 0
     arch = out_dir / "archive"
@@ -2269,7 +2320,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                        "(pip install -r requirements.txt).")
         return None
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # The filename says WHAT this is, WHERE it came from and WHEN -- not which
     # credential happened to read it. The credential label is an artefact of our
     # own key management and means nothing to whoever opens the file.
@@ -2518,6 +2569,15 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
          "clause that is shown as <...>. What IS displayed is correct, but "
          "there is more to the rule -- the raw column holds the full "
          "definition."),
+        ("Long rules are cut off in the sheet",
+         "Audiences",
+         "Excel cannot hold more than 32,767 characters in a cell. A rule "
+         "longer than that (typically a hard-coded store list) is marked "
+         "'yes' in 'PQL truncated in sheet' and ends with "
+         f"'{PQL_TRUNCATED_MARK}'. The FULL text of every audience's rule is "
+         "in pql/audiences_pql_<sandbox>_<date>.jsonl beside this workbook: one "
+         "JSON line per audience with audience_id, audience_name, format, "
+         "raw_pql and readable_pql."),
         ("Not every audience has a rule",
          "Audiences",
          "Only Origin=AEPSegments audiences are rule-based. Uploads, Data "
@@ -2731,7 +2791,13 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                 "from Adobe's syntax tree: rows marked 'partial' contain an "
                 "event-sequence or time-window clause shown as <...> -- the raw "
                 "column holds the complete definition. Only Origin=AEPSegments "
-                "audiences have a rule at all.")
+                "audiences have a rule at all. Excel cuts a cell at 32,767 "
+                "characters: a rule longer than that is marked 'yes' under "
+                "'PQL truncated in sheet' and ends with "
+                f"'{PQL_TRUNCATED_MARK}' -- the full text of EVERY rule is in "
+                "the pql/audiences_pql_<sandbox>_<date>.jsonl file in the folder "
+                "next to this workbook. 'PQL format' is json (Adobe's syntax tree) or "
+                "pql-text (complete, but not JSON).")
         if aud_incomplete:
             note += (f"  WARNING: the listing was INCOMPLETE for "
                      f"{', '.join(aud_incomplete)} -- those counts understate "
@@ -2744,8 +2810,9 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                             "Evaluation", "Lifecycle", "Tags", "Tag count",
                             "Origin", "Created by", "Last modified by",
                             "PQL (readable)", "PQL rendered",
-                            "PQL (raw pql/json)", "Unresolved tag ids",
-                            "System tags"]
+                            "PQL (raw pql/json)", "PQL length",
+                            "PQL truncated in sheet", "PQL format",
+                            "Unresolved tag ids", "System tags"]
         hr = 5
         for c, nm in enumerate(AUDIENCE_COLUMNS, 1):
             at.cell(hr, c, nm)
@@ -2756,10 +2823,12 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                           key=lambda r: (0 if r[6] else 1, 0 if r[11] else 1,
                                          str(r[1]).lower())):
             for c, val in enumerate(row, 1):
-                at.cell(rr, c, val)
+                cell = at.cell(rr, c, val)
+                if c == 16 and val == "yes":
+                    cell.font = Font(bold=True, color="C00000")
             rr += 1
-        autofit(at, [16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 22,
-                     12])
+        autofit(at, [16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 11,
+                     12, 10, 22, 12])
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
                               f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
@@ -2864,6 +2933,11 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
     if archived:
         logger.info(f"Archived {archived} previous dictionary file(s) -> "
                     f"{OUTPUT_DIR / 'archive'}")
+    # The full-PQL sidecar travels with the workbook: written beside it, and
+    # any earlier one for the same sandbox archived with the old dictionary.
+    for res in results:
+        _archive_previous(PQL_DIR, res["name"], kind="sidecar")
+        res["pql_sidecar"] = write_pql_sidecar(res, PQL_DIR, datestr)
     try:
         wb.save(path)
     except PermissionError:
@@ -3228,6 +3302,21 @@ def run(service: str, sandbox_arg: str | None,
                     f"({n_tabs} schema tab(s) + Summary + Field Index + "
                     f"Schemas index + Datasets + Snapshot Summary + "
                     f"Snapshot Tables)")
+
+    # Audience rules: how many, how many the sheet could not hold whole, and
+    # where the complete text went.
+    for res in results:
+        rows = res.get("audiences") or []
+        if not rows:
+            continue
+        n_trunc = sum(1 for r in rows if r[15] == "yes")
+        fmts = {}
+        for r in rows:
+            fmts[r[16] or "(no rule)"] = fmts.get(r[16] or "(no rule)", 0) + 1
+        by_fmt = ", ".join(f"{k}={v}" for k, v in sorted(fmts.items()))
+        logger.info(f"Audiences in {res['name']}: {len(rows)} total, "
+                    f"{n_trunc} truncated in the sheet; format: {by_fmt}; "
+                    f"full PQL sidecar: {res.get('pql_sidecar') or '(none)'}")
 
     total_kept = sum(r["stats"]["kept"] for r in results)
     total_seen = sum(r["stats"]["total"] for r in results)

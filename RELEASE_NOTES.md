@@ -7,6 +7,30 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.5 — 2026-09-30
+
+**No more silent PQL truncation.** Excel caps a cell at 32,767 characters and
+the Audiences tab used to cut a rule at 32,000 without saying so — eleven
+published batch audiences (store-list rules, mostly) were incomplete in the
+2026-08-21 run.
+
+- **Own folder.** The dictionary now writes to `output/data_dictionary/`
+  (with its `archive/` beneath it) instead of the shared `output/` folder.
+- **Sidecar file.** The full, untruncated rule of every audience is written
+  to `output/data_dictionary/pql/audiences_pql_<sandbox>_<yyyymmdd>.jsonl`: one JSON
+  line per audience with `audience_id`, `audience_name`, `format`, `raw_pql`
+  and `readable_pql`. Old sidecars are archived with the old dictionary.
+- **Three new Audiences columns** after *PQL (raw pql/json)*: **PQL length**,
+  **PQL truncated in sheet** (yes/no, red when yes) and **PQL format** (`json`
+  for Adobe's syntax tree, `pql-text` for a rule held as PQL text, which is
+  complete but not JSON). *Unresolved tag ids* and *System tags* move three
+  columns right.
+- A cut cell now ends with `…[TRUNCATED – see sidecar]`.
+- The run log closes with a per-sandbox line: audiences, how many were cut,
+  count by format, and the sidecar path. The How to Use tab explains it.
+
+---
+
 ## v3.4.4 — 2026-09-29
 
 **Snapshot tabs.** The first standalone tool to be folded into the dictionary:
