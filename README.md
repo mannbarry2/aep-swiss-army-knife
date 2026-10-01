@@ -34,6 +34,7 @@ The toolkit spans two product ranges:
 | [`audit_batch_schedules_v2.py`](audit_batch_schedules_v2.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
+| [`audience_renamer.py`](audience_renamer.py) | *(beta)* Renames a development sandbox's rule-based audiences to a naming convention, with AI-written friendly descriptions. Follows on from a Data Dictionary run; dry run by default, `--restore` puts the old names back. |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. [Release notes](RELEASE_NOTES.md). |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
@@ -485,6 +486,37 @@ python guardrail_audit_pptx.py                                     # one-slide d
 into a single-slide **scoreboard deck** in `output/`: RAG dot, check, how things
 stood at the start of the project (first baseline column), and Now on the right.
 `--all-columns` adds every baseline column and the previous run.
+
+## audience_renamer.py  *(beta)*
+
+The `babelfish_query_renamer` idea, for audiences: gives every rule-based
+audience in a sandbox a friendly name built from a naming convention. It does
+no fetching of its own — it **follows on from a Data Dictionary run** and reads
+that run's PQL sidecar and workbook (Audiences tab, Field Index friendly names).
+
+Each audience gets three header terms — `prefix A`, `prefix B` (placeholders
+until the real convention arrives) and a short **description written by
+Claude** from the audience's current name, its rule and the dictionary's
+friendly names. Descriptions are kept in
+`output/audience_renamer_<sandbox>_descriptions.json` and reused until a rule
+changes. Audiences with no rule (uploads, Data Distiller) are left alone.
+
+Dry run by default; `--apply` renames in AEP, **development sandboxes only**.
+Old names are saved to `output/audience_renamer_<sandbox>_previous_names.json`
+first, and `--restore` puts them back.
+
+**Beta — not yet proven end to end:** the rename and restore calls have never
+been sent to AEP, and the tool's own Claude step has not been run (it needs
+`pip install anthropic` and an Anthropic API key; a key that is not scoped to a
+workspace also needs a workspace id, which the tool does not send yet). The dev
+descriptions on file were written in a Claude Code session instead.
+
+```
+python data_dictionary_v3.py aep-prod --sandbox=dev     # fresh dictionary first
+python audience_renamer.py                              # dry run -> output/audience_renamer_dev.xlsx
+python audience_renamer.py aep-prod --apply --limit=1   # rename one audience
+python audience_renamer.py aep-prod --restore           # put the old names back
+```
 
 ## data_dictionary_v3.py
 

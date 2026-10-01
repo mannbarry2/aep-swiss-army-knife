@@ -20,3 +20,4 @@ tzdata
 # python-docx -- only used to regenerate "Data Dictionary v3 - Overview.docx".
 python-docx>=1.1
 python-pptx      # guardrail_audit_pptx.py (scoreboard deck)
+anthropic        # audience_renamer.py (beta) -- only for its AI description step
