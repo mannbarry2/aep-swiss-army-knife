@@ -10,10 +10,16 @@ This is ACTIVITY, not sign-ins: an audit event is something a user did (read
 a schema, edit a journey, run a segment job). A user who logged in and did
 nothing leaves no trace here.
 
-Version 1.0.0 (2026-10-02)
+Version 1.1.0 (2026-10-02)
 
 Changelog
 ---------
+1.1.0  2026-10-02  What people do: every asset type is mapped to a work area
+                   (Content, Journeys & campaigns, Audiences, Data ...);
+                   by_user gains a suggested role, the share of events that
+                   changed something, events per area and top changes; new
+                   by_role sheet. raw_events is now opt-in (--raw): it was
+                   ~95% of a 40 MB workbook.
 1.0.0  2026-10-02  First version. Adaptive windows under the API's 1,000-event
                    cap; tech-account noise excluded server-side and counted
                    separately; Core events only; workbook with raw_events,
@@ -58,7 +64,17 @@ Credentials come from the shared aep_creds layer (keyring service 'aep-prod'
 by default; manage with credential_validator_v2.py). Read-only: every call is
 a GET.
 
-Output: output/aep_usage_log_<sandbox>_<YYYYMMDD>.xlsx
+What people do
+--------------
+Every asset type is mapped to a work area (AREAS below). Each person's
+suggested role comes from the area where they CHANGE things (create, update,
+publish, activate ...), not where they look: Profile views alone are a quarter
+of all activity and say little about anyone's job. Someone who changes almost
+nothing is a "Viewer". The mapping and the role names are plain constants --
+edit them when the team's real job titles are known.
+
+Output: output/aep_usage_log_<sandbox>_<YYYYMMDD>.xlsx  (add --raw for the
+one-row-per-event sheet; it makes the file ~20x larger)
 
 Usage:
     python aep_usage_log.py                         # aep-prod, prod, last 90 days
@@ -87,7 +103,7 @@ from pathlib import Path
 import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 
 SCRIPT_NAME = "aep_usage_log"
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_DATE = "2026-10-02"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -403,11 +419,71 @@ def collect(client: AuditClient, opts) -> dict:
 
 
 # ----------------------------------------------------------------------------
+# What people do: asset type -> work area -> suggested role
+# ----------------------------------------------------------------------------
+AREAS = {
+    "Content": ["AJO Fragment", "AJO Content Template", "AJO Saved Expression",
+                "AJO Message Preset", "Simulated User"],
+    "Journeys & campaigns": ["Journey", "Campaign", "Orchestrated Campaign",
+                             "Experiment", "Journey Event", "Journey Custom Action",
+                             "Journey Fragment", "AJO Saved Condition"],
+    "Decisioning": ["Ranking Strategy", "ExD Offer Item", "ExD Decision Policy",
+                    "ExD Collections", "ExD Selection Strategy"],
+    "Audiences": ["Segment", "Segment Job", "Composition", "Destination",
+                  "Profiles Export"],
+    "Data": ["Dataset", "Schema", "Class", "Field Group", "Source Data Flow",
+             "Identity Namespace", "Datastreams", "Merge Policy",
+             "Profile Settings", "Dule Policy"],
+    "Query": ["Query", "Query Template", "Scheduled Query"],
+    "Profile look-up": ["Profile", "Identity Graph"],
+    "Admin": ["Role", "Account", "Audits", "CMK Config", "Package", "Work Order",
+              "AJO Subdomain", "AJO Seedlist"],
+}
+AREA_OF = {t: area for area, types in AREAS.items() for t in types}
+AREA_NAMES = list(AREAS) + ["Other"]
+# The job a person whose changes are mostly in an area is probably doing.
+ROLE_OF = {
+    "Content": "Content executive",
+    "Journeys & campaigns": "Journey / campaign manager",
+    "Decisioning": "Offer decisioning",
+    "Audiences": "Audience builder",
+    "Data": "Data engineer",
+    "Query": "Analyst (Query Service)",
+    "Profile look-up": "Profile support",
+    "Admin": "Platform admin",
+    "Other": "Other",
+}
+LOOK_ACTIONS = {"View", "Read"}       # everything else changed or ran something
+VIEWER_BELOW = 0.05                   # under 5% changes -> a Viewer
+FEW_CHANGES = 20                      # too few changes to name a role on
+SECOND_ROLE_FROM = 0.30               # a 2nd area with 30%+ of changes is named too
+
+
+def area_of(asset_type: str) -> str:
+    return AREA_OF.get(asset_type, "Other")
+
+
+def suggested_role(changes: Counter, looks: Counter) -> str:
+    """A best guess at someone's job from where they change things."""
+    n_change, n_look = sum(changes.values()), sum(looks.values())
+    if n_change < FEW_CHANGES or n_change / (n_change + n_look) < VIEWER_BELOW:
+        where = (looks + changes).most_common(1)
+        return f"Viewer ({where[0][0]})" if where else "Viewer"
+    ranked = changes.most_common()
+    role = ROLE_OF[ranked[0][0]]
+    if len(ranked) > 1 and ranked[1][1] / n_change >= SECOND_ROLE_FROM:
+        role += f" + {ROLE_OF[ranked[1][0]]}"
+    return role
+
+
+# ----------------------------------------------------------------------------
 # Summaries
 # ----------------------------------------------------------------------------
 def summarise(kept: list[dict]) -> dict:
     by_user = defaultdict(lambda: {"events": 0, "days": set(), "first": None,
-                                   "last": None, "assets": Counter()})
+                                   "last": None, "assets": Counter(),
+                                   "changes": Counter(), "looks": Counter(),
+                                   "areas": Counter(), "what": Counter()})
     by_month = defaultdict(Counter)
     by_asset_action = defaultdict(lambda: {"events": 0, "users": set()})
     for e in kept:
@@ -415,7 +491,14 @@ def summarise(kept: list[dict]) -> dict:
         ts = parse_ts(e.get("timestamp"))
         u = by_user[user]
         u["events"] += 1
-        u["assets"][e.get("assetType") or ""] += 1
+        asset, action = e.get("assetType") or "", e.get("action") or ""
+        u["assets"][asset] += 1
+        u["areas"][area_of(asset)] += 1
+        if action in LOOK_ACTIONS:
+            u["looks"][area_of(asset)] += 1
+        else:
+            u["changes"][area_of(asset)] += 1
+            u["what"][f"{action} {asset}"] += 1
         if ts:
             u["days"].add(ts.date())
             u["first"] = min(u["first"] or ts, ts)
@@ -424,6 +507,8 @@ def summarise(kept: list[dict]) -> dict:
         k = (e.get("assetType") or "", e.get("action") or "")
         by_asset_action[k]["events"] += 1
         by_asset_action[k]["users"].add(user)
+    for d in by_user.values():
+        d["role"] = suggested_role(d["changes"], d["looks"])
     return {"by_user": by_user, "by_month": by_month,
             "by_asset_action": by_asset_action}
 
@@ -518,32 +603,56 @@ def write_xlsx(result: dict, opts, conf: dict, path: Path) -> Path:
           "Who is actively using AEP, per user. Activity, not sign-ins.",
           ["Fact", "Value"], [44, 110], facts)
 
-    # ---- raw_events --------------------------------------------------------
-    raw = sorted(kept, key=lambda e: e.get("timestamp") or "")
-    if len(raw) > XL_MAX_ROWS - 10:
-        logger.warning(f"{len(raw):,} events is more than a sheet holds; "
-                       f"raw_events keeps the newest {XL_MAX_ROWS - 10:,}.")
-        raw = raw[-(XL_MAX_ROWS - 10):]
-    sheet("raw_events", f"Raw activity events  -  {opts.sandbox}",
-          "One row per Core audit event kept (tech accounts excluded). "
-          "'enhancedEvents' is how many Enhanced events rode inside it. "
-          "Timestamps are UTC.",
-          RAW_COLUMNS,
-          [20, 36, 26, 14, 10, 36, 30, 26, 16, 10, 12, 10, 8, 18, 10, 34, 38,
-           38, 14, 38, 34, 8],
-          (raw_row(e) for e in raw), {0: DT})
+    # ---- raw_events (opt-in with --raw: ~95% of the file) ---------------
+    if opts.raw:
+        raw = sorted(kept, key=lambda e: e.get("timestamp") or "")
+        if len(raw) > XL_MAX_ROWS - 10:
+            logger.warning(f"{len(raw):,} events is more than a sheet holds; "
+                           f"raw_events keeps the newest {XL_MAX_ROWS - 10:,}.")
+            raw = raw[-(XL_MAX_ROWS - 10):]
+        sheet("raw_events", f"Raw activity events  -  {opts.sandbox}",
+              "One row per Core audit event kept (tech accounts excluded). "
+              "'enhancedEvents' is how many Enhanced events rode inside it. "
+              "Timestamps are UTC.",
+              RAW_COLUMNS,
+              [20, 36, 26, 14, 10, 36, 30, 26, 16, 10, 12, 10, 8, 18, 10, 34, 38,
+               38, 14, 38, 34, 8],
+              (raw_row(e) for e in raw), {0: DT})
 
     # ---- by_user -----------------------------------------------------------
     users = sorted(s["by_user"].items(), key=lambda kv: -kv[1]["events"])
-    sheet("by_user", f"Activity by user  -  {span}",
-          "Busiest first. 'Distinct days active' is UTC days with at least "
-          "one event. Times are UTC.",
-          ["userEmail", "Total events", "Distinct days active", "First seen",
-           "Last seen", "Top 3 assetTypes"],
-          [40, 14, 18, 20, 20, 80],
-          ([u, d["events"], len(d["days"]), d["first"], d["last"],
-            ", ".join(f"{t} ({n:,})" for t, n in d["assets"].most_common(3))]
-           for u, d in users), {3: DT, 4: DT})
+    sheet("by_user", f"What each person does  -  {span}",
+          "Busiest first. 'Suggested role' is a best guess from the work area "
+          "where the person CHANGES things (create, update, publish, "
+          "activate...); 'Viewer' means they mostly look. 'Changes %' is the "
+          "share of their events that changed or ran something. The area "
+          "columns count all their events. Times are UTC.",
+          ["userEmail", "Suggested role", "Total events", "Changes %",
+           "Distinct days active", "First seen", "Last seen"] + AREA_NAMES
+          + ["Top 3 changes", "Top 3 assetTypes"],
+          [36, 44, 12, 10, 12, 18, 18] + [11] * len(AREA_NAMES) + [70, 60],
+          ([u, d["role"], d["events"],
+            sum(d["changes"].values()) / d["events"] if d["events"] else 0,
+            len(d["days"]), d["first"], d["last"]]
+           + [d["areas"].get(a, 0) for a in AREA_NAMES]
+           + [", ".join(f"{w} ({n:,})" for w, n in d["what"].most_common(3)),
+              ", ".join(f"{t} ({n:,})" for t, n in d["assets"].most_common(3))]
+           for u, d in users), {3: "0%", 5: DT, 6: DT})
+
+    # ---- by_role -----------------------------------------------------------
+    roles = defaultdict(list)
+    for u, d in users:
+        roles[d["role"]].append((u, d))
+    cutoff = b.replace(tzinfo=None) - timedelta(days=30)
+    sheet("by_role", "People by suggested role",
+          "How many people do each kind of work. 'Active last 30 days' counts "
+          "those seen in the final 30 days of the period.",
+          ["Suggested role", "People", "Active last 30 days", "Events",
+           "People (busiest first)"],
+          [44, 10, 18, 12, 140],
+          ([r, len(ps), sum(1 for _, d in ps if d["last"] and d["last"] >= cutoff),
+            sum(d["events"] for _, d in ps), ", ".join(u for u, _ in ps)]
+           for r, ps in sorted(roles.items(), key=lambda kv: -len(kv[1]))))
 
     # ---- by_user_month -----------------------------------------------------
     months = sorted({m for c in s["by_month"].values() for m in c})
@@ -605,6 +714,8 @@ def parse_args(argv):
                    help="tech account to exclude server-side (default: detect)")
     p.add_argument("--noise-asset-type", default=None,
                    help="its bulk asset type, counted only (default: detect)")
+    p.add_argument("--raw", action="store_true",
+                   help="add the raw_events sheet (one row per event; ~20x the size)")
     p.add_argument("--no-noise-count", action="store_true",
                    help="do not count the noise account's bulk events (faster)")
     opts = p.parse_args(argv)
