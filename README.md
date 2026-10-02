@@ -34,7 +34,7 @@ The toolkit spans two product ranges:
 | [`audit_batch_schedules_v2.py`](audit_batch_schedules_v2.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
-| [`audience_renamer.py`](audience_renamer.py) | *(beta)* Renames a development sandbox's rule-based audiences to a naming convention, with AI-written friendly descriptions. Follows on from a Data Dictionary run; dry run by default, `--restore` puts the old names back. |
+| [`audience_renamer.py`](audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. [Release notes](RELEASE_NOTES.md). |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
@@ -487,7 +487,11 @@ into a single-slide **scoreboard deck** in `output/`: RAG dot, check, how things
 stood at the start of the project (first baseline column), and Now on the right.
 `--all-columns` adds every baseline column and the previous run.
 
-## audience_renamer.py  *(beta)*
+## audience_renamer.py  *(in development — do not use)*
+
+> **Parked 2026-10-02.** This project was stopped part-way and is kept only so
+> it can be picked up later. It is not a working tool: it refuses to run, and
+> nobody should use it. What follows describes what it was meant to do.
 
 The `babelfish_query_renamer` idea, for audiences: gives every rule-based
 audience in a sandbox a friendly name built from a naming convention. It does
@@ -505,17 +509,14 @@ Dry run by default; `--apply` renames in AEP, **development sandboxes only**.
 Old names are saved to `output/audience_renamer_<sandbox>_previous_names.json`
 first, and `--restore` puts them back.
 
-**Beta — not yet proven end to end:** the rename and restore calls have never
+**Where it was left — not proven end to end:** the rename and restore calls have never
 been sent to AEP, and the tool's own Claude step has not been run (it needs
 `pip install anthropic` and an Anthropic API key; a key that is not scoped to a
 workspace also needs a workspace id, which the tool does not send yet). The dev
 descriptions on file were written in a Claude Code session instead.
 
 ```
-python data_dictionary_v3.py aep-prod --sandbox=dev     # fresh dictionary first
-python audience_renamer.py                              # dry run -> output/audience_renamer_dev.xlsx
-python audience_renamer.py aep-prod --apply --limit=1   # rename one audience
-python audience_renamer.py aep-prod --restore           # put the old names back
+python audience_renamer.py        # refuses: "IN DEVELOPMENT and parked -- it is not for use"
 ```
 
 ## data_dictionary_v3.py

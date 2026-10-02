@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-audience_renamer.py  (AEP Swiss Army Knife)  -- BETA
-====================================================
+audience_renamer.py  (AEP Swiss Army Knife)  -- IN DEVELOPMENT, DO NOT USE
+==========================================================================
+PARKED 2026-10-02. This project was stopped part-way and is kept here only so
+it can be picked up later. It is NOT a working tool and nobody should run it:
+it refuses to start unless given --in-development.
+
 The babelfish_query_renamer idea, for audiences: give every rule-based audience
 in a sandbox a friendly name built from a naming convention.
 
-BETA -- not yet proven end to end:
+Where it was left -- not proven end to end:
   * the rename and restore calls (--apply / --restore) have never been sent to
     AEP; the first real run should be --apply --limit=1, then --restore;
   * the Claude step has not been run from this tool. It needs the 'anthropic'
@@ -99,7 +103,10 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 import data_dictionary_v3 as dd
 
 SCRIPT_NAME = "audience_renamer"
-SCRIPT_VERSION = "0.2.0-beta"
+SCRIPT_VERSION = "0.2.0-dev"
+# Parked, unfinished. main() refuses to run without this flag, so nobody uses
+# it by accident; whoever picks the project up passes it knowingly.
+DEV_FLAG = "--in-development"
 SCRIPT_DATE = "2026-10-01"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -760,7 +767,11 @@ def restore(opts: dict) -> None:
 
 
 def main():
-    opts = parse_args(sys.argv[1:])
+    if DEV_FLAG not in sys.argv[1:]:
+        logger.error(f"{SCRIPT_NAME} is IN DEVELOPMENT and parked -- it is not "
+                     f"for use. Nothing was run. (Development only: {DEV_FLAG})")
+        return
+    opts = parse_args([a for a in sys.argv[1:] if a != DEV_FLAG])
     sandbox = opts["sandbox"]
     banner(sandbox, opts)
 
