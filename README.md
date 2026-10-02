@@ -34,6 +34,7 @@ The toolkit spans two product ranges:
 | [`audit_batch_schedules_v2.py`](audit_batch_schedules_v2.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
+| [`aep_usage_log.py`](aep_usage_log.py) | Who is actively using AEP: per-user **activity** (not sign-ins) from the audit log over the last N days, with the tech-account suppression-list noise excluded and counted separately. |
 | [`audience_renamer.py`](audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. [Release notes](RELEASE_NOTES.md). |
 
@@ -486,6 +487,40 @@ python guardrail_audit_pptx.py                                     # one-slide d
 into a single-slide **scoreboard deck** in `output/`: RAG dot, check, how things
 stood at the start of the project (first baseline column), and Now on the right.
 `--all-columns` adds every baseline column and the previous run.
+
+## aep_usage_log.py
+
+**Who is actively using AEP**, per person, over the last N days (default 90),
+read from the Audit events API. It replaces the UI export, which stops at
+10,000 events and is swamped by a tech account deleting from the AJO
+Suppression List. The report says **activity, not sign-ins**: an audit event is
+something a user did, so someone who logged in and did nothing won't appear.
+
+How the API actually behaves, which the tool is built around:
+
+- **1,000-event cap.** A query returns at most 1,000 events, and
+  `totalElements` stops at 1,000 too. Each day is queried as one window, and
+  any window at the cap is split (1 h → 10 min → 1 min → 10 s → 1 s) until
+  every piece is under it.
+- **Noise.** The suppression-list account is about 90% of all events (41,047
+  of 44,924 on 30 Sep 2026). It is detected automatically and excluded
+  server-side (`user!=`). Its suppression deletes are counted only (fetching
+  them would be millions of rows), and its other work is fetched. Every
+  tech-account event lands in the `excluded_noise` sheet, by day and asset
+  type.
+- **Core events only.** Enhanced events are nested inside each Core event, so
+  each audit action is counted once.
+
+Workbook `output/aep_usage_log_<sandbox>_<YYYYMMDD>.xlsx`, with sheets
+`summary`, `raw_events`, `by_user`, `by_user_month`, `by_assetType_action` and
+`excluded_noise`. A 90-day run takes roughly 35–40 minutes, most of it counting
+the noise; `--no-noise-count` skips that. Read-only.
+
+```
+python aep_usage_log.py                         # aep-prod, prod, last 90 days
+python aep_usage_log.py --days=30
+python aep_usage_log.py --days=90 --no-noise-count
+```
 
 ## audience_renamer.py  *(in development — do not use)*
 
