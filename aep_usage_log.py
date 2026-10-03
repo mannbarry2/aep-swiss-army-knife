@@ -10,10 +10,16 @@ This is ACTIVITY, not sign-ins: an audit event is something a user did (read
 a schema, edit a journey, run a segment job). A user who logged in and did
 nothing leaves no trace here.
 
-Version 1.1.0 (2026-10-02)
+Version 1.2.0 (2026-10-02)
 
 Changelog
 ---------
+1.2.0  2026-10-02  Survives a stall: every request has a hard 2-minute limit
+                   and is retried, and each finished day is cached under
+                   output/aep_usage_log_cache/<sandbox>/, so a stopped run
+                   resumes and a later run only fetches new days. Asks
+                   Windows not to idle-sleep while it runs: three 90-day
+                   runs had frozen mid-way when the machine slept.
 1.1.0  2026-10-02  What people do: every asset type is mapped to a work area
                    (Content, Journeys & campaigns, Audiences, Data ...);
                    by_user gains a suggested role, the share of events that
@@ -73,6 +79,9 @@ of all activity and say little about anyone's job. Someone who changes almost
 nothing is a "Viewer". The mapping and the role names are plain constants --
 edit them when the team's real job titles are known.
 
+Cache: output/aep_usage_log_cache/<sandbox>/<YYYY-MM-DD>.json.gz, one per
+finished day. Delete the folder to force a full re-fetch.
+
 Output: output/aep_usage_log_<sandbox>_<YYYYMMDD>.xlsx  (add --raw for the
 one-row-per-event sheet; it makes the file ~20x larger)
 
@@ -87,6 +96,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import gzip
 import json
 import logging
 import ssl
@@ -103,7 +114,7 @@ from pathlib import Path
 import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 
 SCRIPT_NAME = "aep_usage_log"
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.2.0"
 SCRIPT_DATE = "2026-10-02"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -123,7 +134,8 @@ API_CAP = 1000          # max page size AND the ceiling on page.totalElements
 SPLITS = (timedelta(hours=1), timedelta(minutes=10), timedelta(minutes=1),
           timedelta(seconds=10), timedelta(seconds=1))
 TECHACCT = "@techacct.adobe.com"
-MAX_ATTEMPTS = 6        # per request, for 429 / 5xx / network errors
+MAX_ATTEMPTS = 6        # per request, for 429 / 5xx / network errors / hangs
+REQUEST_DEADLINE = 120  # seconds; a request still running after this is abandoned
 
 CONFIDENTIAL = "STRICTLY CONFIDENTIAL"
 _HEADER_BG = "1F4E78"   # the Data Dictionary's header blue
@@ -206,6 +218,9 @@ class AuditClient:
     def __init__(self, token: str, conf: dict, sandbox: str):
         self.token, self.conf, self.sandbox = token, conf, sandbox
         self.requests = 0
+        # Requests run on a worker thread so a hung one can be walked away
+        # from; an abandoned thread finishes (or dies) on its own.
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
     def get(self, params: list[tuple[str, object]]) -> dict:
         url = f"{AUDIT_URL}?{urllib.parse.urlencode(params)}"
@@ -220,14 +235,15 @@ class AuditClient:
             }
             self.requests += 1
             try:
-                return json.loads(http(url, headers=headers))
+                job = self._pool.submit(http, url, "GET", headers)
+                return json.loads(job.result(timeout=REQUEST_DEADLINE))
             except urllib.error.HTTPError as e:
                 body = flatten_err(e.read().decode(errors="replace"))
                 if e.code != 429 and e.code < 500:
                     raise RuntimeError(f"HTTP {e.code}: {body}") from None
                 wait = _retry_after(e) or min(2 ** attempt, 60)
                 why = f"HTTP {e.code}"
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
                 wait, why = min(2 ** attempt, 60), type(e).__name__
             if attempt == MAX_ATTEMPTS:
                 raise RuntimeError(f"gave up after {attempt} attempts ({why})")
@@ -361,6 +377,65 @@ def raw_row(e: dict) -> list:
 
 
 # ----------------------------------------------------------------------------
+# One day, and the per-day cache
+# ----------------------------------------------------------------------------
+# A finished UTC day's audit events never change, so each one is kept in a
+# small gzip file. A run that stops part-way picks up where it left off, and a
+# later run only fetches the days it has not seen. Events are cached BEFORE the
+# tech-account split, so --exclude-techacct can change without a re-fetch; the
+# noise settings are part of the key, so changing them does re-fetch.
+CACHE_KEEP_FIELDS = [c for c in RAW_COLUMNS if c != "enhancedEvents"]
+
+
+def cache_dir(sandbox: str) -> Path:
+    return OUTPUT_DIR / "aep_usage_log_cache" / sandbox
+
+
+def load_day(sandbox: str, day: str, key: dict) -> dict | None:
+    path = cache_dir(sandbox) / f"{day}.json.gz"
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            got = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return got if got.get("key") == key else None
+
+
+def save_day(sandbox: str, day: str, key: dict, got: dict) -> None:
+    folder = cache_dir(sandbox)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f"{day}.json.gz.tmp"
+    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+        json.dump({**got, "key": key}, fh)
+    tmp.replace(folder / f"{day}.json.gz")      # never leave a half-written day
+
+
+def fetch_day(client: AuditClient, a: datetime, b: datetime, noise_user: str,
+              noise_asset: str, count_noise: bool, stats: dict) -> dict:
+    """Everything the report needs for one day: the fetched events of streams
+    A and B (slimmed to the report's fields, Enhanced events reduced to a
+    count) and the stream-C count."""
+    streams = [([f"user!={noise_user}"] if noise_user else [], True)]
+    if noise_user:
+        streams.append(([f"user=={noise_user}"]
+                        + ([f"assetType!={noise_asset}"] if noise_asset else []), True))
+        if count_noise:
+            streams.append(([f"user=={noise_user}", f"assetType=={noise_asset}"], False))
+    events, counted = [], 0
+    day_stats = {"splits": 0, "counted": 0, "incomplete": []}
+    for filters, fetch in streams:
+        day_stats["counted"] = 0
+        for e in walk_windows(client, a, b, filters, fetch, day_stats):
+            slim = {k: e.get(k) for k in CACHE_KEEP_FIELDS if e.get(k) is not None}
+            slim["enhancedEvents"] = [None] * len(e.get("enhancedEvents") or [])
+            events.append(slim)
+        counted += 0 if fetch else day_stats["counted"]
+    stats["splits"] += day_stats["splits"]
+    return {"events": events, "counted": counted,
+            "incomplete": day_stats["incomplete"]}
+
+
+# ----------------------------------------------------------------------------
 # Collect
 # ----------------------------------------------------------------------------
 def collect(client: AuditClient, opts) -> dict:
@@ -379,40 +454,42 @@ def collect(client: AuditClient, opts) -> dict:
 
     kept, noise = [], Counter()          # noise[(date, user, assetType, how)]
     stats = {"splits": 0, "counted": 0, "incomplete": []}
+    count_noise = bool(noise_user and noise_asset and not opts.no_noise_count)
+    cache_key = {"noise_user": noise_user, "noise_asset": noise_asset,
+                 "count_noise": count_noise}
+    n_cached = 0
     for n, (a, b) in enumerate(windows, 1):
-        t0, req0, inc0 = time.time(), client.requests, len(stats["incomplete"])
+        t0, req0 = time.time(), client.requests
         day = a.date().isoformat()
-        streams = [([f"user!={noise_user}"] if noise_user else [], True)]
-        if noise_user:
-            streams.append(([f"user=={noise_user}"]
-                            + ([f"assetType!={noise_asset}"] if noise_asset else []),
-                            True))
-            if noise_asset and not opts.no_noise_count:
-                streams.append(([f"user=={noise_user}",
-                                 f"assetType=={noise_asset}"], False))
+        whole_day = b - a == timedelta(days=1)
+        got = load_day(opts.sandbox, day, cache_key) if whole_day else None
+        if got is None:
+            got = fetch_day(client, a, b, noise_user, noise_asset, count_noise, stats)
+            if whole_day:          # past days never change; today is still filling
+                save_day(opts.sandbox, day, cache_key, got)
+        else:
+            n_cached += 1
+        stats["incomplete"] += got["incomplete"]
         day_kept = day_noise = 0
-        for filters, fetch in streams:
-            stats["counted"] = 0
-            events = walk_windows(client, a, b, filters, fetch, stats)
-            if not fetch:
-                if stats["counted"]:
-                    noise[(day, noise_user, noise_asset, "counted only")] += stats["counted"]
-                    day_noise += stats["counted"]
-                continue
-            for e in events:
-                user = e.get("userEmail") or ""
-                if opts.exclude_techacct and user.endswith(TECHACCT):
-                    noise[(day, user, e.get("assetType") or "", "fetched")] += 1
-                    day_noise += 1
-                else:
-                    kept.append(e)
-                    day_kept += 1
+        if got["counted"]:
+            noise[(day, noise_user, noise_asset, "counted only")] += got["counted"]
+            day_noise += got["counted"]
+        for e in got["events"]:
+            user = e.get("userEmail") or ""
+            if opts.exclude_techacct and user.endswith(TECHACCT):
+                noise[(day, user, e.get("assetType") or "", "fetched")] += 1
+                day_noise += 1
+            else:
+                kept.append(e)
+                day_kept += 1
         flag = (f"  {ANSI['red']}INCOMPLETE windows: "
-                f"{len(stats['incomplete']) - inc0}{ANSI['reset']}"
-                if len(stats["incomplete"]) > inc0 else "")
+                f"{len(got['incomplete'])}{ANSI['reset']}" if got["incomplete"] else "")
+        source = ("from cache" if client.requests == req0 else
+                  f"{client.requests - req0} requests, {time.time() - t0:.1f}s")
         logger.info(f"[{n:>3}/{len(windows)}] {day}: {day_kept:>6,} kept, "
-                    f"{day_noise:>7,} noise  ({client.requests - req0} requests, "
-                    f"{time.time() - t0:.1f}s){flag}")
+                    f"{day_noise:>7,} noise  ({source}){flag}")
+    if n_cached:
+        logger.info(f"{n_cached} day(s) came from {cache_dir(opts.sandbox)}.")
     return {"kept": kept, "noise": noise, "windows": windows,
             "noise_user": noise_user, "noise_asset": noise_asset,
             "incomplete": stats["incomplete"], "splits": stats["splits"]}
@@ -724,6 +801,22 @@ def parse_args(argv):
     return opts
 
 
+def keep_awake(on: bool) -> None:
+    """Ask Windows not to idle-sleep while the run is going (on=True), and
+    hand that back afterwards (on=False). Three 90-day runs froze mid-way when
+    the machine went to sleep. Changes no power settings; a closed lid still
+    sleeps. A no-op off Windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    except Exception:
+        pass
+
+
 def banner(conf, opts):
     bar = ANSI["cyan"] + "=" * 72 + ANSI["reset"]
     print(bar)
@@ -754,11 +847,14 @@ def main():
     client = AuditClient(token, conf, opts.sandbox)
 
     t0 = time.time()
+    keep_awake(True)
     try:
         result = collect(client, opts)
     except RuntimeError as e:
         logger.error(f"Audit API: {e}")
         return
+    finally:
+        keep_awake(False)
     logger.info(f"{len(result['kept']):,} activity events kept, "
                 f"{sum(result['noise'].values()):,} tech-account events "
                 f"excluded; {client.requests:,} requests in "
