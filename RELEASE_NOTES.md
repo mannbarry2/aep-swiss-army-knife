@@ -7,6 +7,48 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.6 — 2026-10-06
+
+**Audience complexity score (beta).** Not all audiences are created equal:
+one badly built audience can double the nightly batch run on its own, and
+AEP's own metrics never say what an audience cost to compute. The Audiences
+tab gains a **Complexity score (0-100)** and a **RED / AMBER / GREEN** on it,
+plus the reasons: *Why this score* (the points, in plain English), event scan,
+lookback days, lookup joins, joined fields, aggregations, depends-on count,
+largest base audience and its size, sequence steps, conditions, longest
+hard-coded value list, merge policies, and how many audiences use it.
+
+The rules follow the two miaprova.com write-ups on expensive AEP segments
+(*Why your most expensive AEP audience might be your newest one*; *The right
+fix for expensive AEP segments: move the math upstream*). Four main cost
+drivers, each read off the PQL and the audience record:
+
+1. **Event scan and lookback** — the longer the window the more events read
+   per profile per night; a scan with *no* time limit scores highest (35).
+2. **Lookup joins** to another class (products via gtin): the join runs per
+   event per profile (18, +4 per extra field, cap 25).
+3. **Aggregations that cannot short-circuit** — sum / average (15), count
+   (10), "occurs N times" (6), forall (4), cap 20.
+4. **Base audience size** — inSegment() on a big audience scans all of it
+   (+2 per dependency, +3 / +6 / +9 for a base of 1M / 5M / 20M profiles).
+
+Plus sequences, condition count, lists of 100+ values, more than one merge
+policy, a negated event step and an overridden performance warning. RED is
+55 and over, AMBER 30 to 54. The weights live in `audience_complexity.py`
+(developed standalone, folded in) and are a first cut to be argued with.
+
+The Summary tab gets an **AUDIENCE COMPLEXITY** block: counts per sandbox and
+the top 15 RED with their reasons. The How to Use tab explains the score and
+the usual fix (shorten the lookback, or move the sum / count upstream into a
+computed attribute). The size of each base audience is read from
+`/segment/definitions/<id>` once per run (a few hundred small reads).
+
+First prod run: 2,205 rule-based audiences scored — 64 RED, 482 AMBER,
+1,659 GREEN. Every RED is the same shape: an unlimited event scan, a product
+lookup join, and a base audience of 13 to 23 million profiles.
+
+---
+
 ## v3.4.5 — 2026-09-30
 
 **No more silent PQL truncation.** Excel caps a cell at 32,767 characters and

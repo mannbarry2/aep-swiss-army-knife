@@ -184,13 +184,14 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # tool's own collector and tab writer, so there is one copy of the logic and the
 # standalone script keeps working.
 import snapshot_tables
+import audience_complexity     # beta complexity score for the Audiences tab
 
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.5"
-SCRIPT_DATE    = "2026-09-30"
+SCRIPT_VERSION = "3.4.6"
+SCRIPT_DATE    = "2026-10-06"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -216,6 +217,7 @@ DATASETS_URL = f"{PLATFORM}/data/foundation/catalog/dataSets"
 CATALOG_BATCHES_URL = f"{PLATFORM}/data/foundation/catalog/batches"
 EXPORT_URL = f"{PLATFORM}/data/foundation/export"   # Data Access (batch files)
 UPS_MERGE_POLICIES_URL = f"{PLATFORM}/data/core/ups/config/mergePolicies"
+UPS_SEGMENT_DEFS_URL = f"{PLATFORM}/data/core/ups/segment/definitions"
 
 # Profile coverage (v3.1): a Profile-class schema's coverage must be sampled from
 # the merged UNION (Profile Snapshot Export), not its pre-merge feeding datasets.
@@ -2164,11 +2166,27 @@ def attach_audiences(token, conf, res, caches):
             if a.get(key):
                 seg_names[a[key]] = a.get("name") or ""
 
+    # Complexity (beta): an audience built on inSegment() of a big base
+    # audience has to scan every one of those profiles, so the size of each
+    # base audience is read once (its latest evaluation count) and remembered.
+    base_pops = fetch_base_populations(token, conf, sandbox, auds, caches)
+
     rows, full, n_pql, n_partial, n_trunc, tagged = [], [], 0, 0, 0, 0
+    rag_tally = {"RED": 0, "AMBER": 0, "GREEN": 0}
     for a in auds:
         named, system, unresolved = split_audience_tags(a, vocab)
         tagged += bool(named)
         pql, pql_raw, partial, fmt = render_pql(a.get("expression"), seg_names)
+        tree = None
+        if fmt == "json":
+            try:
+                tree = json.loads(pql_raw)
+            except (ValueError, TypeError):
+                tree = None
+        cx = audience_complexity.score_audience(a, tree, base_pops, seg_names)
+        cf = cx["features"]
+        if cx["rag"]:
+            rag_tally[cx["rag"]] += 1
         if pql:
             n_pql += 1
             n_partial += bool(partial)
@@ -2192,13 +2210,47 @@ def attach_audiences(token, conf, res, caches):
             raw_cell,
             len(pql_raw), "yes" if truncated else "no", fmt,
             ", ".join(t[:8] for t in unresolved), len(system),
+            cx["score"], cx["rag"], cx["why"],
+            cf["event_scan"], cf["lookback_days"], cf["lookup_joins"],
+            cf["lookup_fields"], cf["aggregations"], cf["depends_on"],
+            cf["largest_base_name"], cf["largest_base"], cf["sequence_steps"],
+            cf["conditions"], cf["max_list"], cf["merge_policies"],
+            cf["dependents"],
         ])
     res["audiences"] = rows
     res["audiences_pql"] = full            # one entry per row, same order
+    res["complexity_tally"] = rag_tally
     res["audiences_complete"] = complete
     logger.info(f"  audiences: {len(rows)} ({tagged} tagged, {n_pql} with a "
                 f"rule, {n_partial} of those only partly renderable, "
                 f"{n_trunc} too long for a cell -- full text in the sidecar).")
+
+
+def fetch_base_populations(token, conf, sandbox, auds, caches) -> dict:
+    """{audience id: profiles} for every audience some other audience depends
+    on (inSegment). The list payload carries no counts, so each base audience
+    is read once from /segment/definitions/<id> (metrics.data.totalProfiles).
+    A few hundred small GETs; cached per sandbox for the run. Never fatal."""
+    deps = sorted({str(d) for a in auds for d in (a.get("dependencies") or [])})
+    if not deps:
+        return {}
+    store = caches.setdefault("base_pops", {}).setdefault(sandbox, {})
+    todo = [d for d in deps if d not in store]
+    if todo:
+        logger.info(f"  complexity: reading the size of {len(todo)} base "
+                    f"audience(s) that others depend on...")
+        headers = aep_headers(token, conf, sandbox)
+        for sid in todo:
+            try:
+                body, _ = http(f"{UPS_SEGMENT_DEFS_URL}/"
+                               f"{urllib.parse.quote(sid, safe='')}",
+                               headers=headers, timeout=30)
+                det = json.loads(body) or {}
+                store[sid] = ((det.get("metrics") or {}).get("data") or {}).get("totalProfiles")
+            except Exception as e:
+                logger.debug(f"  base audience {sid}: {type(e).__name__}: {e}")
+                store[sid] = None
+    return store
 
 
 def write_pql_sidecar(res, out_dir: Path, datestr: str) -> Path | None:
@@ -2478,6 +2530,59 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                 italic=True, color="666666")
         r += 1
 
+    # ---- Audience complexity (beta): the business-facing headline --------
+    tallies = [(res["title"], res.get("complexity_tally"))
+               for res in results if res.get("complexity_tally")]
+    if tallies:
+        r += 2
+        ws.cell(r, 1, "AUDIENCE COMPLEXITY (beta) -- not all audiences are "
+                "created equal; the RED ones can slow the nightly batch run on "
+                "their own:").font = Font(bold=True, color="C00000")
+        r += 1
+        cx_hdr = ["Sandbox", "RED", "AMBER", "GREEN", "Scored (rule-based)"]
+        for c, nm in enumerate(cx_hdr, 1):
+            cell = ws.cell(r, c, nm)
+            cell.font, cell.fill = head_font, head_fill
+        r += 1
+        for title, t in tallies:
+            ws.cell(r, 1, title)
+            for c, grade in ((2, "RED"), (3, "AMBER"), (4, "GREEN")):
+                cell = ws.cell(r, c, t[grade])
+                bg, fg = snapshot_tables.RAG_COLOURS[grade]
+                cell.fill = PatternFill("solid", fgColor=bg)
+                cell.font = Font(bold=True, color=fg)
+                cell.alignment = center
+            ws.cell(r, 5, sum(t.values())).alignment = center
+            r += 1
+        # The worst offenders, so nobody has to go looking.
+        worst = sorted((row for res in results for row in (res.get("audiences") or [])
+                        if row[20] == "RED"), key=lambda x: -(x[19] or 0))[:15]
+        if worst:
+            r += 1
+            ws.cell(r, 1, f"Top {len(worst)} by score (full list and the "
+                    f"reasons on the Audiences tab, filter Complexity RAG):"
+                    ).font = Font(italic=True, color="666666")
+            r += 1
+            for c, nm in enumerate(["Sandbox", "Score", "Audience", "Why"], 1):
+                cell = ws.cell(r, c, nm)
+                cell.font, cell.fill = head_font, head_fill
+            r += 1
+            for row in worst:
+                ws.cell(r, 1, row[0])
+                sc = ws.cell(r, 2, row[19])
+                bg, fg = snapshot_tables.RAG_COLOURS["RED"]
+                sc.fill = PatternFill("solid", fgColor=bg)
+                sc.font = Font(bold=True, color=fg)
+                sc.alignment = center
+                ws.cell(r, 3, row[1])
+                ws.cell(r, 4, row[21])
+                r += 1
+        r += 1
+        ws.cell(r, 1, "Beta: the weights follow the published guidance on "
+                "expensive AEP segments (lookback window, lookup joins, "
+                "aggregations, base audience size) and are a first cut. See "
+                "the How to Use tab.").font = Font(italic=True, color="666666")
+
     # Author / provenance footer, so the file can be traced back to a person as
     # well as to a script.
     r += 1
@@ -2578,6 +2683,17 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
          "in pql/audiences_pql_<sandbox>_<date>.jsonl beside this workbook: one "
          "JSON line per audience with audience_id, audience_name, format, "
          "raw_pql and readable_pql."),
+        ("Some audiences cost far more to run than others",
+         "Audiences (Complexity columns)",
+         "Not all audiences are equal: one badly built audience can double the "
+         "nightly batch run on its own. The Complexity score (0-100, beta) and "
+         "its RED / AMBER / GREEN read the definition for the known cost "
+         "drivers: an event scan with a long or NO lookback window, a lookup "
+         "join to another class (products via gtin), an aggregation such as "
+         "sum() / count() / 'occurs N times', and building on a very large "
+         "base audience. 'Why this score' spells out the points. The fix for "
+         "a RED is usually to shorten the lookback, or move the sum / count "
+         "upstream into a computed attribute and test that instead."),
         ("Not every audience has a rule",
          "Audiences",
          "Only Origin=AEPSegments audiences are rule-based. Uploads, Data "
@@ -2797,7 +2913,15 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                 f"'{PQL_TRUNCATED_MARK}' -- the full text of EVERY rule is in "
                 "the pql/audiences_pql_<sandbox>_<date>.jsonl file in the folder "
                 "next to this workbook. 'PQL format' is json (Adobe's syntax tree) or "
-                "pql-text (complete, but not JSON).")
+                "pql-text (complete, but not JSON). COMPLEXITY (beta): a 0-100 "
+                "score of how much work the audience costs the nightly batch "
+                "run, read off its definition -- event scans and how far back "
+                "they look, joins to other classes (products via gtin), "
+                "aggregations (sum / count / 'occurs N times'), the size of "
+                "the base audience it depends on, sequences, condition count. "
+                f"RED >= {audience_complexity.RAG_RED}, AMBER >= "
+                f"{audience_complexity.RAG_AMBER}, else GREEN. 'Why this score' "
+                "shows the points. Weights are a first cut: argue with them.")
         if aud_incomplete:
             note += (f"  WARNING: the listing was INCOMPLETE for "
                      f"{', '.join(aud_incomplete)} -- those counts understate "
@@ -2812,7 +2936,15 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                             "PQL (readable)", "PQL rendered",
                             "PQL (raw pql/json)", "PQL length",
                             "PQL truncated in sheet", "PQL format",
-                            "Unresolved tag ids", "System tags"]
+                            "Unresolved tag ids", "System tags",
+                            "Complexity score (0-100)", "Complexity RAG",
+                            "Why this score", "Event scan",
+                            "Lookback (days)", "Lookup joins",
+                            "Joined fields", "Aggregations",
+                            "Depends on (audiences)", "Largest base audience",
+                            "Largest base (profiles)", "Sequence steps",
+                            "Conditions", "Longest value list",
+                            "Merge policies", "Used by (audiences)"]
         hr = 5
         for c, nm in enumerate(AUDIENCE_COLUMNS, 1):
             at.cell(hr, c, nm)
@@ -2826,9 +2958,19 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                 cell = at.cell(rr, c, val)
                 if c == 16 and val == "yes":
                     cell.font = Font(bold=True, color="C00000")
+                # Complexity score + RAG cells carry the traffic light.
+                if c in (20, 21) and row[20]:
+                    bg, fg = snapshot_tables.RAG_COLOURS[row[20]]
+                    cell.fill = PatternFill("solid", fgColor=bg)
+                    cell.font = Font(bold=True, color=fg)
+                if c == 22:
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                if c == 30 and isinstance(val, int):
+                    cell.number_format = "#,##0"
             rr += 1
         autofit(at, [16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 11,
-                     12, 10, 22, 12])
+                     12, 10, 22, 12, 12, 12, 90, 10, 12, 10, 10, 20, 12, 40, 14,
+                     10, 11, 12, 10, 12])
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
                               f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
@@ -3317,6 +3459,13 @@ def run(service: str, sandbox_arg: str | None,
         logger.info(f"Audiences in {res['name']}: {len(rows)} total, "
                     f"{n_trunc} truncated in the sheet; format: {by_fmt}; "
                     f"full PQL sidecar: {res.get('pql_sidecar') or '(none)'}")
+        t = res.get("complexity_tally") or {}
+        if t:
+            logger.info(f"Audience complexity (beta) in {res['name']}: "
+                        f"{ANSI['red']}{ANSI['bold']}RED {t['RED']}{ANSI['reset']}, "
+                        f"{ANSI['yellow']}AMBER {t['AMBER']}{ANSI['reset']}, "
+                        f"{ANSI['green']}GREEN {t['GREEN']}{ANSI['reset']} "
+                        f"of {sum(t.values())} rule-based audiences.")
 
     total_kept = sum(r["stats"]["kept"] for r in results)
     total_seen = sum(r["stats"]["total"] for r in results)

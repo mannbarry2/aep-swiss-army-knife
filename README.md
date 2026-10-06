@@ -554,6 +554,23 @@ descriptions on file were written in a Claude Code session instead.
 python audience_renamer.py        # refuses: "IN DEVELOPMENT and parked -- it is not for use"
 ```
 
+## audience_complexity.py  *(beta, folded into the Data Dictionary)*
+
+A crude 0-100 **complexity score** for an AEP audience, read off its PQL and
+the audience record, with a RED / AMBER / GREEN on top. Not all audiences are
+created equal: one badly built audience can double the nightly batch run, and
+AEP never reports what an audience cost to compute. The weights follow the
+miaprova.com write-ups on expensive segments: event scan and how far back it
+looks (an unlimited scan scores highest), lookup joins to another class
+(products via gtin), aggregations that cannot short-circuit (sum / count /
+"occurs N times"), and the size of the base audience it depends on; plus
+sequences, condition count, huge value lists and multiple merge policies.
+Pure functions, no network: `score_audience(audience, pql_tree,
+base_populations)` returns the score, the RAG, a plain-English *why* and the
+raw features. The Data Dictionary calls it for every rule-based audience and
+puts the results in the Audiences tab and a Summary block. Edit the weights at
+the top of the file.
+
 ## data_dictionary_v3.py
 
 **Data Dictionary v3.4.** Sucks every XDM schema out of an AEP sandbox, **filters
