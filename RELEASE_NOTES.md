@@ -37,7 +37,7 @@ policy, a negated event step and an overridden performance warning. RED is
 55 and over, AMBER 30 to 54. The weights live in `audience_complexity.py`
 (developed standalone, folded in) and are a first cut to be argued with.
 
-The run log reports the RED / AMBER / GREEN counts per sandbox. The How to
+The run log reports the RED / AMBER / GREEN counts per sandbox. The How to Use tab explains the score and
 the usual fix (shorten the lookback, or move the sum / count upstream into a
 computed attribute). The size of each base audience is read from
 `/segment/definitions/<id>` once per run (a few hundred small reads).
