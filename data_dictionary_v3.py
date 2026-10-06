@@ -86,6 +86,28 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.6 -- Audience complexity score (beta). Not all audiences are created
+equal: one badly built audience can double the nightly batch run on its own,
+and AEP never reports what an audience cost to compute. Every rule-based
+audience now carries a 0-100 score and a RED / AMBER / GREEN on the Audiences
+tab, with the reasons in plain English and the raw features in their own
+columns. The drivers, after the miaprova.com write-ups on expensive segments:
+an event scan and how far back it looks (no time limit scores highest), lookup
+joins to another class, aggregations that cannot short-circuit (sum / count /
+"occurs N times"), and the size of the base audience it depends on. The
+formula is printed above the columns; the weights live in
+audience_complexity.py (developed standalone, folded in).
+
+v3.4.5 -- Full-PQL sidecar and the dictionary's own folder. Excel caps a cell
+at 32,767 characters; every audience's complete rule now goes to
+output/data_dictionary/pql/audiences_pql_<sandbox>_<yyyymmdd>.jsonl and a cut
+cell is marked, with PQL length / truncated / format columns. The workbook,
+its archive and the sidecars live under output/data_dictionary/.
+
+v3.4.4 -- Snapshot Summary and Snapshot Tables tabs (every snapshot export
+table, its merge policy, system evaluation time and time to run), written by
+snapshot_tables.add_sheets().
+
 v3.3 -- Readability and provenance:
   * An Audiences tab: every audience with tags, owner, last-modified and its
     segmentation rule (PQL) rendered readable.

@@ -623,20 +623,75 @@ labels — Data Usage Labeling and Enforcement, Adobe's governance framework
 for object and data access control (C8, C12 …) — which the workbook does
 not yet carry.
 
-The output is a single tabbed workbook in `./output/`,
+The output is a single tabbed workbook in its own folder,
+`./output/data_dictionary/`,
 **`Data Dictionary - <Client> - <YYYY-MM-DD>.xlsx`** (client name from the creds
 `client` key, or derived from the filename; the credential set itself is not in
 the name). On each run the previous same-client workbook is moved into
-`./output/archive/` so the folder only holds the newest. Tabs, in order:
-**Summary** (per-sandbox filter stats), **Field Index** (a master list of
-*every* field across all schemas — look up an exact dot-notation path with
-Ctrl-F; the Tab column says which sheet it's on), **Schemas** (one row per kept
-schema), then **one tab per schema**. Each schema tab opens with a title block
+`./output/data_dictionary/archive/` so the folder only holds the newest. Tabs,
+in order: **Summary** (per-sandbox filter stats), **How to Use**, **Field
+Index** (a master list of *every* field across all schemas — look up an exact
+dot-notation path with Ctrl-F; the Tab column says which sheet it's on),
+**Schemas** (one row per kept schema), **Datasets** (friendly name → SQL table
+name), **Audiences** (every audience, its rule, and — new in v3.4.6 — its
+**complexity score**, see below), **Snapshot Summary** / **Snapshot Tables**
+(folded in from `snapshot_tables.py`), then **one tab per schema**. Each schema tab opens with a title block
 (class, dataset count, field count, identities, relationships, modified date,
 `$id`) followed by every field — dot-notation path, data type, friendly name,
 required flag, identity, and relationship → target. Every sheet is marked
 **STRICTLY CONFIDENTIAL** (banner + print header). Paste a schema tab into
 Claude to generate that entity's Mermaid ERD. Needs `openpyxl`.
+
+### Audiences: full PQL sidecar and the complexity score (beta)
+
+The **Audiences** tab holds every audience in the sandbox with its tags, who
+built and last changed it, and its segmentation rule rendered readable from
+Adobe's `pql/json` syntax tree, with the raw tree alongside. Two things were
+added in v3.4.5 / v3.4.6:
+
+- **Full PQL sidecar.** Excel caps a cell at 32,767 characters and a rule with
+  a hard-coded store list can pass that, so the sheet alone cannot be the
+  audit copy. Every audience's complete rule is written to
+  `./output/data_dictionary/pql/audiences_pql_<sandbox>_<yyyymmdd>.jsonl`
+  (one JSON line per audience: `audience_id`, `audience_name`, `format`,
+  `raw_pql`, `readable_pql`). Three columns say what happened in the sheet:
+  *PQL length*, *PQL truncated in sheet* (yes/no, red when yes) and *PQL
+  format* (`json`, or `pql-text` for a rule held as PQL text — complete, but
+  not JSON). A cut cell ends with `…[TRUNCATED – see sidecar]`.
+
+- **Complexity score (beta).** Not all audiences are created equal: one badly
+  built audience can double the nightly batch run on its own, and AEP never
+  reports what an audience cost to compute — only how many profiles qualified.
+  So every rule-based audience gets a **0–100 score** and a **RED / AMBER /
+  GREEN**, read off its definition, with the reasons in plain English (*Why
+  this score*) and the raw features in their own columns: event scan,
+  lookback days, lookup joins, joined fields, aggregations, how many audiences
+  it depends on, the largest base audience and its size, sequence steps,
+  conditions, longest hard-coded value list, merge policies, and how many
+  audiences use it. The formula, generated from the weights in the code, is
+  printed in full at the top of the tab. The rules follow the miaprova.com
+  write-ups on expensive AEP segments (*Why your most expensive AEP audience
+  might be your newest one*; *The right fix for expensive AEP segments: move
+  the math upstream*):
+
+  | Cost driver | Why it costs | Points |
+  |---|---|---|
+  | Event scan and lookback | Events are read per profile, per night; 720 days is ~2× the work of 365, 4× of 180. A scan with **no** time limit reads the whole history. | no limit 35; ≤30 d 6, ≤90 d 12, ≤180 d 18, ≤365 d 25, ≤730 d 30, longer 33 |
+  | Lookup joins | A field reached through a relationship (products via gtin) is resolved per event, per profile — "potentially millions of times across the job run". | first join 18, +4 per further class or field, max 25 |
+  | Aggregations | `sum()` / `average()` / `count()` cannot short-circuit: every qualifying event is gathered before the threshold test. "Occurs at least N times" is a count in disguise. | sum/avg/min/max 15, count 10, occurs-N 6, forall 4, max 20 |
+  | Base audience size | `inSegment()` on a big audience means every one of those profiles gets the full scan. | 2 per dependency (max 6) + base ≥1M +3, ≥5M +6, ≥20M +9 |
+  | Breadth / other | Ordered event sequences, very many conditions, lists of 100+ values, more than one merge policy, a negated event step, Adobe's performance warning overridden at save. | small amounts, capped |
+
+  RED is 55 and over, AMBER 30 to 54. The scoring is pure functions in
+  [`audience_complexity.py`](audience_complexity.py) (developed standalone,
+  folded in); the weights are constants at the top of that file and are a
+  first cut to be argued with. The usual fix for a RED is to shorten the
+  lookback, or move the sum / count upstream into a computed attribute and
+  test that instead. First prod run: 2,205 rule-based audiences — 64 RED, 482
+  AMBER, 1,659 GREEN; every RED was an unlimited event scan + a product lookup
+  join + a base audience of 13–23 million profiles. The size of each base
+  audience is read from `/segment/definitions/<id>` once per run (a few
+  hundred small reads; ~70 s on prod).
 
 ### Data dictionary (`--data-dict`)
 

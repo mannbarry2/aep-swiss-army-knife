@@ -6,14 +6,15 @@
 
 ## What it produces
 
-Data Dictionary v3.4 authenticates to Adobe Experience Platform with a chosen credential set, reads a chosen sandbox (Enter = production), pulls every XDM schema, filters out the noise, and writes one strictly-confidential Excel workbook to `./output` (the previous copy is moved to `./output/archive` first). Tabs:
+Data Dictionary v3.4 authenticates to Adobe Experience Platform with a chosen credential set, reads a chosen sandbox (Enter = production), pulls every XDM schema, filters out the noise, and writes one strictly-confidential Excel workbook to `./output/data_dictionary` (the previous copy is moved to `./output/data_dictionary/archive` first; the full-PQL sidecars go to `./output/data_dictionary/pql`). Tabs:
 
 - **Summary** — counts per sandbox, a tab-colour key, a provenance line, and the *DATA COMPLETENESS* block.
 - **How to Use** — written for a first-time reader, including the traps (coverage is a sample; `MISSING` ≠ `0%`). Links to the release notes.
 - **Field Index** — every field across all schemas; look up an exact dot-notation path with Ctrl-F.
 - **Schemas** — one row per kept schema (class, dataset count, **SQL table name(s)**, field/identity/relationship counts).
 - **Datasets** — every dataset mapped to its **SQL table (system) name** — see below.
-- **Audiences** — every audience with tags, owner, last-modified, and its segmentation rule (PQL) rendered readable.
+- **Audiences** — every audience with tags, owner, last-modified, and its segmentation rule (PQL) rendered readable; since v3.4.5 the full rule also goes to a `.jsonl` sidecar (Excel cuts a cell at 32,767 characters), and since v3.4.6 every rule-based audience carries a **complexity score (0–100) with RED / AMBER / GREEN** and the reasons — see below.
+- **Snapshot Summary / Snapshot Tables** — every Profile / Segment snapshot export table with its merge policy (the default-policy ones highlighted), when the system evaluation ran and how long the snapshot took to write (folded in from `snapshot_tables.py`, v3.4.4).
 - **One tab per schema** — every field (dot-notation path, type, identity, relationship), plus the schema's SQL table name(s) in the header block. Ready to paste into Claude (via MCP) for a Mermaid ERD.
 
 The Profile schema's tab is coloured **purple** so the post-merge union stands out from the event and lookup schemas.
@@ -61,12 +62,26 @@ A bare `--data-dict` samples **every** kept schema (one coverage pass per tab); 
 
 **PROFILE is different and must NOT be sampled from its feeding datasets.** A profile is the post-merge union (identity-deduped, time-ordered, last-write-wins); each feeding dataset only writes its own slice as a sparse delta, so batch sampling tallies pre-merge fragments and a union-100% field (e.g. first name) reads near-empty. The correct source is the **Profile Snapshot Export** dataset — the merged union, one row per identity. For a profile-class schema the tool auto-resolves the org's **default merge policy**, locates the snapshot-export dataset belonging to it (detected by tag `unifiedProfile = ups_snapshot_type:*` and schema `context/profile__union`, matched on the policy id), and routes the schema to that snapshot — reusing the same sampler. No picker is needed; override the dataset with `--profile-snapshot=<datasetId>` if the default is not the one you want. Snapshots are huge (tens of millions of rows) on a daily ~04:08 cut, so the tool downloads the smallest non-empty partition file, with longer timeouts and retries to ride out the cold-start 504s the manifest server throws on first access.
 
+## Audience complexity (beta, v3.4.6)
+
+Not all audiences are created equal. One badly built audience can double the nightly batch run on its own — a published 3.5-hour job went to 7.3 hours after a single segment that combined a 720-day purchase scan, a product-lookup join and a `sum()` aggregation, for millions of profiles, every night — and AEP never says what an audience cost to compute, only how many profiles qualified. The score makes that cost visible *before* the audience is published, from the definition alone.
+
+Every rule-based audience (format `json`) is scored 0–100 and given a RED (≥ 55) / AMBER (≥ 30) / GREEN. The four main drivers, after the miaprova.com write-ups on expensive AEP segments: **event scan and lookback** (the longer the window the more events read per profile per night; a scan with no time limit scores highest), **lookup joins** to another class (products via gtin — resolved per event, per profile), **aggregations that cannot short-circuit** (`sum` / `average` / `count` / "occurs N times"), and **base audience size** (`inSegment()` on a 20-million-profile audience scans all 20 million). Smaller signals: ordered event sequences, very many conditions, hard-coded lists of 100+ values, more than one merge policy, a negated event step, and Adobe's own performance warning having been overridden at save.
+
+On the Audiences tab the formula is printed in full above the columns, each row shows *Why this score* with the points, and the raw features sit in their own filterable columns. The weights are constants at the top of `audience_complexity.py` and are a first cut to be argued with and calibrated against real batch run times. The usual fix for a RED: shorten the lookback, or move the sum / count upstream into a computed attribute and test that instead.
+
+First prod run (6 Oct 2026): 2,205 scored — 64 RED, 482 AMBER, 1,659 GREEN. Every RED had the same shape: an event scan with no time limit, a product lookup join, and a base audience of 13–23 million profiles.
+
 ## Version history
 
 - **v3.1** — Profile coverage fix (sample the Profile Snapshot Export union, not pre-merge feeds).
 - **v3.2** — bundled Luma demo dataset (`demo/luma/`) **and** SQL table (system) names: a Datasets tab plus *SQL table name(s)* columns, so SQL can be formed against the right table straight from the workbook.
 - **v3.3** — Audiences tab, provenance line on every tab, a How to Use tab, filters/frozen headers everywhere, and the credential name dropped from the filename in favour of the sandbox.
 - **v3.4** — credential name removed from the workbook **titles** too (sandbox instead, unless a `client` key is configured), and a link to the release notes on every tab.
+- **v3.4.2 / v3.4.3** — a tab-colour system with meaning (hue = class, shade = enabled for Profile); friendly names and descriptions everywhere; "Dual labels" renamed to "Friendly labels".
+- **v3.4.4** — Snapshot Summary and Snapshot Tables tabs, folded in from `snapshot_tables.py`.
+- **v3.4.5** — the dictionary moves to its own folder (`output/data_dictionary/`); the full-PQL sidecar; silent PQL truncation ended.
+- **v3.4.6** — the audience **complexity score** (beta) with RED / AMBER / GREEN and the reasons, from `audience_complexity.py`.
 
 Full detail: **[RELEASE_NOTES.md](RELEASE_NOTES.md)**.
 
@@ -79,3 +94,4 @@ Full detail: **[RELEASE_NOTES.md](RELEASE_NOTES.md)**.
 - A dataset that has not yet been assigned a Query Service table name shows a blank *SQL table name* (rare — new/unactivated datasets).
 - AJO / system / test filters and identity flags are heuristic and may need per-tenant tuning.
 - Planned: DULE data-governance labels as a per-field column.
+- The complexity score is **static analysis** of the definition: it is not weighted by measured run time, because AEP exposes none per audience. Treat the weights as a first cut; calibrate against nightly batch duration once a few weeks of both exist.
