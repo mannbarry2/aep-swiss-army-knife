@@ -2876,6 +2876,13 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
         at["A3"] = note
         at["A3"].font = Font(italic=True,
                              color="C00000" if aud_incomplete else "666666")
+        # The complexity formula, in full, right above the columns it feeds --
+        # generated from the weights in audience_complexity.py.
+        at["A4"] = audience_complexity.formula_text()
+        at["A4"].font = Font(bold=True, color="1F4E78")
+        at["A4"].alignment = Alignment(wrap_text=True, vertical="top")
+        at.merge_cells("A4:T4")
+        at.row_dimensions[4].height = 92
         AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Description",
                             "Audience id",
                             "Evaluation", "Lifecycle", "Tags", "Tag count",

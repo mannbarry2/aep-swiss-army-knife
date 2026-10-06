@@ -181,6 +181,37 @@ def analyse_tree(tree) -> dict:
 
 
 # ----------------------------------------------------------------------------
+# The formula, in words, built from the constants above so the sheet can never
+# disagree with the code.
+# ----------------------------------------------------------------------------
+def formula_text() -> str:
+    bands = ", ".join(f"<= {int(lim)} days {pts}" for lim, pts in LOOKBACK_POINTS
+                      if lim != float("inf"))
+    longer = LOOKBACK_POINTS[-1][1]
+    pops = ", ".join(f">= {lim // 1_000_000}M profiles +{pts}" for lim, pts in DEP_POP_POINTS)
+    conds = ", ".join(f"> {lim} conditions {pts}" for lim, pts in CONDITIONS_POINTS)
+    return (
+        "COMPLEXITY SCORE (0-100) = "
+        f"EVENT SCAN [no time limit {UNBOUNDED_SCAN_POINTS}; otherwise by lookback: "
+        f"{bands}, longer {longer}; profile-array scan only {PROFILE_ARRAY_SCAN_POINTS}]"
+        f"  +  LOOKUP JOINS [first join {JOIN_FIRST_POINTS}, +{JOIN_EXTRA_POINTS} per "
+        f"further class or joined field, max {JOIN_CAP}]"
+        f"  +  AGGREGATIONS [sum/average/min/max {AGG_HEAVY_POINTS}, count "
+        f"{AGG_COUNT_POINTS}, 'occurs N times' {AGG_OCCURS_N_POINTS}, forall "
+        f"{AGG_FORALL_POINTS}, max {AGG_CAP}]"
+        f"  +  BASE AUDIENCES [{DEP_EACH_POINTS} per inSegment() dependency, max "
+        f"{DEP_EACH_CAP}; largest base {pops}]"
+        f"  +  BREADTH [event sequence / 2+ event clauses {SEQUENCE_POINTS}, {conds}, "
+        f"a hard-coded list of >= {BIG_LIST} values {BIG_LIST_POINTS}, max {BREADTH_CAP}]"
+        f"  +  OTHER [more than one merge policy {MULTI_MERGE_POINTS}, Adobe performance "
+        f"warning overridden {PERF_OVERRIDE_POINTS}, negated event step "
+        f"{NEGATED_SCAN_POINTS}, max {OTHER_CAP}]"
+        f"  ;  capped at 100.   RAG: RED >= {RAG_RED}, AMBER >= {RAG_AMBER}, else GREEN."
+        "   'Why this score' on each row shows which of these applied."
+    )
+
+
+# ----------------------------------------------------------------------------
 # Scoring
 # ----------------------------------------------------------------------------
 def _fmt_pop(n) -> str:
