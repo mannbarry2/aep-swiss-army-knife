@@ -1608,7 +1608,7 @@ def collect_sandbox(token, conf, sb):
 
         field_rows = []
         n_identities = n_rels = n_labels = 0
-        for path, dtype, title, fpath, desc, req in fields:
+        for path, dtype, ftitle, fpath, desc, req in fields:
             mkey = (sid, path.replace("[]", "").lower())
             ident = identities.get(mkey)
             rel = relationships.get(mkey)
@@ -1635,7 +1635,7 @@ def collect_sandbox(token, conf, sb):
                 rel_disp = ""
             # Display name lives on the field itself; fall back to an
             # alternateDisplayInfo descriptor only where the field has none.
-            friendly = title or (lab["title"] if lab else "")
+            friendly = ftitle or (lab["title"] if lab else "")
             if friendly:
                 n_labels += 1
             # Same rule for the description: the schema's own text first, an
