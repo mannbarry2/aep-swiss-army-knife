@@ -62,7 +62,7 @@ import snapshot_tables as st
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "snapshot_history"
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.3.0"
 SCRIPT_DATE = "2026-09-29"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -263,6 +263,47 @@ def fetch_jobs(headers, cutoff: datetime) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------
+# Local history cache (survives a snapshot dataset changeover)
+# ----------------------------------------------------------------------------
+CACHE_DIR = OUTPUT_DIR / "snapshot_history_cache"
+
+
+def load_cache(sandbox: str) -> dict:
+    """{YYYY-MM-DD: entry} of every snapshot day seen so far for the sandbox."""
+    path = CACHE_DIR / f"{sandbox}.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        logger.warning(f"  {sandbox}: history cache unreadable ({e}); starting afresh.")
+        return {}
+
+
+def save_cache(sandbox: str, cached: dict) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (CACHE_DIR / f"{sandbox}.json").write_text(
+        json.dumps(dict(sorted(cached.items())), indent=1), encoding="utf-8")
+
+
+def cache_entry(r: dict) -> dict:
+    return {"table": r.get("table", ""), "batch_id": r["id"],
+            "started": r["started"].isoformat(),
+            "completed": r["completed"].isoformat(),
+            "records": r["records"] if isinstance(r["records"], int) else None,
+            "source": "api"}
+
+
+def cache_row(c: dict) -> dict:
+    """A cached entry in the shape of a fetched snapshot batch row."""
+    a, e = st.to_dt(c["started"]), st.to_dt(c["completed"])
+    return {"id": c.get("batch_id") or "", "started": a, "completed": e,
+            "seconds": secs_between(a, e), "status": "cached",
+            "records": c.get("records") if c.get("records") is not None else "",
+            "table": c.get("table", "")}
+
+
+# ----------------------------------------------------------------------------
 # Collect
 # ----------------------------------------------------------------------------
 def collect_sandbox(token, conf, sb: dict, days: int, cutoff: datetime) -> dict:
@@ -398,6 +439,24 @@ def collect_sandbox(token, conf, sb: dict, days: int, cutoff: datetime) -> dict:
             if cur is None or r["started"] < cur["started"]:
                 evals_by[key] = r
 
+    # Local history: a day's snapshot, once seen, is remembered under
+    # output/snapshot_history_cache/<sandbox>.json. When Adobe swaps the
+    # snapshot dataset (prod, Fri 2 Oct 2026, 15:09 UTC) the old dataset and
+    # every batch record on it vanish from the API; the cache carries the old
+    # table's days across the changeover so the trend keeps its continuity.
+    for r in snaps_by.values():
+        r.setdefault("table", out["table"])
+    cached = load_cache(name)
+    for r in snaps_by.values():
+        cached[r["started"].date().isoformat()] = cache_entry(r)
+    save_cache(name, cached)
+    for key, c in cached.items():
+        day = date.fromisoformat(key)
+        if day not in snaps_by and day >= cutoff.date():
+            snaps_by[day] = cache_row(c)
+            if c.get("table") and c["table"] != out["table"]:
+                out.setdefault("previous_tables", set()).add(c["table"])
+
     today = datetime.now(timezone.utc).date()
     for n in range(days + 1):
         day = today - timedelta(days=n)
@@ -422,8 +481,13 @@ def collect_sandbox(token, conf, sb: dict, days: int, cutoff: datetime) -> dict:
             "ready": ["" if done is None else ("Y" if done < mark else "N")
                       for mark in READY_MARKS],
             "records": s["records"] if s else "",
+            "table": s.get("table", "") if s else "",
             "batch_id": s["id"] if s else "", "job_id": e["id"] if e else ""})
 
+    if out.get("previous_tables"):
+        out["notes"].append("history spans a dataset changeover: earlier days "
+                            "are from " + ", ".join(sorted(out["previous_tables"]))
+                            + " (local cache)")
     n_s, n_e = len(snaps_by), len(evals_by)
     n_od = len(out["on_demand"])
     n_paired = sum(1 for r in out["on_demand"] if r["export_id"])
@@ -474,7 +538,7 @@ DAILY_COLS = ["Sandbox", "Date", "Eval started (UTC)", "Eval ended (UTC)",
               "Snapshot completed (UTC)", "Snapshot duration",
               "Gap: eval end -> snapshot completed", "ready_by_0800_utc",
               "ready_by_0900_utc", "Snapshot duration RAG", "Records",
-              "Snapshot batch id", "Segment job id"]
+              "Snapshot table", "Snapshot batch id", "Segment job id"]
 
 
 def daily_values(d: dict) -> list:
@@ -483,7 +547,7 @@ def daily_values(d: dict) -> list:
             fmt_time(d["snap_started"]), fmt_time(d["snap_completed"]),
             st.fmt_dur(d["snap_seconds"]), st.fmt_dur(d["gap_seconds"]),
             d["ready"][0], d["ready"][1], st.run_rag(d["snap_seconds"]),
-            d["records"], d["batch_id"], d["job_id"]]
+            d["records"], d["table"], d["batch_id"], d["job_id"]]
 
 
 def write_xlsx(results: list[dict], conf: dict, label: str,
@@ -663,7 +727,7 @@ def write_xlsx(results: list[dict], conf: dict, label: str,
                     rag(cell, "GREEN" if v == "Y" else "RED")
                 if c in (8, 12) and d["snap_seconds"] is not None:
                     rag(cell, st.run_rag(d["snap_seconds"]))
-    widths(dy, [16, 12, 20, 20, 12, 20, 20, 12, 16, 12, 12, 12, 14, 28, 38])
+    widths(dy, [16, 12, 20, 20, 12, 20, 20, 12, 16, 12, 12, 12, 14, 46, 28, 38])
 
     # ---- On-demand evals ------------------------------------------------------
     od = wb.create_sheet("On-demand evals")
