@@ -2530,59 +2530,6 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
                 italic=True, color="666666")
         r += 1
 
-    # ---- Audience complexity (beta): the business-facing headline --------
-    tallies = [(res["title"], res.get("complexity_tally"))
-               for res in results if res.get("complexity_tally")]
-    if tallies:
-        r += 2
-        ws.cell(r, 1, "AUDIENCE COMPLEXITY (beta) -- not all audiences are "
-                "created equal; the RED ones can slow the nightly batch run on "
-                "their own:").font = Font(bold=True, color="C00000")
-        r += 1
-        cx_hdr = ["Sandbox", "RED", "AMBER", "GREEN", "Scored (rule-based)"]
-        for c, nm in enumerate(cx_hdr, 1):
-            cell = ws.cell(r, c, nm)
-            cell.font, cell.fill = head_font, head_fill
-        r += 1
-        for title, t in tallies:
-            ws.cell(r, 1, title)
-            for c, grade in ((2, "RED"), (3, "AMBER"), (4, "GREEN")):
-                cell = ws.cell(r, c, t[grade])
-                bg, fg = snapshot_tables.RAG_COLOURS[grade]
-                cell.fill = PatternFill("solid", fgColor=bg)
-                cell.font = Font(bold=True, color=fg)
-                cell.alignment = center
-            ws.cell(r, 5, sum(t.values())).alignment = center
-            r += 1
-        # The worst offenders, so nobody has to go looking.
-        worst = sorted((row for res in results for row in (res.get("audiences") or [])
-                        if row[20] == "RED"), key=lambda x: -(x[19] or 0))[:15]
-        if worst:
-            r += 1
-            ws.cell(r, 1, f"Top {len(worst)} by score (full list and the "
-                    f"reasons on the Audiences tab, filter Complexity RAG):"
-                    ).font = Font(italic=True, color="666666")
-            r += 1
-            for c, nm in enumerate(["Sandbox", "Score", "Audience", "Why"], 1):
-                cell = ws.cell(r, c, nm)
-                cell.font, cell.fill = head_font, head_fill
-            r += 1
-            for row in worst:
-                ws.cell(r, 1, row[0])
-                sc = ws.cell(r, 2, row[19])
-                bg, fg = snapshot_tables.RAG_COLOURS["RED"]
-                sc.fill = PatternFill("solid", fgColor=bg)
-                sc.font = Font(bold=True, color=fg)
-                sc.alignment = center
-                ws.cell(r, 3, row[1])
-                ws.cell(r, 4, row[21])
-                r += 1
-        r += 1
-        ws.cell(r, 1, "Beta: the weights follow the published guidance on "
-                "expensive AEP segments (lookback window, lookup joins, "
-                "aggregations, base audience size) and are a first cut. See "
-                "the How to Use tab.").font = Font(italic=True, color="666666")
-
     # Author / provenance footer, so the file can be traced back to a person as
     # well as to a script.
     r += 1

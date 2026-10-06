@@ -568,7 +568,7 @@ sequences, condition count, huge value lists and multiple merge policies.
 Pure functions, no network: `score_audience(audience, pql_tree,
 base_populations)` returns the score, the RAG, a plain-English *why* and the
 raw features. The Data Dictionary calls it for every rule-based audience and
-puts the results in the Audiences tab and a Summary block. Edit the weights at
+puts the results in the Audiences tab. Edit the weights at
 the top of the file.
 
 ## data_dictionary_v3.py
