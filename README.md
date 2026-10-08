@@ -561,6 +561,34 @@ descriptions on file were written in a Claude Code session instead.
 python audience_renamer.py        # refuses: "IN DEVELOPMENT and parked -- it is not for use"
 ```
 
+## permissions_audit.py
+
+Who can do what in AEP, and how they got it. Reads the Access Control API —
+every role with its permission sets, sandboxes and labels, and every subject
+in each role (users, user groups exploded to their members, API credentials)
+— and flattens it to one row per subject × role × permission set, so "who has
+manage-datasets", "who can see any dashboard", "what can this person do" and
+"who is in this role" are each a filter. Also lists the audit-log events on
+roles and permissions for the last `--days`. One workbook,
+`output/permissions_<org>.xlsx`: *Who has what*, *Permission sets* (the
+catalogue, with how many roles and people hold each), *Roles*, *Role members*,
+*Role changes*. The console prints the answer to the filter you gave.
+
+Names: the Access Control API returns IMS ids, not emails. They are resolved
+through Adobe's User Management API when the credential is entitled to it
+(add the **User Management API** to the integration in the Developer Console
+if the run says the directory is unavailable), and every name learned is kept
+in `output/user_directory_cache.json` so it survives a day the directory
+refuses. Group ids stay numeric until the same API can name them.
+
+```
+python permissions_audit.py --permission=manage-datasets
+python permissions_audit.py --permission=dashboard --sandbox=prod
+python permissions_audit.py --category="Data Management"
+python permissions_audit.py --user=someone@tesco.com
+python permissions_audit.py --role="Sandbox Administrators" --days=90
+```
+
 ## overlap_report.py  *(folded into the Data Dictionary)*
 
 The Profile store's **dataset overlap report**, turned from a wall of
