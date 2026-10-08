@@ -58,7 +58,6 @@ keys you stored -- run `credential_validator_v2.py list` to see them.
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import os
@@ -777,17 +776,20 @@ def _print_breakdown(title, colour, labels, top=8):
 
 
 def write_csv(rows, client: str):
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y-%m-%d %H%M%S")
-    path = OUTPUT_DIR / f"Dataset Census - {client} - {stamp}.csv"
-    cols = ["sandbox", "dataset", "dataset_id", "profile_tag", "managed_by",
+    """One workbook, output/Dataset Census - <client>.xlsx, overwritten each run."""
+    from house_xlsx import Book, stable_name
+    cols = ["Sandbox", "Dataset", "Dataset id", "Profile tag", "Managed by",
+            "Schema", "Schema id", "Class id", "Bucket", "Note"]
+    keys = ["sandbox", "dataset", "dataset_id", "profile_tag", "managed_by",
             "schema", "schema_id", "class_id", "bucket", "note"]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols)
-        w.writeheader()
-        w.writerows(rows)
+    data = [[r.get(k, "") for k in keys] for r in rows]
+    book = Book(f"Dataset Census -- {client}",
+                "Every profile-enabled dataset, who manages it and which bucket it "
+                "falls in; the census behind the Addressable Audience position.")
+    book.sheet("Census", cols, data, widths=[16, 50, 28, 26, 16, 44, 58, 58, 16, 50],
+               wrap_cols=(10,), tab_colour="7030A0")
+    path = book.save(OUTPUT_DIR / f"{stable_name('Dataset Census - ' + client)}.xlsx")
     logger.info(f"Wrote {path}")
-
 
 # ----------------------------------------------------------------------------
 # Credential menu + sandbox picker  (shared house style)

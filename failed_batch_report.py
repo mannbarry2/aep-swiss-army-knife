@@ -22,7 +22,6 @@ Generated reports are written under ./output/ (gitignored).
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import ssl
@@ -267,41 +266,30 @@ def _fmt_ts(ms):
 
 
 def write_report(batches, sandbox, root: Path = DEFAULT_OUTPUT_ROOT):
-    root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_file = root / f"failed_batches_{sandbox}_{stamp}.csv"
-
-    # Determine the max number of related objects so columns are stable.
-    max_related = 0
-    for info in batches.values():
-        max_related = max(max_related, len(info.get("relatedObjects") or []))
-
-    fieldnames = ["Batch ID", "Status", "Created", "Updated",
-                  "Input Records", "Failed Records"]
+    """One workbook, output/failed_batches_<sandbox>.xlsx, overwritten each run."""
+    from house_xlsx import Book
+    max_related = max((len(info.get("relatedObjects") or []) for info in batches.values()), default=0)
+    cols = ["Batch ID", "Status", "Created", "Updated", "Input Records", "Failed Records"]
     for i in range(1, max_related + 1):
-        fieldnames += [f"Related Object {i} Type", f"Related Object {i} ID"]
-
-    with open(out_file, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for batch_id, info in batches.items():
-            metrics = info.get("metrics") or {}
-            row = {
-                "Batch ID": batch_id,
-                "Status": info.get("status", ""),
-                "Created": _fmt_ts(info.get("created")),
-                "Updated": _fmt_ts(info.get("updated")),
-                "Input Records": metrics.get("inputRecordCount", ""),
-                "Failed Records": metrics.get("failedRecordCount", ""),
-            }
-            for idx, obj in enumerate(info.get("relatedObjects") or [], 1):
-                row[f"Related Object {idx} Type"] = obj.get("type", "")
-                row[f"Related Object {idx} ID"] = obj.get("id", "")
-            writer.writerow(row)
-
+        cols += [f"Related Object {i} Type", f"Related Object {i} ID"]
+    rows = []
+    for batch_id, info in batches.items():
+        metrics = info.get("metrics") or {}
+        row = [batch_id, info.get("status", ""), _fmt_ts(info.get("created")),
+               _fmt_ts(info.get("updated")), metrics.get("inputRecordCount"),
+               metrics.get("failedRecordCount")]
+        for obj in info.get("relatedObjects") or []:
+            row += [obj.get("type", ""), obj.get("id", "")]
+        rows.append(row)
+    book = Book(f"Failed batches -- {sandbox}",
+                "Every batch that failed in the window, with its related objects "
+                "(dataset, schema, flow) so the failure can be traced to a source.")
+    book.sheet("Failed batches", cols, rows,
+               widths=[30, 10, 24, 24, 14, 14] + [16, 30] * max_related,
+               number_formats={5: "#,##0", 6: "#,##0"}, tab_colour="C00000")
+    out_file = book.save(root / f"failed_batches_{sandbox}.xlsx")
     logger.info(f"Report written: {out_file}  ({len(batches)} row(s))")
     return out_file
-
 
 def parse_args(argv):
     """CLI: a positional credential name (keyring service name) plus

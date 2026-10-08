@@ -31,7 +31,7 @@ credential can read it (same lookup as the Data Dictionary); tech accounts
 listed separately, never dropped.
 
 Output: one console table per target dataset, and everything to
-output/audit_hunt_<yyyy-mm-dd>.csv. API errors are printed with their status;
+output/audit_hunt_<sandbox>.xlsx. API errors are printed with their status;
 a request is retried at most twice.
 
 Usage:
@@ -43,7 +43,6 @@ Usage:
 
 from __future__ import annotations
 
-import csv
 import json
 import re
 import sys
@@ -474,14 +473,24 @@ def main():
     print(f"  {A['bold']}People seen:{A['reset']} " + (", ".join(people) or "(none)"))
 
     # ---- CSV ------------------------------------------------------------
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"audit_hunt_{datetime.now(timezone.utc):%Y-%m-%d}.csv"
-    cols = ["target", "timestamp_utc", "source", "action", "user", "user_raw", "client",
+    from house_xlsx import Book
+    cols = ["Target", "Timestamp (UTC)", "Source", "Action", "User", "User (raw id)",
+            "Client", "Technical", "Records", "Object", "Id", "Detail"]
+    keys = ["target", "timestamp_utc", "source", "action", "user", "user_raw", "client",
             "technical", "records", "object", "id", "detail"]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols)
-        w.writeheader()
-        w.writerows(rows)
+    book = Book(f"Audit hunt -- {sandbox}",
+                "Who loaded data into the target datasets in the window, from the "
+                "audit log, Catalog batches, Query Service queries and schedules. "
+                "'Technical' = a service / tech account rather than a person.",
+                )
+    book.sheet("Findings", cols, [[r.get(k, "") for k in keys] for r in rows],
+               widths=[36, 20, 16, 40, 44, 44, 26, 9, 12, 50, 38, 80],
+               facts=[("Org", conf["org_id"]), ("Sandbox", sandbox),
+                      ("Window (UTC)", f"{fmt(a)} -> {fmt(b)}"),
+                      ("Targets", ", ".join(opts["targets"]))],
+               number_formats={9: "#,##0"}, red_when={8: "yes"}, wrap_cols=(12,),
+               tab_colour="C00000")
+    path = book.save(OUTPUT_DIR / f"audit_hunt_{sandbox}.xlsx")
     print()
     logger.info(f"Wrote {len(rows)} finding(s) to {path}")
 

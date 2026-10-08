@@ -76,7 +76,6 @@ fallback files are gitignored -- never commit them; they hold the client_secret.
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import re
@@ -999,24 +998,6 @@ def write_xlsx(rows: list[dict]) -> Path | None:
     return path
 
 
-def write_csv(rows: list[dict]) -> Path:
-    """Fallback export when openpyxl is unavailable -- same rows/columns, no
-    formatting."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / (f"dd_audience_countdown_{_safe_stem(TENANT)}_"
-                         f"{_timestamp()}.csv")
-    with path.open("w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.writer(fh)
-        writer.writerow([h for _k, h, _w in _COLUMNS])
-        for row in rows:
-            writer.writerow([
-                ("TRUE" if row.get("keepAlive") else "") if k == "keepAlive"
-                else ("" if row.get(k) is None else row.get(k))
-                for k, _h, _w in _COLUMNS
-            ])
-    return path
-
-
 def print_console_summary(rows: list[dict]) -> None:
     """The required console summary: total DD audiences, count expiring within
     7 days, count tagged keep-alive."""
@@ -1122,9 +1103,8 @@ def run_for_cred(service: str, flags: dict) -> None:
         logger.info(f"XLSX: {xlsx_path.relative_to(SCRIPT_DIR)} "
                     f"({len(rows)} audience(s))")
     else:
-        csv_path = write_csv(rows)
-        logger.info(f"CSV:  {csv_path.relative_to(SCRIPT_DIR)} "
-                    f"({len(rows)} audience(s))")
+        logger.error("openpyxl not installed -- nothing written "
+                     "(pip install -r requirements.txt).")
 
 
 def parse_args(argv: list[str]) -> tuple[dict, list[str]]:

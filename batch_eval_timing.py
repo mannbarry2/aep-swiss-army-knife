@@ -23,7 +23,7 @@ IMS, then:
      via /segment/definitions, so SYSTEM segments get a name too), the schedule
      time it fired at, and the scheduleId -- so the export can be filtered by
      audience name or grouped by schedule.
-  5. Exports every job to ./output/batch_eval_timing_<sandbox>_<stamp>.csv
+  5. Exports every job to ./output/batch_eval_timing_<sandbox>.xlsx
      (job_id, status, audience_names, segment_ids, schedule_id, source,
      scheduled_utc, ended_utc, duration, num_segments).
 
@@ -65,7 +65,7 @@ FAE audit mode (--fae-audit): inventory Flexible Audience Evaluation runs
 the 2/day/sandbox cap and year-to-date vs the 50/year prod cap. NOTE: neither
 /segment/jobs nor the AEP Audit API records the triggering USER, so per-user
 attribution isn't possible -- consumption is reported by day/run and the gap is
-flagged. Writes output/fae_audit_<sandbox>_<stamp>.csv.
+flagged. Writes output/fae_audit_<sandbox>.xlsx.
 
 Verify-run mode (--verify-run): prove whether a specific job evaluated a set of
 audiences. Give it --job=<jobId> or --date=YYYY-MM-DD (finds that day's scheduler
@@ -75,7 +75,7 @@ scheduler job's segments[] holds only a trigger entry -- the counter holds the
 1600+ segments it actually evaluated). This settles "did the 04:00 run evaluate it,
 or only a later api job?": if PRESENT in the 04:00 scheduled run, evaluation
 happened then and a later count change is a metric/display lag, not an eval lag.
-Writes output/verify_run_<sandbox>_<stamp>.csv.
+Writes output/verify_run_<sandbox>.xlsx.
 
 Schedules mode (--schedules): GET /config/schedules and print every sandbox
 schedule -- id, state, cron/trigger time, and (for the batch_segmentation entry)
@@ -83,12 +83,11 @@ whether it targets ALL segments ['*'] or a specific list (ids resolved to names)
 This is the direct answer to "is the estate really on the 4am schedule, or is it
 materialised later by an api-triggered job?" -- if the schedule is active, at
 04:00, and targets ALL, yet audiences only refresh hours later, the scheduled run
-isn't what evaluates the estate. Writes output/schedules_<sandbox>_<stamp>.csv.
+isn't what evaluates the estate. Writes output/schedules_<sandbox>.xlsx.
 """
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import ssl
@@ -101,6 +100,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+from house_xlsx import Book
 
 # ----------------------------------------------------------------------------
 # Constants
@@ -695,45 +695,36 @@ def print_duration_histogram(durations: list[float], bins: int = 10) -> None:
 
 def write_segment_jobs_csv(jobs: list[dict], sandbox: str, stamp: str,
                            resolve=None) -> Path:
-    """Write every job to output/batch_eval_timing_<sandbox>_<stamp>.csv with
-    one row per job: its evaluation duration PLUS the segment name(s) it ran and
-    the schedule that triggered it, so the sheet can be filtered by audience name
-    or grouped by schedule. Returns the path written."""
+    """Write every job to output/batch_eval_timing_<sandbox>.xlsx (one file,
+    overwritten each run): its evaluation duration PLUS the segment name(s) it
+    ran and the schedule that triggered it, so the sheet can be filtered by
+    audience name or grouped by schedule. Returns the path written."""
     resolve = resolve or (lambda s: "")
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"batch_eval_timing_{sandbox}_{stamp}.csv"
-    cols = [
-        "job_id", "status", "audience_names", "segment_ids",
-        "schedule_id", "source", "created_by", "triggered_utc",
-        "scheduled_utc", "ended_utc",
-        "duration_seconds", "duration_human", "num_segments",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for j in jobs:
-            started, ended = job_times(j)
-            dur = (ended - started).total_seconds() if started and ended else None
-            ids = sorted(job_segment_ids(j))
-            names = job_audience_names(j, resolve)
-            triggered = to_dt(j.get("creationTime")) or started
-            w.writerow([
-                j.get("id") or "",
-                j.get("status") or "",
-                " | ".join(names),
-                " | ".join(ids),
-                job_schedule_id(j),
-                j.get("source") or "",
-                job_created_by(j),
-                fmt_utc_bst(triggered),
-                started.isoformat() if started else "",
-                ended.isoformat() if ended else "",
-                f"{dur:.0f}" if dur is not None and dur >= 0 else "",
-                fmt_dur(dur) if dur is not None and dur >= 0 else "",
-                len(ids),
-            ])
-    return path
-
+    cols = ["Job id", "Status", "Audience name(s)", "Segment ids", "Schedule id",
+            "Source", "Created by", "Triggered (UTC / BST)", "Scheduled (UTC)",
+            "Ended (UTC)", "Duration (seconds)", "Duration", "Segments"]
+    rows = []
+    for j in jobs:
+        started, ended = job_times(j)
+        dur = (ended - started).total_seconds() if started and ended else None
+        ids = sorted(job_segment_ids(j))
+        names = job_audience_names(j, resolve)
+        triggered = to_dt(j.get("creationTime")) or started
+        rows.append([
+            j.get("id") or "", j.get("status") or "", " | ".join(names),
+            " | ".join(ids), job_schedule_id(j), j.get("source") or "",
+            job_created_by(j), fmt_utc_bst(triggered),
+            fmt_dt(started), fmt_dt(ended),
+            int(dur) if dur is not None and dur >= 0 else None,
+            fmt_dur(dur) if dur is not None and dur >= 0 else "", len(ids),
+        ])
+    book = Book(f"Batch evaluation timing -- {sandbox}",
+                "Every batch segment job in the sandbox, newest first: how long it "
+                "took, which audiences it evaluated and what triggered it. KILLED / "
+                "FAILED jobs are listed but their duration is the time to abandonment.")
+    book.sheet("Jobs", cols, rows, widths=[38, 11, 60, 40, 38, 10, 24, 30, 20, 20, 12, 12, 9],
+               number_formats={11: "#,##0"}, wrap_cols=(3, 4), tab_colour="0070C0")
+    return book.save(OUTPUT_DIR / f"batch_eval_timing_{sandbox}.xlsx")
 
 # ----------------------------------------------------------------------------
 # Scheduled-segmentation config -- "is the estate really on the 4am schedule?"
@@ -854,33 +845,24 @@ def print_schedules(scheds: list[dict], resolve) -> None:
 
 def write_schedules_csv(scheds: list[dict], sandbox: str, stamp: str,
                         resolve) -> Path:
-    """Write output/schedules_<sandbox>_<stamp>.csv -- one row per schedule with
-    state, cron/time, what it targets (all vs named segments), and audit fields."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"schedules_{sandbox}_{stamp}.csv"
-    cols = ["schedule_id", "name", "type", "state", "cron", "trigger_time_utc",
-            "targets", "target_names", "created_by", "update_time_utc"]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for s in scheds:
-            cron = (s.get("schedule") or "").strip()
-            summary, detail = schedule_targets(s, resolve)
-            updated = schedule_updated(s)
-            w.writerow([
-                s.get("id") or "",
-                s.get("name") or "",
-                s.get("type") or "",
-                s.get("state") or "",
-                cron,
-                cron_time_utc(cron),
-                summary,
-                detail,
-                s.get("createdBy") or s.get("owner") or "",
-                updated.isoformat() if updated else "",
-            ])
-    return path
-
+    """Write output/schedules_<sandbox>.xlsx -- one row per schedule with state,
+    cron/time, what it targets (all vs named segments), and audit fields."""
+    cols = ["Schedule id", "Name", "Type", "State", "Cron", "Trigger time (UTC)",
+            "Targets", "Target names", "Created by", "Updated (UTC)"]
+    rows = []
+    for sc in scheds:
+        cron = (sc.get("schedule") or "").strip()
+        summary, detail = schedule_targets(sc, resolve)
+        updated = schedule_updated(sc)
+        rows.append([sc.get("id") or "", sc.get("name") or "", sc.get("type") or "",
+                     sc.get("state") or "", cron, cron_time_utc(cron), summary, detail,
+                     sc.get("createdBy") or sc.get("owner") or "", fmt_dt(updated)])
+    book = Book(f"Scheduled segmentation -- {sandbox}",
+                "The sandbox's /config/schedules: the batch_segmentation entry is the "
+                "daily run; 'Targets' says whether it covers ALL segments (*) or a list.")
+    book.sheet("Schedules", cols, rows, widths=[38, 30, 22, 10, 18, 12, 28, 60, 24, 20],
+               wrap_cols=(8,), tab_colour="0070C0")
+    return book.save(OUTPUT_DIR / f"schedules_{sandbox}.xlsx")
 
 def run_schedules(headers, sandbox) -> None:
     """--schedules mode: dump the sandbox scheduled-segmentation config and write
@@ -1012,29 +994,25 @@ def print_verify(job: dict, ids: list[str], resolve) -> None:
 
 def write_verify_csv(job: dict, ids: list[str], resolve,
                      sandbox: str, stamp: str) -> Path:
-    OUTPUT_DIR.mkdir(exist_ok=True)
     manifest = job_evaluated_manifest(job)
     started, _ = job_times(job)
-    path = OUTPUT_DIR / f"verify_run_{sandbox}_{stamp}.csv"
-    cols = ["audience_id", "audience_name", "present", "count_in_job",
-            "job_id", "job_source", "schedule_id", "job_fired_utc", "job_status"]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for i in ids:
-            key = str(i)
-            in_it = key in manifest
-            cnt = manifest.get(key)
-            w.writerow([
-                i, resolve(i), "present" if in_it else "absent",
-                cnt if isinstance(cnt, int) else "",
-                job.get("id") or "", job.get("source") or "",
-                job_schedule_id(job),
-                started.isoformat() if started else "",
-                job.get("status") or "",
-            ])
-    return path
-
+    cols = ["Audience id", "Audience name", "Present", "Count in job", "Job id",
+            "Job source", "Schedule id", "Job fired (UTC)", "Job status"]
+    rows = []
+    for i in ids:
+        key = str(i)
+        in_it = key in manifest
+        cnt = manifest.get(key)
+        rows.append([i, resolve(i), "present" if in_it else "absent",
+                     cnt if isinstance(cnt, int) else None, job.get("id") or "",
+                     job.get("source") or "", job_schedule_id(job), fmt_dt(started),
+                     job.get("status") or ""])
+    book = Book(f"Verify run -- {sandbox}",
+                "Did this job actually evaluate these audiences? PRESENT means the "
+                "audience is in the job's metrics.segmentedProfileCounter manifest.")
+    book.sheet("Verify", cols, rows, widths=[38, 46, 10, 14, 38, 12, 38, 20, 12],
+               number_formats={4: "#,##0"}, red_when={3: "absent"}, tab_colour="0070C0")
+    return book.save(OUTPUT_DIR / f"verify_run_{sandbox}.xlsx")
 
 def run_verify(headers, sandbox, job_sel, date_sel, ids) -> None:
     if not ids:
@@ -1190,28 +1168,23 @@ def _print_fae(rows, per_day, ytd, lo, hi_day) -> None:
 
 
 def _write_fae_csv(rows, sandbox, stamp) -> Path:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"fae_audit_{sandbox}_{stamp}.csv"
-    cols = ["triggered_utc", "triggered_date", "run_of_day", "over_daily_quota",
-            "created_by", "job_id", "status", "num_audiences",
-            "audiences_evaluated", "segment_ids", "duration_human"]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for r in rows:
-            w.writerow([
-                fmt_utc_bst(r["triggered"]),
-                r["day"], r["run_of_day"],
-                "yes" if r["run_of_day"] > FAE_QUOTA_PER_DAY else "",
-                "api/FAE (user not recorded)",
-                r["job_id"], r["status"] or "",
-                len(r["ids"]),
-                " | ".join(r["names"]),
-                " | ".join(r["ids"]),
-                fmt_dur(r["dur"]) if r["dur"] is not None else "",
-            ])
-    return path
-
+    cols = ["Triggered (UTC / BST)", "Date", "Run of day", "Over daily quota",
+            "Created by", "Job id", "Status", "Audiences", "Audiences evaluated",
+            "Segment ids", "Duration"]
+    out = []
+    for r in rows:
+        out.append([fmt_utc_bst(r["triggered"]), r["day"], r["run_of_day"],
+                    "yes" if r["run_of_day"] > FAE_QUOTA_PER_DAY else "",
+                    "api/FAE (user not recorded)", r["job_id"], r["status"] or "",
+                    len(r["ids"]), " | ".join(r["names"]), " | ".join(r["ids"]),
+                    fmt_dur(r["dur"]) if r["dur"] is not None else ""])
+    book = Book(f"Flexible Audience Evaluation audit -- {sandbox}",
+                f"On-demand (source=api) evaluation runs against the {FAE_QUOTA_PER_DAY}/day "
+                f"and {FAE_QUOTA_PER_YEAR_PROD}/year quotas. The triggering user is not "
+                "recorded by AEP.")
+    book.sheet("FAE runs", cols, out, widths=[30, 12, 8, 10, 26, 38, 11, 10, 60, 40, 10],
+               wrap_cols=(9, 10), red_when={4: "yes"}, tab_colour="0070C0")
+    return book.save(OUTPUT_DIR / f"fae_audit_{sandbox}.xlsx")
 
 # ----------------------------------------------------------------------------
 # Single-audience probe -- "is THIS audience stuck, or just new?"

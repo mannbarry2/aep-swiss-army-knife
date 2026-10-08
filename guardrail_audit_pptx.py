@@ -10,7 +10,7 @@ measurement in bold, with a headline line underneath.
 
 Usage:
     python guardrail_audit_pptx.py                              # latest prod audit in output/
-    python guardrail_audit_pptx.py output/guardrail_audit_prod_2026-09-22.json
+    python guardrail_audit_pptx.py --sandbox=prod [--date=2026-09-22]
     python guardrail_audit_pptx.py --sandbox=prod --date=2026-09-22
     python guardrail_audit_pptx.py --all-columns     # every baseline column + previous run, not just start vs now
 
@@ -53,19 +53,27 @@ HEADLINE_Y = 6.42
 FOOTER_Y = 7.08
 
 
-def latest_json(sandbox: str | None, date: str | None) -> Path:
-    files = sorted(OUTPUT_DIR.glob(f"guardrail_audit_{sandbox or '*'}_{date or '*'}.json"))
-    files = [f for f in files if "history" not in f.name]
-    if not files:
-        sys.exit(f"no guardrail_audit_*.json in {OUTPUT_DIR}")
-    return files[-1]
+def latest_report(sandbox: str | None, date: str | None) -> tuple[dict, Path]:
+    """The run to build from: the latest entry (or the dated one) in the history
+    store guardrail_audit.py keeps -- the audit itself writes one workbook and
+    no per-run JSON any more."""
+    sandbox = sandbox or "prod"
+    hist_path = OUTPUT_DIR / f"guardrail_audit_history_{sandbox}.json"
+    try:
+        hist = json.loads(hist_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        sys.exit(f"no {hist_path.name} in {OUTPUT_DIR} -- run guardrail_audit.py first")
+    runs = [h for h in hist if not date or h.get("date") == date]
+    if not runs:
+        sys.exit(f"no run for {date} in {hist_path.name}")
+    h = runs[-1]
+    return {"sandbox": sandbox, "date": h["date"], "checks": h["checks"]}, hist_path
 
 
-def load(json_path: Path, all_columns: bool = False):
+def load(rep: dict, all_columns: bool = False):
     """The deck is deliberately simple: the FIRST baseline column (how things
     stood at the start of the project) and Now. --all-columns adds every
     baseline column plus the previous run from the history file."""
-    rep = json.loads(json_path.read_text(encoding="utf-8"))
     sandbox, date = rep["sandbox"], rep["date"]
     cols = []
     try:
@@ -192,7 +200,7 @@ def build(rep, cols, out: Path):
             10.5, bold=True, color=HEADLINE)
     textbox(FOOTER_Y, 0.3,
             f"AEP Guardrail Audit — before/after one-pager  ·  {sandbox}  ·  generated {date}  ·  "
-            f"detail: guardrail_audit_{sandbox}_{date}.json", 8.5, color=MUTED)
+            f"detail: guardrail_audit_{sandbox}.xlsx", 8.5, color=MUTED)
     prs.save(out)
     return out
 
@@ -201,10 +209,9 @@ def main():
     args = sys.argv[1:]
     sandbox = next((a.split("=", 1)[1] for a in args if a.startswith("--sandbox=")), None)
     date = next((a.split("=", 1)[1] for a in args if a.startswith("--date=")), None)
-    positional = [a for a in args if not a.startswith("-")]
-    json_path = Path(positional[0]) if positional else latest_json(sandbox, date)
-    rep, cols = load(json_path, all_columns="--all-columns" in args)
-    out = json_path.with_suffix(".pptx")
+    rep, _ = latest_report(sandbox, date)
+    rep, cols = load(rep, all_columns="--all-columns" in args)
+    out = OUTPUT_DIR / f"guardrail_audit_{rep['sandbox']}.pptx"
     build(rep, cols, out)
     print(f"deck: {out}")
 

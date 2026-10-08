@@ -134,9 +134,16 @@ Every tool that writes a workbook or deck follows these:
 - **Data Dictionary style.** Confidential banner, title and italic note, blue
   header row with filters, frozen panes, fixed column widths and uniform row
   heights. A Summary tab first, then the detail tabs.
-- **One file, overwritten.** New tools write a single workbook with a stable
-  name and replace it on each run: no timestamped copies and no CSV alongside,
-  so `output/` doesn't fill up.
+- **One file, overwritten.** Every tool writes a single workbook with a stable
+  name and replaces it on each run: no timestamped copies, no CSV or JSON
+  alongside, so `output/` doesn't fill up. The shared writer is
+  [`house_xlsx.py`](house_xlsx.py) (`Book(...).sheet(...).save(...)`): it
+  applies the banner, author, header style, filters, frozen panes, widths and
+  RAG fills, and wraps an existing workbook when a tool folds its tabs into the
+  Data Dictionary. The only non-workbook files left are caches and inputs
+  (`snapshot_history_cache/`, `aep_usage_log_cache/`, the guardrail history
+  and baseline JSON) and the Data Dictionary's full-PQL sidecar, which exists
+  because Excel cannot hold a long rule.
 
 ---
 
@@ -635,7 +642,11 @@ dot-notation path with Ctrl-F; the Tab column says which sheet it's on),
 **Schemas** (one row per kept schema), **Datasets** (friendly name → SQL table
 name), **Audiences** (every audience, its rule, and — new in v3.4.6 — its
 **complexity score**, see below), **Snapshot Summary** / **Snapshot Tables**
-(folded in from `snapshot_tables.py`), then **one tab per schema**. Each schema tab opens with a title block
+(folded in from `snapshot_tables.py`), **Overlap cut-list** / **Overlap full
+report** (folded in from `overlap_report.py`, v3.4.7: which datasets the
+profiles are built from, what expiring one would save, and — because a sudden
+new combination is a new route in — where a jump in the profile count came
+from), then **one tab per schema**. Each schema tab opens with a title block
 (class, dataset count, field count, identities, relationships, modified date,
 `$id`) followed by every field — dot-notation path, data type, friendly name,
 required flag, identity, and relationship → target. Every sheet is marked

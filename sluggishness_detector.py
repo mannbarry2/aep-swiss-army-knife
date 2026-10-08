@@ -74,7 +74,6 @@ keyring can read the vault):
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import ssl
@@ -708,27 +707,28 @@ def _print_count_row(x, now, C, problem=False) -> None:
 
 
 def _write_csv(assessed, ov_start, ov_end, ov_job, sandbox, stamp) -> Path:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"count_board_{sandbox}_{stamp}.csv"
-    cols = ["status", "name", "id", "method", "is_sos", "feeder_count",
-            "built_utc", "built_bst", "count",
-            "overnight_job_id", "overnight_completed_utc", "reason"]
+    """One workbook, output/count_board_<sandbox>.xlsx, overwritten each run."""
+    from house_xlsx import Book
+    cols = ["Status", "Name", "Id", "Method", "SoS", "Feeders", "Built (UTC)",
+            "Built (BST)", "Count", "Overnight job id", "Overnight completed (UTC)",
+            "Reason"]
     ov_id = (ov_job or {}).get("id") or ""
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(cols)
-        for x in assessed:
-            created = x["created"]
-            w.writerow([
-                x["status"], x["name"], x["id"], x["method"],
-                "yes" if x["is_sos"] else "", x["feeder_count"],
-                iso(created),
-                created.astimezone(_BST).isoformat() if created else "",
-                x["count"] if isinstance(x["count"], int) else "",
-                ov_id, iso(ov_end), x["reason"],
-            ])
-    return path
-
+    rows = []
+    for x in assessed:
+        created = x["created"]
+        rows.append([x["status"], x["name"], x["id"], x["method"],
+                     "yes" if x["is_sos"] else "", x["feeder_count"], iso(created),
+                     created.astimezone(_BST).isoformat() if created else "",
+                     x["count"] if isinstance(x["count"], int) else None,
+                     ov_id, iso(ov_end), x["reason"]])
+    book = Book(f"Audience count board -- {sandbox}",
+                "Which batch audiences have a count after the overnight run, which "
+                "are missing one, and which are too new to expect one yet.")
+    book.sheet("Count board", cols, rows,
+               widths=[10, 50, 38, 10, 6, 8, 26, 26, 14, 38, 26, 60],
+               number_formats={9: "#,##0"}, red_when={1: STATUS_MISSING},
+               wrap_cols=(12,), tab_colour="0070C0")
+    return book.save(OUTPUT_DIR / f"count_board_{sandbox}.xlsx")
 
 def _emit_json(assessed, sandbox, days, now, ov_start, ov_end, ov_job,
                json_target) -> None:

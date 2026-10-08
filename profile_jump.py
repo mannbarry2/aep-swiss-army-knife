@@ -23,7 +23,7 @@ metrics endpoint, which is a read query):
                     schema, its flow, merge policies or identity settings.
 
 Output: a UTC timeline on the console (facts and inferences kept apart) and
-output/profile_jump_<yyyy-mm-dd>.csv with every finding.
+output/profile_jump_prod.xlsx (one file, overwritten) with every finding.
 
 Usage:
     python profile_jump.py                       # defaults: the 5-6 Oct case
@@ -34,7 +34,6 @@ Usage:
 
 from __future__ import annotations
 
-import csv
 import json
 import sys
 import urllib.error
@@ -447,11 +446,19 @@ def main():
     print(f"  {'TIME':<20}{'SOURCE':<18}{'EVENT':<70}{'ACTOR':<36}RECORDS")
     for r in rows:
         print(f"  {r['timestamp_utc']:<20}{r['source']:<18}{r['event'][:68]:<70}{r['actor'][:34]:<36}{r['records']}")
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / f"profile_jump_{datetime.now(timezone.utc):%Y-%m-%d}.csv"
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=["timestamp_utc", "source", "event", "actor", "records", "detail", "kind"])
-        w.writeheader(); w.writerows(rows)
+    from house_xlsx import Book
+    keys = ["timestamp_utc", "source", "event", "actor", "records", "detail", "kind"]
+    book = Book(f"Profile jump -- dataset {o['dataset']}",
+                "What wrote records into the Profile store for this dataset, and who "
+                "or what triggered it: feeder dataflows and their runs, Catalog "
+                "batches, schema changes, sample profiles and audit events, as one "
+                "UTC timeline. 'kind' separates fact from inference.")
+    book.sheet("Timeline", ["Timestamp (UTC)", "Source", "Event", "Actor", "Records", "Detail", "Kind"],
+               [[r.get(k, "") for k in keys] for r in rows],
+               widths=[20, 18, 80, 40, 14, 90, 10], number_formats={5: "#,##0"},
+               wrap_cols=(3, 6), tab_colour="C00000",
+               facts=[("Dataset", o["dataset"]), ("Window (UTC)", f"{fmt(a)} -> {fmt(b)}")])
+    path = book.save(OUTPUT_DIR / "profile_jump_prod.xlsx")
     print(f"\nwrote {len(rows)} row(s) to {path}")
 
 

@@ -30,7 +30,7 @@ policy is NOT.
     where the count is also the saving.
   * A MULTI-ID row ("5d92...,5da7...": 900_000) is profiles both datasets
     contribute. Expiring either one alone saves NOTHING here -- the profile
-    survives on the other dataset. Shown in --csv, never in the cut-list.
+    survives on the other dataset. On the full report tab, never in the cut-list.
 
 That distinction is the whole point of the tool: summing every row a dataset
 appears in overstates its saving, sometimes wildly.
@@ -55,6 +55,12 @@ truncation). `--dataset-list FILE.xlsx` reads names from a spreadsheet instead
 -- any sheet with an ID-ish and a name-ish column. Unresolved IDs always pass
 through raw and are never dropped.
 
+Output: ONE workbook, output/overlap_<kind>_<sandbox>.xlsx, overwritten each
+run -- 'Overlap cut-list' and 'Overlap full report' tabs (house style). The
+same two tabs are folded into the Data Dictionary (data_dictionary_v3 calls
+collect() and add_sheets() from here), so this script is the standalone way
+to run just the overlap report.
+
 Read-only: it never creates, edits or deletes anything in AEP.
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
@@ -65,12 +71,10 @@ Usage:
     python overlap_report.py dataset aep-prod --sandbox=prod
     python overlap_report.py dataset aep-prod --sandbox=prod --date=2026-09-01
     python overlap_report.py dataset aep-prod --licensed=62500000
-    python overlap_report.py dataset aep-prod --csv                # full report
-    python overlap_report.py dataset aep-prod --json=output/raw.json
+    python overlap_report.py probe aep-prod --sandbox=prod            # which endpoints answer
     python overlap_report.py identity aep-prod --sandbox=prod
 """
 import argparse
-import csv
 import json
 import logging
 import os
@@ -83,6 +87,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aep_creds  # keyring-backed credential store (replaces creds/*.json)
+from house_xlsx import Book
 
 # ----------------------------------------------------------------------------
 # Constants
@@ -577,7 +582,7 @@ def print_cut_list(rows, licensed, total, high_threshold, smallest_first=False):
     print(f"  {C['dim']}Profiles ONLY this dataset contributes. Expiring it saves "
           f"exactly this many.{C['reset']}")
     print(f"  {C['dim']}Rows where two or more datasets share the profiles are "
-          f"excluded ({len(shared):,} of them) -- see --csv.{C['reset']}")
+          f"excluded ({len(shared):,} of them) -- see the full report tab.{C['reset']}")
     print()
     print(f"  {C['bold']}{'#':>3}  {'PROFILES':>14}  {'CUMULATIVE':>14}  "
           f"{'FLAG':<6} DATASET{C['reset']}")
@@ -677,51 +682,137 @@ def check_sum(rows, total) -> bool:
 # ----------------------------------------------------------------------------
 # Writers
 # ----------------------------------------------------------------------------
-def write_csv(rows, target: Path, report_dt, sandbox, kind) -> Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.writer(fh)
-        w.writerow([f"# {kind} report", f"sandbox={sandbox}",
-                    f"reportTimestamp={fmt_dt(report_dt)}",
-                    f"generated={datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"])
-        w.writerow(["rank", "row_type", "entity_count", "profiles",
-                    "cumulative_exclusive", "share_pct", "flag",
-                    "ids", "names", "description"])
-        cumulative = 0
-        rank = 0
-        for r in rows:                       # already sorted desc
-            rank += 1
+def ensure_opener(insecure: bool = False) -> None:
+    """Build the HTTPS opener once. The CLI does this from its flags; a caller
+    that imports this module (the Data Dictionary) calls it before collect()."""
+    global OPENER
+    if OPENER is None:
+        OPENER = build_opener(build_ssl_context(insecure))
+
+
+def collect(headers, sandbox: str, date: str | None = None,
+            dataset_list: Path | None = None) -> dict:
+    """Fetch the dataset overlap report and resolve names. Returns
+    {rows, report_dt, total, requested_date, error}; `error` is set (and rows
+    empty) when no report exists or the call failed -- never raises."""
+    out = {"rows": [], "report_dt": None, "total": None, "requested_date": date,
+           "error": ""}
+    try:
+        payload = fetch_report(headers, DATASET_OVERLAP_URL, date)
+    except NoReport as which:
+        out["error"] = f"no overlap report exists for {which}"
+        return out
+    except RuntimeError as exc:
+        out["error"] = str(exc)
+        return out
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        out["error"] = f"unexpected response shape ('data' is {type(data).__name__})"
+        return out
+    out["report_dt"] = to_dt(payload.get("reportTimestamp"))
+    names = names_from_xlsx(dataset_list) if dataset_list else names_from_catalog(headers)
+    out["rows"] = build_rows(data, names)
+    try:
+        out["total"] = fetch_total_profiles(headers)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"profile total unavailable: {exc}")
+    return out
+
+
+def add_sheets(book: Book, rows, report_dt, sandbox, kind="dataset", total=None,
+               licensed=DEFAULT_LICENSED, high=HIGH_THRESHOLD, requested_date=None,
+               suffix: str = "", error: str = ""):
+    """The report's tabs, on a house_xlsx Book (standalone or the Data
+    Dictionary's). For the dataset OVERLAP report: 'Overlap cut-list' (the
+    exclusive rows with a running total and the overage marker) and 'Overlap
+    full report' (every row). For a distribution report: one ranked tab."""
+    tag = f" {suffix}" if suffix else ""
+    stamp = fmt_dt(report_dt) if report_dt else "unknown"
+    if error:
+        book.sheet(f"Overlap cut-list{tag}", ["Finding"], [[error]], widths=[100],
+                   title=f"Dataset overlap -- {sandbox}",
+                   note="No overlap report could be read for this sandbox.",
+                   tab_colour="7030A0")
+        return
+    if kind == "dataset" and rows and not rows[0].get("kind"):
+        exclusive = [r for r in rows if r["exclusive"]]
+        shared_n = len(rows) - len(exclusive)
+        got = sum(r["count"] for r in rows)
+        overage = (total - licensed) if isinstance(total, int) else None
+        facts = [("Report timestamp (UTC)", stamp),
+                 ("Profiles (store total)", total if total is not None else "unknown"),
+                 ("Rows sum to", got),
+                 ("Reconciles", "yes" if total == got else "NO -- report partial or mid-refresh"),
+                 ("Licensed (Addressable Audience)", licensed),
+                 ("Overage", max(overage, 0) if overage is not None else "unknown"),
+                 ("Shared rows (not in cut-list)", shared_n)]
+        cut, cumulative, cleared = [], 0, ""
+        for i, r in enumerate(exclusive, 1):
+            cumulative += r["count"]
+            mark = ""
+            if overage and overage > 0 and not cleared and cumulative >= overage:
+                cleared = mark = "OVERAGE CLEARED HERE"
+            cut.append([i, r["labels"][0], r["count"], cumulative,
+                        "HIGH" if r["count"] >= high else "", mark,
+                        "unresolved id" if r["unresolved"] else "", r["ids"][0]])
+        book.sheet(f"Overlap cut-list{tag}",
+                   ["Rank", "Dataset", "Exclusive profiles", "Cumulative", "Flag",
+                    "Overage", "Note", "Dataset id"], cut,
+                   widths=[6, 60, 18, 18, 8, 24, 16, 28],
+                   number_formats={3: "#,##0", 4: "#,##0"}, red_when={5: "HIGH"},
+                   bold_col=6, tab_colour="7030A0",
+                   title=f"Dataset overlap -- Addressable Audience cut-list -- {sandbox}",
+                   note="Profiles ONLY this dataset contributes: expiring it saves exactly this "
+                        "many and nothing else holds them up. Rows where two or more datasets "
+                        "share the profiles are NOT here (expiring one alone saves nothing) -- "
+                        "see the full report tab. Rows of the overlap report are mutually "
+                        "exclusive and sum to the profile total; the identity graph is applied, "
+                        "the merge policy is not.",
+                   facts=facts)
+        full, cumulative = [], 0
+        for i, r in enumerate(rows, 1):
             if r["exclusive"]:
                 cumulative += r["count"]
-                cum = cumulative
-                flag = "HIGH" if r["count"] >= HIGH_THRESHOLD else ""
-            else:
-                cum = ""
-                flag = ""
-            pct = r.get("pct")
-            # A distribution row is neither exclusive nor shared-overlap; label
-            # it for what it is so the CSV can't be misread as savings.
-            row_type = ("distribution" if r.get("kind")
-                        else "exclusive" if r["exclusive"] else "shared")
-            w.writerow([
-                rank,
-                row_type,
-                len(r["ids"]),
-                r["count"],
-                cum,
-                f"{pct * 100:.4f}" if isinstance(pct, (int, float)) else "",
-                flag,
-                ",".join(r["ids"]),
-                " | ".join(r["labels"]),
-                r.get("description", ""),
-            ])
-    return target
+            full.append([i, "exclusive" if r["exclusive"] else "shared", len(r["ids"]),
+                         r["count"], cumulative if r["exclusive"] else None,
+                         "HIGH" if r["exclusive"] and r["count"] >= high else "",
+                         " | ".join(r["labels"]), ",".join(r["ids"])])
+        book.sheet(f"Overlap full report{tag}",
+                   ["Rank", "Row type", "Datasets in combination", "Profiles",
+                    "Cumulative (exclusive only)", "Flag", "Dataset names", "Dataset ids"],
+                   full, widths=[7, 11, 12, 16, 18, 8, 120, 60],
+                   number_formats={4: "#,##0", 5: "#,##0"}, wrap_cols=(7,), row_height=30,
+                   tab_colour="C9B8E8",
+                   title=f"Dataset overlap -- every combination -- {sandbox}",
+                   note="One row per combination of datasets a profile is built from, largest "
+                        "first. 'exclusive' = one dataset only (a saving if expired); 'shared' = "
+                        "two or more (expiring any one alone saves nothing). The biggest "
+                        "combinations say which route profiles arrived by.",
+                   facts=[("Report timestamp (UTC)", stamp), ("Rows", len(rows))])
+    else:
+        entity = "namespace" if kind == "identity" else "dataset"
+        dist = [[i, ", ".join(r["labels"]), r["count"],
+                 (r.get("pct") * 100) if isinstance(r.get("pct"), (int, float)) else None,
+                 r.get("description", "")] for i, r in enumerate(rows, 1)]
+        book.sheet(f"{entity.capitalize()} distribution{tag}",
+                   ["Rank", entity.capitalize(), "Profiles", "Share %", "Description"], dist,
+                   widths=[6, 60, 16, 10, 60], number_formats={3: "#,##0", 4: "0.0"},
+                   tab_colour="7030A0",
+                   title=f"{entity.capitalize()} distribution -- {sandbox} (NOT a cut-list)",
+                   note="Rows are NOT mutually exclusive -- one profile can appear under several "
+                        f"{entity}s -- so the values legitimately sum to more than the profile "
+                        "total and no row is a saving.",
+                   facts=[("Report timestamp (UTC)", stamp),
+                          ("Profiles (store total)", total if total is not None else "unknown")])
 
 
-def write_json(payload, target: Path) -> Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return target
+def write_xlsx(rows, report_dt, sandbox, kind, total, licensed, high,
+               requested_date=None) -> Path | None:
+    """The standalone workbook: output/overlap_<kind>_<sandbox>.xlsx, one file,
+    overwritten each run."""
+    book = Book(f"Dataset overlap -- {sandbox}")
+    add_sheets(book, rows, report_dt, sandbox, kind, total, licensed, high, requested_date)
+    return book.save(OUTPUT_DIR / f"overlap_{kind}_{sandbox}.xlsx")
 
 
 # ----------------------------------------------------------------------------
@@ -866,7 +957,7 @@ def print_reconciliation(unstitched_body, total_rows, licensed) -> None:
                           f"{commas(ncp):>16} {commas(nev):>18}")
 
 
-def run_probe(headers, sandbox, date, licensed, json_target) -> int:
+def run_probe(headers, sandbox, date, licensed) -> int:
     """Hit every endpoint in the family and report what each one does."""
     C = ANSI
     # An explicit recent date, because undated and dated behave differently:
@@ -958,22 +1049,19 @@ def run_probe(headers, sandbox, date, licensed, json_target) -> int:
         total_rows = _as_int((status_body or {}).get("totalRows"))
         print_reconciliation(body, total_rows, licensed)
 
-    if json_target is not None:
-        target = resolve_target(json_target, f"probe_{sandbox}")
-        if target.suffix.lower() != ".json":
-            target = target.with_suffix(".json")
-        dump = {
-            "probedAt": datetime.now(timezone.utc).isoformat(),
-            "sandbox": sandbox,
-            "datedAttempts": probe_date,
-            "endpoints": [
-                {k: v for k, v in r.items() if k != "body"} | {"body": r["body"]}
-                for r in base + fam
-            ],
-        }
-        written = write_json(dump, target)
-        print()
-        logger.info(f"Raw probe JSON written: {written}")
+    book = Book(f"Overlap endpoint probe -- {sandbox}",
+                "What each preview-sample-status endpoint returned: is the whole overlap "
+                "family gone, or only the dataset report?")
+    book.sheet("Probe", ["Endpoint", "Date asked", "HTTP status", "Report timestamp",
+                         "Rows", "Error", "Body (first 300 chars)"],
+               [[r["label"], r["date"] or "", r["status"], r["reportTimestamp"] or "",
+                 r["count"], r["error"] or "",
+                 (json.dumps(r["body"]) if not isinstance(r["body"], str) else r["body"])[:300]]
+                for r in base + fam],
+               widths=[36, 12, 10, 26, 10, 40, 80], wrap_cols=(7,), row_height=30)
+    written = book.save(OUTPUT_DIR / f"overlap_probe_{sandbox}.xlsx")
+    print()
+    logger.info(f"Probe workbook written: {written}")
 
     print()
     return 0
@@ -999,10 +1087,6 @@ def parse_args(argv):
                         help=f"Sandbox name (default: {DEFAULT_SANDBOX}).")
     common.add_argument("--date", default=None, metavar="YYYY-MM-DD",
                         help="Report date. Omit for the most recent.")
-    common.add_argument("--csv", nargs="?", const="", default=None, metavar="PATH",
-                        help="Write the FULL report (exclusive + shared) to CSV.")
-    common.add_argument("--json", nargs="?", const="", default=None, metavar="PATH",
-                        help="Write the raw API response to JSON.")
     common.add_argument("--dataset-list", default=None, metavar="XLSX",
                         help="Resolve dataset names from a spreadsheet instead "
                              "of the Catalog API.")
@@ -1039,19 +1123,10 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
-def resolve_target(opt, default_name: str) -> Path:
-    """--csv / --json with no value land in output/ with a stamped name."""
-    if opt:
-        return Path(opt)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return OUTPUT_DIR / f"{default_name}_{stamp}"
-
-
 def main() -> int:
-    global OPENER
     args = parse_args(sys.argv[1:])
 
-    OPENER = build_opener(build_ssl_context(args.insecure))
+    ensure_opener(args.insecure)
 
     print(aep_creds.source_banner(), file=sys.stderr)
     services = aep_creds.list_services()
@@ -1093,8 +1168,7 @@ def main() -> int:
 
     # `probe` is a diagnostic and shares nothing with the report paths below.
     if args.command == "probe":
-        return run_probe(headers, args.sandbox, args.date, args.licensed,
-                         args.json)
+        return run_probe(headers, args.sandbox, args.date, args.licensed)
 
     is_dataset = args.command == "dataset"
     want_overlap = is_dataset and not args.distribution
@@ -1189,20 +1263,13 @@ def main() -> int:
         logger.info(f"{unresolved:,} row(s) contain an ID with no name -- shown "
                     "raw, never dropped.")
 
-    if args.csv is not None:
-        target = resolve_target(args.csv, f"overlap_{args.command}_{args.sandbox}")
-        if target.suffix.lower() != ".csv":
-            target = target.with_suffix(".csv")
-        written = write_csv(rows, target, report_dt, args.sandbox, args.command)
-        print()
-        logger.info(f"CSV written: {written}")
-
-    if args.json is not None:
-        target = resolve_target(args.json, f"overlap_{args.command}_{args.sandbox}")
-        if target.suffix.lower() != ".json":
-            target = target.with_suffix(".json")
-        written = write_json(payload, target)
-        logger.info(f"Raw JSON written: {written}")
+    kind = ("dataset" if want_overlap else "dataset-distribution" if is_dataset
+            else "identity")
+    written = write_xlsx(rows, report_dt, args.sandbox, kind, total, args.licensed,
+                         args.high, args.date)
+    print()
+    if written:
+        logger.info(f"Workbook written: {written}")
 
     print()
     return 0

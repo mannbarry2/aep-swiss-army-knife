@@ -46,7 +46,6 @@ Usage:
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import re
@@ -422,18 +421,6 @@ TYPE_COLOR = {
 }
 
 
-def write_csv(rows, stem: str) -> Path:
-    """Write rows to output/batch_schedules_v2_<stem>.csv."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    safe = re.sub(r"[^0-9A-Za-z._-]+", "-", stem).strip("-") or "creds"
-    path = OUTPUT_DIR / f"batch_schedules_v2_{safe}.csv"
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(CSV_COLUMNS)
-        writer.writerows(rows)
-    return path
-
-
 # Per-sandbox tabs drop the Sandbox column (it's the tab name) but keep Env.
 SHEET_COLUMNS = ["Env", "Enabled", "Time (UTC)", "Type", "Flags", "Schedule ID"]
 _XLSX_HEX = "CC0000"           # red for anomalies
@@ -455,7 +442,7 @@ def _safe_sheet_name(name: str, used: set) -> str:
 def write_xlsx(per_sandbox, summary, stem: str):
     """Write a tabbed workbook -- a Summary tab plus one tab per sandbox -- to
     output/batch_schedules_v2_<stem>.xlsx. Returns the path, or None if openpyxl
-    is not installed (the CSV is still written either way)."""
+    is not installed (nothing else is written)."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -709,8 +696,6 @@ def audit(service: str):
         "sandbox_stats": sandbox_stats,
     }
 
-    csv_path = write_csv(flat_rows, service)
-    logger.info(f"CSV written:  {csv_path}")
     xlsx_path = write_xlsx(per_sandbox, summary, service)
     if xlsx_path:
         logger.info(f"XLSX written: {xlsx_path}  "

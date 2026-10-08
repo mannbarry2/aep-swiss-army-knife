@@ -630,49 +630,46 @@ def load_baseline(sandbox) -> dict:
 
 
 def write_report(sandbox, checks, history, baseline, datestr) -> Path:
+    """One workbook, output/guardrail_audit_<sandbox>.xlsx, overwritten each run:
+    a Checks tab (baseline columns, previous run, now, with RAG) and a Notes tab.
+    The run is also appended to guardrail_audit_history_<sandbox>.json, which is
+    the trend store the deck builder reads -- a cache, not a report."""
+    from house_xlsx import Book
     OUTPUT_DIR.mkdir(exist_ok=True)
-    # Columns: baseline columns (oldest first) + previous run (if any) + now.
     cols = [(c["label"], c["values"]) for c in baseline.get("columns", [])]
     prev = history[-1] if history else None
     if prev:
         cols.append((f"Previous -- {prev['date']}", {c["key"]: c for c in prev["checks"]}))
-    lines = [f"# AEP Guardrail Audit -- {sandbox}  ({datestr})", "",
-             f"Measured by guardrail_audit.py v{SCRIPT_VERSION}. Rows marked *query* / *manual* are not measured by "
-             f"the API pass; *query* rows carry the SQL to run in the JSON. RAG: red = over the guardrail, "
-             f"amber = within {int((1-AMBER_AT)*100)}%, green = clear, grey = not measured this run.", ""]
-    hdr = ["", "Check"] + [lab for lab, _ in cols] + [f"**Now -- {datestr}**"]
-    lines.append("| " + " | ".join(hdr) + " |")
-    lines.append("|" + "---|" * len(hdr))
+    hdr = ["RAG", "Check", "Method"] + [lab for lab, _ in cols] + [f"Now -- {datestr}", "Note"]
+    rows = []
     for c in checks:
-        cells = [DOT[c["status"]], f"**{c['title']}**" + (f" *({c['method']})*" if c["method"] != "api" else "")]
+        cells = [c["status"].upper(), c["title"], c["method"]]
         for _, vals in cols:
             v = vals.get(c["key"])
-            if isinstance(v, dict):
-                cells.append(f"{DOT.get(v.get('status', 'grey'), '')} {v.get('display', '')}".strip())
-            else:
-                cells.append(str(v) if v is not None else "--")
-        cells.append(f"**{c['display']}**")
-        lines.append("| " + " | ".join(cells) + " |")
-    lines += ["", "## Notes per check", ""]
-    for c in checks:
-        if c.get("note"):
-            lines.append(f"- **{c['title']}** -- {c['note']}")
+            cells.append(f"{v.get('status', '')} {v.get('display', '')}".strip() if isinstance(v, dict)
+                         else (str(v) if v is not None else "--"))
+        cells += [c["display"], c.get("note") or ""]
+        rows.append(cells)
     reds = [c["title"] for c in checks if c["status"] == "red"]
     ambers = [c["title"] for c in checks if c["status"] == "amber"]
-    lines += ["", f"**Over guardrail:** {', '.join(reds) or 'none'}.  **Approaching:** {', '.join(ambers) or 'none'}.", "",
-              f"_guardrail_audit.py v{SCRIPT_VERSION} ({SCRIPT_DATE}) -- read-only API pass; "
-              f"detail in guardrail_audit_{sandbox}_{datestr}.json_"]
-    md = OUTPUT_DIR / f"guardrail_audit_{sandbox}_{datestr}.md"
-    md.write_text("\n".join(lines), encoding="utf-8")
-    (OUTPUT_DIR / f"guardrail_audit_{sandbox}_{datestr}.json").write_text(
-        json.dumps({"sandbox": sandbox, "date": datestr, "version": SCRIPT_VERSION, "checks": checks}, indent=1),
-        encoding="utf-8")
+    book = Book(f"AEP Guardrail Audit -- {sandbox}  ({datestr})",
+                f"Measured by guardrail_audit.py v{SCRIPT_VERSION}. Rows marked query / manual "
+                "are not measured by the API pass. RAG: RED = over the guardrail, AMBER = "
+                f"within {int((1 - AMBER_AT) * 100)}%, GREEN = clear, GREY = not measured this run.")
+    book.sheet("Checks", hdr, rows, widths=[8, 44, 9] + [22] * len(cols) + [22, 70],
+               rag_col=1, wrap_cols=(len(hdr),), row_height=30, tab_colour="C00000",
+               facts=[("Over guardrail", ", ".join(reds) or "none"),
+                      ("Approaching", ", ".join(ambers) or "none")])
+    sql = [[c["title"], c.get("note") or "", c.get("sql") or c.get("query") or ""] for c in checks
+           if c.get("note") or c.get("sql") or c.get("query")]
+    book.sheet("Notes", ["Check", "Note", "SQL to run"], sql, widths=[44, 90, 90],
+               wrap_cols=(2, 3), row_height=45)
+    path = book.save(OUTPUT_DIR / f"guardrail_audit_{sandbox}.xlsx")
     history = [h for h in history if h.get("date") != datestr] + [
         {"date": datestr, "version": SCRIPT_VERSION,
-         "checks": [{k: c[k] for k in ("key", "title", "value", "display", "status", "method")} for c in checks]}]
+         "checks": [{k: c.get(k) for k in ("key", "title", "value", "display", "status", "method", "note")} for c in checks]}]
     (OUTPUT_DIR / f"guardrail_audit_history_{sandbox}.json").write_text(json.dumps(history, indent=1), encoding="utf-8")
-    return md
-
+    return path
 
 def print_console(checks):
     print()

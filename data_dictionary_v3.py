@@ -207,13 +207,15 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # standalone script keeps working.
 import snapshot_tables
 import audience_complexity     # beta complexity score for the Audiences tab
+import overlap_report          # dataset overlap -> Overlap cut-list / full report tabs
+from house_xlsx import Book
 
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.6"
-SCRIPT_DATE    = "2026-10-06"
+SCRIPT_VERSION = "3.4.7"
+SCRIPT_DATE    = "2026-10-08"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -2382,9 +2384,10 @@ def _archive_previous(out_dir: Path, safe_client: str,
     return moved
 
 
-def write_xlsx(results, client: str, datestr: str, snapshots=None):
+def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None):
     """`snapshots` is (rows, unreadable, sandboxes) from snapshot_tables, or None
-    to leave the Snapshot tabs out."""
+    to leave the Snapshot tabs out. `overlaps` is {sandbox: overlap_report.collect()
+    result} for the Overlap tabs, or None."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -2448,7 +2451,8 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
     # Unique worksheet name per kept schema (Excel: <=31 chars, unique). Built
     # up front so the Field Index and Schemas index can name each schema's tab.
     used = {"summary", "how to use", "schemas", "field index", "datasets",
-            "audiences", "snapshot summary", "snapshot tables"}
+            "audiences", "snapshot summary", "snapshot tables",
+            "overlap cut-list", "overlap full report"}
     tabbed = []  # (res, k, sheet_name)
     for res in results:
         for k in res["kept"]:
@@ -2613,6 +2617,13 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
          "Every snapshot export table with its merge policy. The GREEN rows "
          "are the correct ones -- on the DEFAULT merge policy. The rest sit on "
          "other merge policies (added for debugging etc.) or carry none."),
+        ("...know which route profiles arrived by, and what expiring a dataset saves",
+         "Overlap cut-list / Overlap full report",
+         "The Profile store's dataset overlap report. The cut-list is the profiles "
+         "ONLY one dataset contributes (expire it, save exactly that many) with a "
+         "running total against the Addressable Audience licence. The full report "
+         "is every combination of datasets a profile is built from, largest first "
+         "-- a sudden new combination is a new route in."),
         ("...know how fresh the snapshot is",
          "Snapshot Summary",
          "Per sandbox: when the system evaluation is scheduled, when it last "
@@ -2961,6 +2972,16 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
             title=f"Snapshot tables  -  {label}",
             scope="each sandbox in this workbook")
 
+    # ---- Overlap tabs: which route profiles arrived by, and what a cut saves -
+    # Folded in from overlap_report.py, which owns the layout.
+    if overlaps:
+        book = Book(f"Data Dictionary v{SCRIPT_VERSION}  -  {label}", wb=wb)
+        for sb_name, ov in overlaps.items():
+            suffix = sb_name if len(overlaps) > 1 else ""
+            overlap_report.add_sheets(book, ov["rows"], ov["report_dt"], sb_name,
+                                      "dataset", ov["total"], suffix=suffix,
+                                      error=ov["error"])
+
     # ---- One tab per schema, listing its individual fields ------------------
     for res, k, name in tabbed:
         sheet = wb.create_sheet(name)
@@ -3074,6 +3095,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None):
 # ----------------------------------------------------------------------------
 def _in_dd_scope(title: str, scope: str) -> bool:
     return scope == "all" or scope in (title or "").lower()
+
+
+def fmt_report_dt(dt) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M UTC") if dt else "unknown date"
 
 
 def _resolve_profile_snapshot(token, conf, sandbox, profile_snapshot):
@@ -3360,10 +3385,28 @@ def run(service: str, sandbox_arg: str | None,
     # Org-level lookups shared across sandboxes: the tag vocabulary and the user
     # directory are the same wherever you stand, so they are fetched once.
     aud_caches = {"vocab": None, "directory": None}
-    # Snapshot tables are read for every chosen sandbox, including one whose
-    # schema collection fails below -- the two reads are independent.
-    snap_rows, snap_unreadable = [], []
+    # Snapshot tables and the overlap report are read for every chosen sandbox,
+    # including one whose schema collection fails below -- the reads are
+    # independent.
+    snap_rows, snap_unreadable, overlaps = [], [], {}
+    overlap_report.ensure_opener()
     for sb in chosen:
+        name = sb.get("name", "?")
+        logger.info(f"Overlap report for {name} ...")
+        try:
+            ov = overlap_report.collect(overlap_report.aep_headers(token, conf, name), name)
+        except Exception as e:
+            ov = {"rows": [], "report_dt": None, "total": None, "requested_date": None,
+                  "error": f"{type(e).__name__}: {e}"}
+        if ov["error"]:
+            logger.warning(f"  {name}: overlap report -- {ov['error']}")
+        else:
+            n_ex = sum(1 for r in ov["rows"] if r["exclusive"])
+            logger.info(f"  {name}: overlap report of {fmt_report_dt(ov['report_dt'])}: "
+                        f"{len(ov['rows']):,} rows, {n_ex} exclusive; profiles "
+                        f"{ov['total']:,}" if isinstance(ov["total"], int) else
+                        f"  {name}: overlap report: {len(ov['rows']):,} rows")
+        overlaps[name] = ov
         try:
             got, err = snapshot_tables.collect_sandbox(token, conf, sb)
         except Exception as e:
@@ -3413,13 +3456,14 @@ def run(service: str, sandbox_arg: str | None,
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     client = client_label(conf)
     xlsx_path = write_xlsx(results, client, datestr,
-                           snapshots=(snap_rows, snap_unreadable, chosen))
+                           snapshots=(snap_rows, snap_unreadable, chosen),
+                           overlaps=overlaps)
     if xlsx_path:
         n_tabs = sum(len(r["kept"]) for r in results)
         logger.info(f"XLSX written: {xlsx_path}  "
                     f"({n_tabs} schema tab(s) + Summary + Field Index + "
                     f"Schemas index + Datasets + Snapshot Summary + "
-                    f"Snapshot Tables)")
+                    f"Snapshot Tables + Overlap cut-list + Overlap full report)")
 
     # Audience rules: how many, how many the sheet could not hold whole, and
     # where the complete text went.

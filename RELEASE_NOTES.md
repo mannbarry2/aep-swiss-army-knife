@@ -7,6 +7,28 @@ can be traced to exactly what the code did at the time.
 
 ---
 
+## v3.4.7 — 2026-10-08
+
+**Overlap tabs.** The dataset overlap report is folded in from
+[`overlap_report.py`](overlap_report.py), which stays runnable on its own:
+
+- **Overlap cut-list** — the profiles ONLY one dataset contributes (expire it,
+  save exactly that many), with a running total against the Addressable
+  Audience licence and the point where an overage would clear.
+- **Overlap full report** — every combination of datasets a profile is built
+  from, largest first. A sudden new combination is a new route in (this is
+  how the 3.1M shell profiles of 5–6 Oct showed up as "Tesco Profile Dataset
+  only").
+
+Also, house rule applied across the library: every tool writes **one
+workbook with a stable name, overwritten each run**, and nothing else — the
+CSV and JSON side-files are gone (`overlap_report`, `batch_eval_timing`,
+`failed_batch_report`, `dataset_census`, `sluggishness_detector`,
+`audit_batch_schedules_v2`, `dd_audience_countdown`, `audit_hunt`,
+`profile_jump`, `guardrail_audit`). The shared writer is `house_xlsx.py`.
+
+---
+
 ## v3.4.6 — 2026-10-06
 
 **Audience complexity score (beta).** Not all audiences are created equal:
