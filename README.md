@@ -561,6 +561,31 @@ descriptions on file were written in a Claude Code session instead.
 python audience_renamer.py        # refuses: "IN DEVELOPMENT and parked -- it is not for use"
 ```
 
+## overlap_report.py  *(folded into the Data Dictionary)*
+
+The Profile store's **dataset overlap report**, turned from a wall of
+comma-separated dataset ids into something readable. Every row of that report
+is the set of profiles built from EXACTLY one combination of datasets, so the
+rows are mutually exclusive and sum to the profile count. Two tabs:
+**Overlap cut-list** — the profiles ONLY one dataset contributes (expire it
+and you save exactly that many), with a running total against the Addressable
+Audience licence and the point where an overage would clear — and **Overlap
+full report**, every combination, largest first. The full report is also how
+you see which *route* a jump in profiles came in by: a combination that was
+tiny last week and huge today is a new route (the 3.1M shell profiles of 5–6
+Oct 2026 showed up as "Tesco Profile Dataset only"). `--date=YYYY-MM-DD`
+reads an earlier day's report for a before/after. Output is one workbook,
+`output/overlap_<kind>_<sandbox>.xlsx`, overwritten each run; the same tabs
+are folded into the Data Dictionary (v3.4.7), so this is the way to run just
+the overlap report on its own. `probe` tests which preview-sample-status
+endpoints answer and writes `overlap_probe_<sandbox>.xlsx`.
+
+```
+python overlap_report.py dataset aep-prod --sandbox=prod
+python overlap_report.py dataset aep-prod --sandbox=prod --date=2026-10-04
+python overlap_report.py identity aep-prod --sandbox=prod       # namespace distribution
+```
+
 ## audience_complexity.py  *(beta, folded into the Data Dictionary)*
 
 A crude 0-100 **complexity score** for an AEP audience, read off its PQL and
