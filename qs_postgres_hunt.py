@@ -275,7 +275,8 @@ def main():
     book.sheet("Lookup", ["Field", "Value"], [[k, str(v)] for k, v in found.items()],
                widths=[16, 120], wrap_cols=(2,), row_height=30,
                note=f"GET /queries/{qid} in {sandbox}")
-    path = book.save(OUTPUT_DIR / f"qs_postgres_{sandbox}.xlsx")
+    stem = "postgres" if match == "postgres" else match.replace(" ", "_")
+    path = book.save(OUTPUT_DIR / f"qs_{stem}_{sandbox}.xlsx")
 
     print(f"\n=== summary ===")
     print(f"  {sum(clients.values()):,} queries in the last {days} days in '{sandbox}', "
