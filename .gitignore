@@ -46,3 +46,6 @@ desktop.ini
 
 # Local scratch: Adobe Luma demo/sample data (incl. an embedded git repo)
 Luma Test data/
+
+# Local consultant roster and access tracker (sensitive personal data).
+inputs/*.xlsx

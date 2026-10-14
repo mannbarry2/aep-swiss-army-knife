@@ -120,6 +120,9 @@ SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"
+INPUT_DIR = SCRIPT_DIR / "inputs"
+CONSULTANT_ROSTER_FILENAME = "Adobe Access Tracker (1).xlsx"
+CONSULTANT_ROSTER_SHEET = "Tesco ID and App Access"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 AUDIT_URL = "https://platform.adobe.io/data/foundation/audit/events"
@@ -590,6 +593,37 @@ def summarise(kept: list[dict]) -> dict:
             "by_asset_action": by_asset_action}
 
 
+def load_consultant_roster() -> list[list[str]] | None:
+    path = INPUT_DIR / CONSULTANT_ROSTER_FILENAME
+    if not path.is_file():
+        return None
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = workbook[CONSULTANT_ROSTER_SHEET]
+        rows = []
+        for cells in ws.iter_rows(min_row=6, values_only=True):
+            role = str(cells[4] or "").replace("\xa0", " ").strip()
+            if "workfront" in role.casefold():
+                continue
+            adobe_email = str(cells[6] or "").replace("\xa0", " ").strip()
+            if "@" not in adobe_email:
+                continue
+            first_name = str(cells[1] or "").replace("\xa0", " ").strip()
+            last_name = str(cells[2] or "").replace("\xa0", " ").strip()
+            group = str(cells[18] or "").replace("\xa0", " ").strip()
+            tesco_email = str(cells[24] or "").replace("\xa0", " ").strip()
+            rows.append([first_name, last_name, role, adobe_email, tesco_email, group])
+        return rows
+    except KeyError as e:
+        logger.warning(f"  consultant roster sheet missing ({e}); skipping roster tab.")
+        return None
+    finally:
+        workbook.close()
+
+
 # ----------------------------------------------------------------------------
 # Workbook
 # ----------------------------------------------------------------------------
@@ -679,6 +713,16 @@ def write_xlsx(result: dict, opts, conf: dict, path: Path) -> Path:
     sheet("summary", f"AEP activity log  -  {opts.sandbox}  ({span})",
           "Who is actively using AEP, per user. Activity, not sign-ins.",
           ["Fact", "Value"], [44, 110], facts)
+
+    roster = load_consultant_roster()
+    if roster is None:
+        logger.warning(f"  consultant roster not found at {INPUT_DIR / CONSULTANT_ROSTER_FILENAME}.")
+    else:
+        sheet("consultant_roster", "Consultant roster",
+              "Source: inputs/Adobe Access Tracker (1).xlsx, Tesco ID and App Access. "
+              "Workfront roles are excluded. Group values are from the tracker, not a live membership check.",
+              ["First Name", "Last Name", "Role", "Adobe Email", "Tesco Email", "AEP group (tracker)"],
+              [18, 22, 42, 38, 38, 70], roster)
 
     # ---- raw_events (opt-in with --raw: ~95% of the file) ---------------
     if opts.raw:
