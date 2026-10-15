@@ -645,7 +645,7 @@ def write_xlsx(result: dict, opts, conf: dict, path: Path) -> Path:
     def sheet(name, title, note, cols, widths, rows, formats=None):
         ws = wb.create_sheet(name)
         for i, w in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = w
+            ws.column_dimensions[get_column_letter(i)].width = min(max(w, 10), 50)
         ws.freeze_panes = f"A{HEADER_ROW + 1}"
         c = WriteOnlyCell(ws, CONFIDENTIAL)
         c.font = Font(bold=True, size=11, color="C00000")
@@ -718,6 +718,10 @@ def write_xlsx(result: dict, opts, conf: dict, path: Path) -> Path:
     if roster is None:
         logger.warning(f"  consultant roster not found at {INPUT_DIR / CONSULTANT_ROSTER_FILENAME}.")
     else:
+        roster.sort(key=lambda row: (
+            -s["by_user"].get(row[3], {}).get("events", 0),
+            f"{row[1]} {row[0]}".casefold(),
+        ))
         sheet("consultant_roster", "Consultant roster",
               "Source: inputs/Adobe Access Tracker (1).xlsx, Tesco ID and App Access. "
               "Workfront roles are excluded. Group values are from the tracker, not a live membership check.",
