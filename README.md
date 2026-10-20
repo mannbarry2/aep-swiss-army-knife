@@ -27,6 +27,7 @@ The toolkit spans two product ranges:
 
 | Tool | What it does |
 |------|--------------|
+| [`external_access_audit.py`](external_access_audit.py) | Who can reach Experience Platform / AJO, and which of them actually use it — the removal list for access that has outlived its purpose. Read-only, enforced. See **[EXTERNAL-ACCESS-AUDIT.md](EXTERNAL-ACCESS-AUDIT.md)**. |
 | [`credential_validator.py`](credential_validator.py) | Quickly checks whether an IMS/AEP credential set is alive and what it can see. **Run this first on any new credential set.** |
 | [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
