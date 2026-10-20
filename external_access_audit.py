@@ -92,7 +92,7 @@ AUDIT_RETENTION_DAYS = 90      # Adobe's hard ceiling; a wider window is a 422
 # every retry was exhausted, and the failures were read as "no activity". That
 # turned a throttling problem into 222 accounts wrongly marked for deletion.
 # Pace the calls instead.
-MAX_RPS = 4.0
+MAX_RPS = 8.0
 # Keep the start date this far inside the retention boundary. Adobe measures
 # "90 days ago" from the moment each request lands, so a window computed once
 # at the start of a long run slides out of range part-way through.
@@ -104,8 +104,13 @@ _HEADER_BG = "1F4E78"
 # belongs to AND the profile's own name, because a few profiles (the GG-* AD
 # groups) carry the product in their name and nothing in productName.
 AEP_RE = re.compile(
-    r"experience platform|customer journey analytics|journey optimi|"
-    r"real.?time customer|rtcdp|ajo|cja|aep", re.I)
+    r"experience platform|journey optimi|real.?time customer|rtcdp|"
+    r"ajo|aep", re.I)
+# Customer Journey Analytics is OUT OF SCOPE, and is tested BEFORE the
+# include above because "Customer Journey Analytics" trips the "journey"
+# match. CJA is a separate responsibility; it also keeps its own audit
+# trail this tool cannot read, so reporting it here would be guesswork.
+CJA_RE = re.compile(r"cja|customer journey analytics", re.I)
 # NOTE on the bare "aep": most people here do NOT get Platform access through
 # a product profile. They get it through an AD group nested into one --
 # names like "GG-UK-<org>-PROD-AdobeAEP-Analyst". Those groups carry no
@@ -214,7 +219,8 @@ def build_profile_index(groups: list) -> dict:
         # AEP wins over the exclusions, and must: "Customer Journey
         # Analytics" contains the word Analytics, so testing the exclusion
         # first would throw CJA out of its own report.
-        idx[name] = (product, bool(AEP_RE.search(both)))
+        idx[name] = (product, bool(AEP_RE.search(both))
+                     and not CJA_RE.search(both))
     return idx
 
 
@@ -648,6 +654,32 @@ def write_xlsx(data: dict, path: Path) -> Path:
         rr += 1
     fit(ws, 5, caps={1: 40, 3: 26, 8: 46, 9: 30})
 
+    # ---- Profiles ----------------------------------------------------------
+    # Which profiles and AD groups actually grant Platform access, and how
+    # many outsiders hold each. The external column is the one to read: a
+    # profile with outside members is where a third party got in.
+    cols = ["Profile / AD group", "Adobe product", "Type", "Members (org)",
+            "Members on external domains"]
+    ws = sheet("Profiles", "What grants AEP access",
+               "Every product profile or Active Directory group that confers "
+               "Experience Platform, CJA or Journey Optimizer access, with "
+               "how many people hold it. Most access here comes via the "
+               "GG-*-AdobeAEP-* AD groups rather than Adobe product profiles, "
+               "which is why they are listed alongside. Sorted by external "
+               "members first.", cols)
+    rr = 6
+    for pr in data["profiles"]:
+        for c, v in enumerate([pr["name"], pr["product"] or "(AD group - no "
+                               "Adobe product)", pr["type"] or "USER_GROUP",
+                               pr["members"], pr["external"]], 1):
+            cell = ws.cell(rr, c, v)
+            if c in (4, 5):
+                cell.alignment = centre
+            if c == 5 and v:
+                cell.font = red
+        rr += 1
+    fit(ws, 5, caps={1: 50, 2: 46})
+
     # ---- Tech accounts -----------------------------------------------------
     cols = ["Technical account", f"Events ({data['days']}d)", "Last seen",
             "Sandboxes used", "Top activity", "In roster?"]
@@ -692,6 +724,11 @@ def parse_args(argv):
                    help="the corporate domain; everything else counts as "
                         "external (default: whichever domain most of the "
                         "roster uses)")
+    p.add_argument("--sandboxes", default="prod",
+                   help="comma-separated sandboxes to check, or 'all' for "
+                        "every one the credential can read (default: prod). "
+                        "One sandbox instead of nine is a 9x saving, and prod "
+                        "is where the access that matters lives.")
     p.add_argument("--no-sweep", action="store_true",
                    help="skip the whole-log sweep and go straight to the "
                         "per-email check of every AEP-entitled account. Much "
@@ -762,6 +799,20 @@ def main():
     activity, sandboxes, unreadable = {}, [], []
     if not opts.no_activity:
         sandboxes, unreadable = readable_sandboxes(token, conf)
+        if (opts.sandboxes or "").strip().lower() != "all":
+            wanted = [x.strip() for x in opts.sandboxes.split(",") if x.strip()]
+            missing = [w for w in wanted if w not in sandboxes]
+            skipped = [x for x in sandboxes if x not in wanted]
+            sandboxes = [w for w in wanted if w in sandboxes]
+            if missing:
+                logger.warning(f"  requested but NOT readable: "
+                               f"{', '.join(missing)}")
+            if skipped:
+                logger.info(f"  not checked (outside --sandboxes): "
+                            f"{', '.join(skipped)}")
+            if not sandboxes:
+                logger.error("None of the requested sandboxes are readable.")
+                return
         # prod first: it is the one that matters, so if a later sandbox stalls
         # the important half of the answer is already in hand.
         sandboxes.sort(key=lambda n: (n != "prod", "prod" not in n, n))
