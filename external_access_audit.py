@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 import logging
@@ -85,7 +86,14 @@ SCRIPT_DATE = "2026-10-19"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output" / "aep-user-logs"
+# Where workbooks are written. Configurable, and deliberately NOT hard-coded
+# to any particular corporate folder: this repo is public-ish and a client's
+# OneDrive path is a client identifier. Set AEP_AUDIT_OUT (or pass --out-dir)
+# to send output somewhere governed -- a corporate OneDrive or SharePoint
+# library rather than personal cloud storage, which is the right home for
+# anything carrying names and access rights.
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output" / "aep-user-logs"
+OUTPUT_DIR = Path(os.environ.get("AEP_AUDIT_OUT") or DEFAULT_OUTPUT_DIR)
 USER_MGMT = "https://usermanagement.adobe.io/v2/usermanagement"
 DEFAULT_SERVICE = "aep-prod"
 # The corporate domain is DETECTED, not hard-coded: it is whichever domain
@@ -94,6 +102,11 @@ DEFAULT_SERVICE = "aep-prod"
 DEFAULT_HOME = None
 TECHACCT = "@techacct.adobe.com"
 AUDIT_RETENTION_DAYS = 90      # Adobe's hard ceiling; a wider window is a 422
+# The audit API caps page.totalElements at 1,000 for a single query. A count
+# of exactly this therefore means "at least this many", NOT a measurement.
+# Zero is still a true zero, so the purge list is unaffected -- but any usage
+# figure at the cap must be shown as a floor, never as a number.
+AUDIT_PAGE_CAP = 1000
 # Requests per second against the audit API. The first run of the per-email
 # check fired ~2,300 requests in 150 seconds; Adobe rate-limited most of them,
 # every retry was exhausted, and the failures were read as "no activity". That
@@ -466,7 +479,7 @@ def verify_unused(token: str, conf: dict, sandboxes: list, candidates: list,
         # that was never actually asked.
         b = datetime.now(timezone.utc)
         a = b - timedelta(days=days) + WINDOW_MARGIN
-        total, per = 0, {}
+        total, per, newest, capped = 0, {}, None, False
         for sb, client in clients.items():
             try:
                 # The filter is CASE-SENSITIVE and the audit log stores
@@ -478,6 +491,14 @@ def verify_unused(token: str, conf: dict, sandboxes: list, candidates: list,
                 r = client.get(ul.window_params(
                     a, b, [f"user=={p['email'].lower()}"], 3))
                 n = (r.get("page") or {}).get("totalElements") or 0
+                # Events come back newest-first, so the first one is the
+                # person's last activity. Reading it here is free -- the
+                # query has already been paid for.
+                ev = (r.get("_embedded") or {}).get("events") or []
+                if ev and ev[0].get("timestamp"):
+                    ts = ev[0]["timestamp"]
+                    if newest is None or ts > newest:
+                        newest = ts
             except Exception as e:
                 # A sandbox that errored is NOT a zero. Mark the account
                 # unverifiable rather than quietly counting it as unused.
@@ -487,9 +508,15 @@ def verify_unused(token: str, conf: dict, sandboxes: list, candidates: list,
             if n:
                 per[sb] = n
                 total += n
+                # totalElements is CAPPED at 1,000 per query. A count of
+                # exactly 1,000 therefore means "1,000 or more" -- it is a
+                # ceiling, not a measurement. Zero is still a real zero, which
+                # is why the purge list is unaffected.
+                if n >= AUDIT_PAGE_CAP:
+                    capped = True
         unver = [k for k, v in per.items() if v is None]
-        exact[p["email"]] = {"events": total, "per": per,
-                             "unverifiable": unver,
+        exact[p["email"]] = {"events": total, "per": per, "last": newest,
+                             "capped": capped, "unverifiable": unver,
                              # Only a clean sweep of every sandbox counts as
                              # proof of absence. Anything less is "unknown",
                              # and unknown must never reach a deletion list.
@@ -517,6 +544,27 @@ def verdict_for(p: dict, checked: bool) -> str:
             return "PURGE -- no usage found"
         return "UNKNOWN -- could not check"
     return "no AEP access, no usage"
+
+
+# How long since last use, in the bands an access review actually works in.
+# A reviewer asking somebody "do you still need this?" wants to know whether
+# they used it last week or not since July, not a raw day count.
+LAST_USED_BANDS = ((7, "this week"), (30, "last 30 days"),
+                   (60, "30-60 days"), (90, "60-90 days"))
+
+
+def last_used_band(ts: str | None, entitled: bool) -> str:
+    """A plain-English bucket for when somebody last used the platform."""
+    if not entitled:
+        return ""
+    d = days_since(ts)
+    if d == "":
+        return f"NEVER (no use in {AUDIT_RETENTION_DAYS}d)"
+    d = int(d)
+    for limit, label in LAST_USED_BANDS:
+        if d <= limit:
+            return label
+    return f"over 90 days"
 
 
 def days_since(ts: str | None) -> str:
@@ -654,40 +702,97 @@ def write_xlsx(data: dict, path: Path) -> Path:
     ws.column_dimensions["C"].width = 92
 
     # ---- All accounts: THE list -------------------------------------------
+    one_sandbox = len(data.get("sandboxes") or []) <= 1
     cols = ["Email", "Domain", "Name", "ID type", "Status",
-            f"Events ({data['days']}d)", "Last seen", "Days since",
-            "Sandboxes used", "Top activity", "AEP entitled",
-            "AEP profile names", "Admin roles", "Verdict"]
+            f"Events in {data['days']}d", "Last active", "Days ago",
+            "Last used"]
+    if not one_sandbox:
+        cols.append("Where")
+    cols += ["AEP entitled", "AEP profile names", "Admin roles", "Verdict"]
     ws = sheet("All accounts",
                f"Every account, with what it actually DID in {data['days']} days",
                "One row per account in the Admin Console. Sorted by verdict: "
                "anything active without entitlement first, then PURGE "
-               "candidates (entitled to AEP but no recorded usage in the "
-               "window), then active users, then the rest. Filter Verdict = "
-               "PURGE for the removal list.", cols)
+               "candidates (entitled to AEP but no recorded usage), then "
+               "active users, then the rest. Filter Verdict = PURGE for the "
+               "removal list.   |   'Events' counts actions in the audit log "
+               f"- opening a schema, running a segment, editing a journey. "
+               f"Adobe caps a single query at {AUDIT_PAGE_CAP}, so "
+               f"'{AUDIT_PAGE_CAP}+' means at least that many, not exactly "
+               "that many; zero is a true zero, which is why the purge list "
+               "is unaffected.   |   'Last active' is the most recent of "
+               "those actions, and 'Days ago' how long since. Both are blank "
+               "when there is no activity at all.", cols)
     rr = 6
     for u in data["all_accounts"]:
+        # A count at the cap is a floor, not a number -- show it as such.
+        ev = (f"{AUDIT_PAGE_CAP}+" if u.get("capped")
+              else (u["events"] if u["events"] else ""))
         vals = [u["email"], u["domain"], u["name"], u["type"], u["status"],
-                u["events"], (u["last"] or "")[:19].replace("T", " "),
+                ev, (u["last"] or "")[:16].replace("T", " "),
                 days_since(u["last"]),
-                ", ".join(f"{k} ({v})" for k, v in u["per_sandbox"].items()),
-                ", ".join(f"{k} x{v}" for k, v in u["top_assets"]),
-                "yes" if u["aep"] else "", ", ".join(u["aep"]),
-                ", ".join(u["admin"]) or "", u["verdict"]]
+                last_used_band(u["last"], bool(u["aep"]))]
+        if not one_sandbox:
+            vals.append(", ".join(f"{k} ({v})"
+                                  for k, v in u["per_sandbox"].items()))
+        vals += ["yes" if u["aep"] else "", ", ".join(u["aep"]),
+                 ", ".join(u["admin"]) or "", u["verdict"]]
+        vcol = len(vals)
         for c, v in enumerate(vals, 1):
             cell = ws.cell(rr, c, v)
-            if c in (6, 8, 11):
+            if c in (6, 8):
                 cell.alignment = centre
+            if c == 9 and str(v).startswith("NEVER"):
+                cell.font = amber
             if c == 4 and v == "adobeID":
                 cell.font = amber
             if c == 2 and u["domain"] != data["home_domain"]:
                 cell.font = amber
-            if c == 14:
-                cell.font = (red if "WITHOUT" in v else
-                             amber if v.startswith("PURGE") else
+            if c == vcol:
+                cell.font = (red if "WITHOUT" in str(v) else
+                             amber if str(v).startswith("PURGE") else
                              green if v == "ACTIVE" else Font(color="888888"))
         rr += 1
-    fit(ws, 5, caps={1: 40, 3: 26, 9: 30, 10: 40, 12: 46, 14: 30})
+    fit(ws, 5, caps={1: 40, 3: 26, 10: 46, 12: 30})
+
+    # ---- Access review: the list you send out for validation ---------------
+    # Built for the conversation "do you still need this?", so it carries only
+    # what a reviewer needs to ask that question and nothing else: who, what
+    # they can reach, when they last used it. Sorted so the easiest cases to
+    # challenge -- never used, then longest dormant -- come first.
+    cols = ["Email", "Name", "Organisation", "What they can access",
+            "Last active", "Days ago", "Last used", "Events", "Admin roles",
+            "Recommendation"]
+    ws = sheet("Access review", "Everyone with AEP / AJO access",
+               "One row per person who can reach the platform, for sending "
+               "out for validation. 'What they can access' lists the profiles "
+               "and groups granting it. Sorted with never-used first, then "
+               "longest dormant, so the clearest cases are at the top.", cols)
+    rr = 6
+    for u in data["review"]:
+        band = last_used_band(u["last"], True)
+        rec = ("Challenge - no use on record" if band.startswith("NEVER")
+               else "Challenge - dormant" if band == "over 90 days"
+               else "Confirm with owner" if band == "60-90 days"
+               else "Keep")
+        ev = (f"{AUDIT_PAGE_CAP}+" if u.get("capped")
+              else (u["events"] if u["events"] else "0"))
+        vals = [u["email"], u["name"], u["domain"], ", ".join(u["aep"]),
+                (u["last"] or "")[:16].replace("T", " "),
+                days_since(u["last"]), band, ev,
+                ", ".join(u["admin"]) or "", rec]
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(rr, c, v)
+            if c in (6, 8):
+                cell.alignment = centre
+            if c == 3 and u["domain"] != data["home_domain"]:
+                cell.font = amber
+            if c in (7, 10):
+                cell.font = (red if str(v).startswith(("NEVER", "Challenge - no"))
+                             else amber if "Challenge" in str(v) or "over 90" in str(v)
+                             else green if v in ("Keep", "this week") else Font())
+        rr += 1
+    fit(ws, 5, caps={1: 40, 2: 26, 4: 52, 10: 30})
 
     # ---- Purge list --------------------------------------------------------
     cols = ["Email", "Domain", "Name", "ID type", "AEP profile names",
@@ -797,7 +902,7 @@ def write_xlsx(data: dict, path: Path) -> Path:
             ws_.auto_filter.ref = (f"A{hrow}:"
                                    f"{get_column_letter(ncols)}{ws_.max_row}")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return path
 
@@ -817,6 +922,12 @@ def parse_args(argv):
                    help="the corporate domain; everything else counts as "
                         "external (default: whichever domain most of the "
                         "roster uses)")
+    p.add_argument("--out-dir", default=None,
+                   help="where to write the workbook. Defaults to "
+                        "$AEP_AUDIT_OUT, else output/aep-user-logs/. Point "
+                        "this at corporate storage, not personal cloud "
+                        "storage -- the output carries names and access "
+                        "rights.")
     p.add_argument("--sandboxes", default="prod",
                    help="comma-separated sandboxes to check, or 'all' for "
                         "every one the credential can read (default: prod). "
@@ -875,6 +986,7 @@ def main():
             "admin": u.get("adminRoles") or [], "aep": aep, "out": out,
             "other": other, "events": 0, "per_sandbox": {}, "checked": False,
             "last": None, "top_assets": [], "sweep_missed": False,
+            "capped": False,
             "unverifiable": [], "checked_conclusive": False,
         })
 
@@ -989,6 +1101,9 @@ def main():
                     rescued += 1
                 p["unverifiable"] = v.get("unverifiable") or []
                 p["checked_conclusive"] = bool(v.get("conclusive"))
+                if v.get("last") and not p.get("last"):
+                    p["last"] = v["last"]
+                p["capped"] = bool(v.get("capped"))
             if rescued:
                 logger.warning(
                     f"{ANSI['red']}{rescued} account(s) the sweep showed as "
@@ -1025,6 +1140,11 @@ def main():
         return (ORDER.get(p["verdict"], 3), -p["events"], p["email"].lower())
     people.sort(key=rank)
     external = [p for p in people if p["domain"] != home]
+    def _review_rank(p):
+        d = days_since(p.get("last"))
+        return (0 if d == "" else 1, -int(d) if d != "" else 0,
+                p["email"].lower())
+    review = sorted([p for p in people if p["aep"]], key=_review_rank)
     purge = [p for p in people if p["verdict"].startswith("PURGE")]
     unknown = [p for p in people if p["verdict"].startswith("UNKNOWN")]
     active = [p for p in people if p["events"]]
@@ -1082,13 +1202,16 @@ def main():
         "run_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "days": opts.days, "home_domain": home,
         "all_accounts": people, "purge": purge, "external": external,
-        "profiles": profiles, "tech": tech_rows,
+        "profiles": profiles, "tech": tech_rows, "sandboxes": sandboxes,
+        "review": review,
         "verified": bool(verified), "incomplete": incomplete,
         "stats": {"out_of_scope_users": sum(1 for p in people
                                             if p["out"] and not p["aep"])},
         "headline": headline, "limits": limits,
     }
-    path = OUTPUT_DIR / f"external_access_audit_{datetime.now():%Y%m%d}.xlsx"
+    out_dir = Path(opts.out_dir) if opts.out_dir else OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"external_access_audit_{datetime.now():%Y%m%d}.xlsx"
     path = write_xlsx(data, path)
 
     print()

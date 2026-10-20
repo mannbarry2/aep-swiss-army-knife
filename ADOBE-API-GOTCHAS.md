@@ -59,17 +59,37 @@ params = [("property", f"user=={email.lower()}")]   # always .lower()
 
 Proven: the same address returned 1,000 events lower-cased and 0 upper-cased.
 
-### Per-user `totalElements` is exact, even though pages cap at 1,000
+### `totalElements` is CAPPED at 1,000 — it is a floor, not a count
 
-A page returns at most 1,000 events, but `page.totalElements` on a
-single-user query is the server's own full count for that user.
+**Corrected 2026-10-20.** An earlier version of this file claimed the
+per-user count was exact. It is not, and the error mattered: usage figures
+were being reported as measurements when they were ceilings.
 
-That makes **one query per email** the accurate way to answer "has this person
-used the platform?" — it cannot be fooled by the page cap, unlike sweeping the
-whole log and tallying locally, which silently loses the overflow of any
-window still at the cap after being split.
+A single query returns at most 1,000 events, and `page.totalElements`
+reports at most 1,000 with it. Two users with wildly different volumes both
+come back as exactly `1000`:
 
-Too slow for a whole org. Right for any list a decision rests on.
+```
+heavy.user@example.com    totalElements = 1000   (really 28,106, per a full sweep)
+another.user@example.com  totalElements = 1000
+```
+
+So:
+
+* **A count of exactly 1,000 means "at least 1,000".** Present it as `1000+`,
+  never as a number.
+* **Zero is still a true zero.** The cap is a ceiling; it does not inflate a
+  quiet account. This is why a purge list built on "is this exactly zero" is
+  unaffected by the cap, while any *ranking* by event volume is meaningless
+  above 1,000.
+* To get a real count above the cap you must sweep the log and tally
+  locally, or split the window until each slice is under 1,000.
+
+### Events are returned newest-first
+
+`_embedded.events[0].timestamp` is the user's most recent activity. Worth
+knowing because it makes "last active" free — the query has already been
+paid for, so there is no reason to leave that column empty.
 
 ### Why these three matter more than they look
 
