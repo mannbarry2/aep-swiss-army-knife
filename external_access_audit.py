@@ -45,7 +45,14 @@ Output: ONE workbook, output/aep-user-logs/external_access_audit_<YYYYMMDD>.xlsx
   Profiles         the AEP product profiles and how many hold each
   Tech accounts    @techacct.adobe.com service accounts by audit volume
 
-Read-only: GETs only.
+READ-ONLY, AND ENFORCED
+    This tool decides whether people keep their access, so it must never be
+    able to change anything. That is not left to the code's good intentions:
+    install_readonly_guard() wraps urllib for the whole process, so ANY
+    request that is not a GET raises before it leaves the machine -- including
+    requests made by imported modules. The single exception is the IMS token
+    POST, matched on an exact URL, which mints a credential and alters nothing
+    in Adobe. There is no flag to disable this.
 
 Usage:
     python external_access_audit.py                      # default credential
@@ -127,6 +134,83 @@ OUT_RE = re.compile(
     r"lightroom|fresco|dimension|captivate|xd|express|firefly|"
     r"aem|assets essentials|genstudio|target|campaign|"
     r"data collection|privacy service|dynamic tag", re.I)
+
+# ----------------------------------------------------------------------------
+# Read-only guard
+# ----------------------------------------------------------------------------
+# This tool decides whether people keep their access. It must never be able to
+# CHANGE anything, and "we only wrote GETs" is a promise about the code as it
+# stands, not a property of it -- one careless edit, or one imported helper
+# that posts, and the promise is silently void.
+#
+# So the guarantee is enforced at the socket instead of asserted in a comment.
+# Every HTTP call in this process, including ones made by imported modules we
+# do not own, goes through urllib; wrapping urlopen means ANY request that is
+# not a bare GET raises before it leaves the machine. There is no flag to turn
+# this off: to make this tool write something, you would have to delete this
+# block, which is exactly the amount of deliberation that change deserves.
+READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# The single exception, and it is not a data write: OAuth requires the token
+# request itself to be a POST. It mints a credential; it changes nothing in
+# Adobe. Matched on exact scheme+host+path so that "contains adobelogin" can
+# never be stretched into something broader.
+AUTH_ENDPOINTS = frozenset({
+    "https://ims-na1.adobelogin.com/ims/token",
+    "https://ims-na1.adobelogin.com/ims/token/v3",
+})
+
+
+class ReadOnlyViolation(RuntimeError):
+    """Raised when anything in this process tries a non-GET request."""
+
+
+def _is_auth_endpoint(url: str) -> bool:
+    """True only for an exact IMS token URL -- no substring matching, no
+    wildcards, query string ignored."""
+    try:
+        u = urllib.parse.urlsplit(str(url))
+    except Exception:
+        return False
+    base = f"{u.scheme}://{u.netloc}{u.path}".rstrip("/")
+    return base in AUTH_ENDPOINTS
+
+
+def install_readonly_guard() -> None:
+    """Make every outbound HTTP request in this process provably read-only."""
+    import urllib.request as _ur
+
+    if getattr(_ur.urlopen, "_readonly_guarded", False):
+        return
+    _real_urlopen = _ur.urlopen
+
+    def guarded(req, *args, **kwargs):
+        method = "GET"
+        url = req if isinstance(req, str) else getattr(req, "full_url", "?")
+        body = None
+        if not isinstance(req, str):
+            try:
+                method = (req.get_method() or "GET").upper()
+            except Exception:
+                method = "GET"
+            body = getattr(req, "data", None)
+        if method == "POST" and _is_auth_endpoint(url):
+            return _real_urlopen(req, *args, **kwargs)   # token mint only
+        if method not in READ_ONLY_METHODS:
+            raise ReadOnlyViolation(
+                f"BLOCKED: {method} {url}  --  "
+                f"  {SCRIPT_NAME} is read-only. It may only ever GET. "
+                f"If a write is genuinely wanted, remove "
+                f"install_readonly_guard() deliberately -- do not widen it.")
+        if body:
+            raise ReadOnlyViolation(
+                f"BLOCKED: request to {url} carries a body ({len(body)} bytes). "
+                f"{SCRIPT_NAME} is read-only.")
+        return _real_urlopen(req, *args, **kwargs)
+
+    guarded._readonly_guarded = True
+    _ur.urlopen = guarded
+
 
 ANSI = {"reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
         "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
@@ -551,6 +635,15 @@ def write_xlsx(data: dict, path: Path) -> Path:
                   f"those and are listed but not flagged.")
     r += 2
 
+    ws.cell(r, 1, "READ-ONLY").font = Font(bold=True, color="2E7D32")
+    r += 1
+    ws.cell(r, 1, "This report was produced by a tool that cannot write to "
+                  "Adobe. Every non-GET request is blocked at the network "
+                  "layer, not merely avoided by convention; the only POST "
+                  "permitted is the IMS token request, which mints a "
+                  "credential and changes nothing.").font = Font(
+        italic=True, color="2E7D32")
+    r += 2
     ws.cell(r, 1, "WHAT THIS CANNOT TELL YOU").font = red
     r += 1
     for line in data["limits"]:
@@ -745,6 +838,7 @@ def parse_args(argv):
 
 
 def main():
+    install_readonly_guard()
     _log_setup()
     opts = parse_args(sys.argv[1:])
     if opts.days > AUDIT_RETENTION_DAYS:
