@@ -922,6 +922,10 @@ def parse_args(argv):
                    help="the corporate domain; everything else counts as "
                         "external (default: whichever domain most of the "
                         "roster uses)")
+    p.add_argument("--client", default=None,
+                   help="organisation name for the filename and titles "
+                        "(default: derived from the detected corporate "
+                        "domain)")
     p.add_argument("--out-dir", default=None,
                    help="where to write the workbook. Defaults to "
                         "$AEP_AUDIT_OUT, else output/aep-user-logs/. Point "
@@ -1198,7 +1202,7 @@ def main():
         limits.insert(0, "--no-activity was used: NO usage was checked at all.")
 
     data = {
-        "org_label": conf.get("client") or conf["org_id"],
+        "org_label": (opts.client or home.split(".")[0]).title(),
         "run_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "days": opts.days, "home_domain": home,
         "all_accounts": people, "purge": purge, "external": external,
@@ -1211,7 +1215,16 @@ def main():
     }
     out_dir = Path(opts.out_dir) if opts.out_dir else OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"external_access_audit_{datetime.now():%Y%m%d}.xlsx"
+    # Name the file after the organisation it describes, so it still makes
+    # sense months later in a folder of other people's reports. The name is
+    # DERIVED from the corporate domain this run detected, never hard-coded:
+    # a client's name does not belong in this repo, but it very much belongs
+    # on their report. --client overrides.
+    org = (opts.client or home.split(".")[0]).strip().title() or "Org"
+    where = ",".join(sandboxes) if sandboxes else "no-sandbox"
+    safe = re.sub(r"[^0-9A-Za-z _,-]+", "", f"{org} - {where}").strip()
+    path = out_dir / (f"AEP Access Audit - {safe} - "
+                      f"{datetime.now():%Y-%m-%d}.xlsx")
     path = write_xlsx(data, path)
 
     print()
