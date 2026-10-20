@@ -131,6 +131,17 @@ AEP_RE = re.compile(
 # match. CJA is a separate responsibility; it also keeps its own audit
 # trail this tool cannot read, so reporting it here would be guesswork.
 CJA_RE = re.compile(r"cja|customer journey analytics", re.I)
+# Also out of scope, and for the same reason -- a different team owns them.
+# These need their own test because Adobe names them as sub-products of
+# "Adobe Experience Platform" ("Adobe Experience Platform Data Collection"),
+# so the AEP include above matches them whether you meant it to or not.
+# Assurance IS here. Adobe files it under the Experience Platform product
+# rather than under Data Collection, so the product name alone would keep it
+# in scope -- but it is an SDK debugging tool and belongs to the data
+# collection team. It is also the single biggest group of the lot, 62 people,
+# so getting it wrong skews the whole report.
+OTHER_TEAM_RE = re.compile(r"data collection|launch|privacy service|"
+                           r"dynamic tag|assurance", re.I)
 # NOTE on the bare "aep": most people here do NOT get Platform access through
 # a product profile. They get it through an AD group nested into one --
 # names like "GG-UK-<org>-PROD-AdobeAEP-Analyst". Those groups carry no
@@ -317,7 +328,8 @@ def build_profile_index(groups: list) -> dict:
         # Analytics" contains the word Analytics, so testing the exclusion
         # first would throw CJA out of its own report.
         idx[name] = (product, bool(AEP_RE.search(both))
-                     and not CJA_RE.search(both))
+                     and not CJA_RE.search(both)
+                     and not OTHER_TEAM_RE.search(both))
     return idx
 
 
@@ -881,13 +893,27 @@ def write_xlsx(data: dict, path: Path) -> Path:
     # ---- Tech accounts -----------------------------------------------------
     cols = ["Technical account", f"Events ({data['days']}d)", "Last seen",
             "Sandboxes used", "Top activity", "In roster?"]
-    ws = sheet("Tech accounts", "Service / API accounts by volume",
-               "@techacct.adobe.com integrations seen in the log, busiest "
-               "first -- the credentials worth reviewing. Not people.", cols)
+    swept = bool(data.get("swept"))
+    note = ("@techacct.adobe.com integrations seen in the log, busiest first "
+            "-- the credentials worth reviewing. These are not people.")
+    if not swept:
+        note = ("NOT COLLECTED IN THIS RUN. Service accounts are only found "
+                "by the whole-log sweep, which this run skipped (--no-sweep). "
+                "An empty table here means nobody looked, NOT that there are "
+                "no service accounts -- the last full sweep found six, one of "
+                "them with 6.9 million events. Re-run without --no-sweep to "
+                "populate this tab.")
+    ws = sheet("Tech accounts", "Service / API accounts by volume", note, cols)
+    if not swept:
+        ws["A3"].font = Font(italic=True, bold=True, color="C00000")
     rr = 6
+    if not swept and not data["tech"]:
+        c = ws.cell(rr, 1, "-- not collected: this run used --no-sweep --")
+        c.font = Font(italic=True, bold=True, color="C00000")
+        rr += 1
     for t in data["tech"]:
         for c, v in enumerate([t["email"], t["events"],
-                               (t["last"] or "")[:19].replace("T", " "),
+                               (t["last"] or "")[:16].replace("T", " "),
                                ", ".join(f"{k} ({v2})" for k, v2 in t["per_sandbox"].items()),
                                ", ".join(f"{k} x{v2}" for k, v2 in t["top_assets"]),
                                t["in_roster"]], 1):
@@ -1207,7 +1233,7 @@ def main():
         "days": opts.days, "home_domain": home,
         "all_accounts": people, "purge": purge, "external": external,
         "profiles": profiles, "tech": tech_rows, "sandboxes": sandboxes,
-        "review": review,
+        "review": review, "swept": not opts.no_sweep,
         "verified": bool(verified), "incomplete": incomplete,
         "stats": {"out_of_scope_users": sum(1 for p in people
                                             if p["out"] and not p["aep"])},
@@ -1223,8 +1249,29 @@ def main():
     org = (opts.client or home.split(".")[0]).strip().title() or "Org"
     where = ",".join(sandboxes) if sandboxes else "no-sandbox"
     safe = re.sub(r"[^0-9A-Za-z _,-]+", "", f"{org} - {where}").strip()
-    path = out_dir / (f"AEP Access Audit - {safe} - "
+    # BETA stays in the filename until the known gaps are closed -- chiefly
+    # that service accounts cannot yet be joined to their usage, and that a
+    # --no-sweep run cannot see them at all. A reader who only ever sees the
+    # file, not this code, should still know its standing.
+    path = out_dir / (f"AEP Access Audit (BETA) - {safe} - "
                       f"{datetime.now():%Y-%m-%d}.xlsx")
+    # If the intended file is open in Excel, Windows refuses to replace it --
+    # and a two-hour sweep would die at the save, after all the work and with
+    # nothing written. Fall back to a numbered name instead of throwing the
+    # run away; the log says which file was actually written.
+    if path.exists():
+        try:
+            with open(path, "ab"):
+                pass
+        except OSError:
+            for i in range(2, 50):
+                alt = path.with_name(f"{path.stem} ({i}){path.suffix}")
+                if not alt.exists():
+                    logger.warning(
+                        f"{path.name} is open in another program, so it "
+                        f"cannot be replaced. Writing {alt.name} instead.")
+                    path = alt
+                    break
     path = write_xlsx(data, path)
 
     print()
