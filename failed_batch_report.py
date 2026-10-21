@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import sys
 import urllib.error
@@ -120,7 +121,7 @@ logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger("failed_batch_report")
 SSL_CTX = ssl._create_unverified_context()
 
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
+DEFAULT_OUTPUT_ROOT = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parent / "output")
 
 
 def banner(conf, sandbox, hours):

@@ -111,7 +111,7 @@ SCRIPT_VERSION = "1.1"
 SCRIPT_DATE = "2026-09-25"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 
 HOST = os.environ.get("AJO_HOST") or "https://journey-private.adobe.io/authoring"
 DEFAULT_API_KEY = "voyager_ui"          # the AJO UI's own client id

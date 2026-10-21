@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import sys
 import time
@@ -77,7 +78,7 @@ import aep_creds
 SCRIPT_VERSION = "0.1-beta"
 SCRIPT_DATE = "2026-09-21"
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 BASELINE_DIR = SCRIPT_DIR / "baselines"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
@@ -614,7 +615,7 @@ DOT = {"red": "🔴", "amber": "🟠", "green": "🟢", "grey": "⚪"}
 
 
 def load_history(sandbox) -> list:
-    p = OUTPUT_DIR / f"guardrail_audit_history_{sandbox}.json"
+    p = SCRIPT_DIR / "output" / f"guardrail_audit_history_{sandbox}.json"
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
@@ -668,7 +669,7 @@ def write_report(sandbox, checks, history, baseline, datestr) -> Path:
     history = [h for h in history if h.get("date") != datestr] + [
         {"date": datestr, "version": SCRIPT_VERSION,
          "checks": [{k: c.get(k) for k in ("key", "title", "value", "display", "status", "method", "note")} for c in checks]}]
-    (OUTPUT_DIR / f"guardrail_audit_history_{sandbox}.json").write_text(json.dumps(history, indent=1), encoding="utf-8")
+    (SCRIPT_DIR / "output" / f"guardrail_audit_history_{sandbox}.json").write_text(json.dumps(history, indent=1), encoding="utf-8")
     return path
 
 def print_console(checks):

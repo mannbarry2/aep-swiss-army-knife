@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import sys
 import urllib.error
@@ -59,7 +60,7 @@ SCRIPT_DATE = "2026-09-29"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 PLATFORM = "https://platform.adobe.io"

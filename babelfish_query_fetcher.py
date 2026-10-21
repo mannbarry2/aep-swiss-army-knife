@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import urllib.error
@@ -173,7 +174,7 @@ def apply_config(conf: dict, service: str) -> None:
     MY_USER_IDS   = _normalize_user_ids(conf.get("my_user_ids") or [])
     _LABELS_BY_ID = {e["id"]: e["label"] for e in MY_USER_IDS}
     TENANT        = tenant_for_org(ORG_ID)
-    SQL_DIR       = SCRIPT_DIR / "output" / "sql" / TENANT
+    SQL_DIR       = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output") / "sql" / TENANT
     _CACHED_TOKEN = None
 
 # ============================================================================

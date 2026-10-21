@@ -46,6 +46,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import sys
 import urllib.error
@@ -67,7 +68,7 @@ SCRIPT_DATE = "2026-09-29"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 
 DEFAULT_CREDENTIAL = "aep-prod"
 DEFAULT_DAYS = 30
@@ -265,7 +266,7 @@ def fetch_jobs(headers, cutoff: datetime) -> list[dict]:
 # ----------------------------------------------------------------------------
 # Local history cache (survives a snapshot dataset changeover)
 # ----------------------------------------------------------------------------
-CACHE_DIR = OUTPUT_DIR / "snapshot_history_cache"
+CACHE_DIR = SCRIPT_DIR / "output" / "snapshot_history_cache"  # local
 
 
 def load_cache(sandbox: str) -> dict:

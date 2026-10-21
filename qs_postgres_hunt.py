@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -57,7 +58,7 @@ SCRIPT_VERSION = "1.0.0"
 SCRIPT_DATE = "2026-10-09"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parent / "output")
 QS = "https://platform.adobe.io/data/foundation/query"
 DEFAULT_QUERY = "a9530b2e-35ef-4b82-99eb-2915abda60b8"
 logger = dd.logger

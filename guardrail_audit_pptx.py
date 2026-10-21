@@ -23,6 +23,7 @@ Needs python-pptx (pip install python-pptx).
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 BASELINE_DIR = SCRIPT_DIR / "baselines"
 
 INK = RGBColor(0x1B, 0x1F, 0x3B)        # near-black navy for text
@@ -58,7 +59,7 @@ def latest_report(sandbox: str | None, date: str | None) -> tuple[dict, Path]:
     store guardrail_audit.py keeps -- the audit itself writes one workbook and
     no per-run JSON any more."""
     sandbox = sandbox or "prod"
-    hist_path = OUTPUT_DIR / f"guardrail_audit_history_{sandbox}.json"
+    hist_path = SCRIPT_DIR / "output" / f"guardrail_audit_history_{sandbox}.json"
     try:
         hist = json.loads(hist_path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
@@ -84,7 +85,7 @@ def load(rep: dict, all_columns: bool = False):
     if not all_columns:
         return rep, cols[:1]
     try:
-        hist = json.loads((OUTPUT_DIR / f"guardrail_audit_history_{sandbox}.json").read_text(encoding="utf-8"))
+        hist = json.loads((SCRIPT_DIR / "output" / f"guardrail_audit_history_{sandbox}.json").read_text(encoding="utf-8"))
         prev = [h for h in hist if h.get("date") < date]
         if prev:
             p = prev[-1]

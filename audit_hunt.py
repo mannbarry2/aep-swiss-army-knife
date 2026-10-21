@@ -44,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -62,7 +63,7 @@ SCRIPT_VERSION = "1.0.0"
 SCRIPT_DATE = "2026-10-07"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parent / "output")
 PLATFORM = "https://platform.adobe.io"
 DATASETS_URL = f"{PLATFORM}/data/foundation/catalog/dataSets"
 BATCHES_URL = f"{PLATFORM}/data/foundation/catalog/batches"

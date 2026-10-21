@@ -44,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -62,9 +63,9 @@ SCRIPT_VERSION = "1.0.0"
 SCRIPT_DATE = "2026-10-08"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parent / "output")
 ACL = "https://platform.adobe.io/data/foundation/access-control"
-CACHE = OUTPUT_DIR / "user_directory_cache.json"
+CACHE = Path(__file__).resolve().parent / "output" / "user_directory_cache.json"  # local
 TECH = ("@techacct.adobe.com", "@adobeid", "@adobeservice")
 AUDIT_TYPES = {"Role", "Permission", "Permission Set", "Policy", "Access Control Policy"}
 logger = ul.logger

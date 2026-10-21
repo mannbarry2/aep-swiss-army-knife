@@ -218,6 +218,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import ssl
 import sys
@@ -257,7 +258,7 @@ RELEASE_NOTES_URL = ("https://github.com/mannbarry2/aep-swiss-army-knife"
 SCRIPT_DIR = Path(__file__).resolve().parent
 # The dictionary (and its sidecars / archive) gets its own folder: output/ is
 # shared with every other tool in the repo and this is the file that matters.
-OUTPUT_DIR = SCRIPT_DIR / "output" / "data_dictionary"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output") / "data_dictionary"
 PQL_DIR = OUTPUT_DIR / "pql"          # full-PQL sidecars, one per sandbox per run
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"

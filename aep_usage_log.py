@@ -108,6 +108,7 @@ import concurrent.futures
 import gzip
 import json
 import logging
+import os
 import ssl
 import sys
 import time
@@ -127,7 +128,7 @@ SCRIPT_DATE = "2026-10-19"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 AUDIT_URL = "https://platform.adobe.io/data/foundation/audit/events"
@@ -396,7 +397,7 @@ CACHE_KEEP_FIELDS = [c for c in RAW_COLUMNS if c != "enhancedEvents"]
 
 
 def cache_dir(sandbox: str) -> Path:
-    return OUTPUT_DIR / "aep_usage_log_cache" / sandbox
+    return SCRIPT_DIR / "output" / "aep_usage_log_cache" / sandbox  # local
 
 
 def load_day(sandbox: str, day: str, key: dict) -> dict | None:

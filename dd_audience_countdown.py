@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import urllib.error
@@ -111,7 +112,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # ============================================================================
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
-OUTPUT_DIR  = SCRIPT_DIR / "output"
+OUTPUT_DIR  = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output")
 
 DEFAULT_OAUTH_URL = "https://ims-na1.adobelogin.com/ims/token"
 DEFAULT_SCOPES    = (

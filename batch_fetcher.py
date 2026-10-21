@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import sys
 import urllib.error
@@ -297,7 +298,7 @@ def pick_batches(ids):
     return selected
 
 
-DEFAULT_DOWNLOAD_ROOT = Path(__file__).resolve().parent / "output" / "failed_batches"
+DEFAULT_DOWNLOAD_ROOT = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parent / "output") / "failed_batches"
 
 
 def get_batch_detail(headers, batch_id):

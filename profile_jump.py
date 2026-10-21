@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -53,7 +54,7 @@ SCRIPT_VERSION = "1.0.0"
 SCRIPT_DATE = "2026-10-07"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parent / "output")
 P = "https://platform.adobe.io"
 FLOWS = f"{P}/data/foundation/flowservice"
 SCHEMAS = f"{P}/data/foundation/schemaregistry/tenant"
