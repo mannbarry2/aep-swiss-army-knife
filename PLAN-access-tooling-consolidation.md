@@ -12,8 +12,8 @@ different machines.
 | file | lines | what it answers |
 |---|---:|---|
 | `aep_creds.py` | 554 | where credentials live. **Shared, works, leave alone.** |
-| `credential_validator.py` | 767 | is a credential alive? *(v1, plaintext JSON)* |
-| `credential_validator_v2.py` | 1,343 | manage + validate credentials in the keyring |
+| `aep_credentials.py` | 767 | is a credential alive? *(v1, plaintext JSON)* |
+| `aep_credentials.py` | 1,343 | manage + validate credentials in the keyring |
 | `aep_usage_log.py` | 967 | what each person did, from the audit log |
 | `permissions_audit.py` | 384 | who can do what, from Access Control |
 | `role_permissions_grid.py` | 220 | role → permission grid, no people |
@@ -47,8 +47,8 @@ in the current arrangement and the easiest to fix.
 
 ### 2. The same plumbing is written three times
 
-`authenticate()` and `http()` are reimplemented in `credential_validator.py`,
-`credential_validator_v2.py` and `aep_usage_log.py`. They differ in retry
+`authenticate()` and `http()` are reimplemented in `aep_credentials.py`,
+`aep_credentials.py` and `aep_usage_log.py`. They differ in retry
 behaviour, timeout handling and error reporting, so a fix in one does not
 reach the others. The audit-window bug found on 20 Oct existed only in one of
 them.
@@ -58,17 +58,22 @@ them.
 Four tools, four spreadsheets, four different naming conventions, and the
 reader has to join them by hand — which is exactly the complaint.
 
-### 4. `credential_validator` v1 is dead
+### 4. The two credential validators — DONE, 21 Oct
 
-v1 reads plaintext `creds/*.json`. v2 manages the keyring, which is where
-credentials now live, and is the shipped pilot. v1 has not been touched since
-29 June and its only unique asset is a wider set of liveness probes (CJA
-dataviews, journeys, identity namespaces, privacy jobs, merge policies) that
-v2 should absorb.
+v1 read plaintext `creds/*.json`; v2 managed the keyring. They were not two
+jobs: **v2 probed the same 12 Adobe services and added store / list / delete /
+migrate / sweep / purge on top.** An earlier draft of this plan claimed v1 had
+unique probes worth absorbing — that was wrong, the result of a grep that did
+not resolve f-strings. The only endpoint v1 had to itself was fetching a
+single AJO journey, where v2 lists them.
 
-**v1 and v2 are not two versions of one tool in the sense that matters — v2 is
-a credential *manager*, v1 was a credential *tester*.** The merge is: move
-v1's probes into v2, retire v1.
+`postman_to_keyring.py` was a third copy of the same idea: import a credential
+file into the keyring, just a different file shape from `--import-json`.
+
+All three are now one tool, **`aep_credentials.py`**: store, import (JSON or
+Postman), authenticate, probe what the key can reach, and manage the set.
+Postman parsing was moved across and proved identical on both export shapes
+before the originals were deleted.
 
 ---
 
@@ -123,7 +128,7 @@ Profiles           what grants access, and to how many
 
 ### Merge the validators
 
-`credential_validator_v2.py` absorbs v1's liveness probes. `credential_validator.py`
+`aep_credentials.py` absorbs v1's liveness probes. `aep_credentials.py`
 is deleted. One tool: store a credential, check it works, see what it can reach.
 
 ---
@@ -170,7 +175,7 @@ the next.
 
 1. **Extract `aep_api.py`.** Stop three tools importing the data dictionary for
    an HTTP helper. No behaviour change, immediately safer.
-2. **Retire `credential_validator.py`**, moving its probes into v2.
+2. **Retire `aep_credentials.py`**, moving its probes into v2.
 3. **Build `aep_access.py` around the existing code**, mode by mode, starting
    with `people` because it is the one in use. Keep the old tools working until
    each mode is proven against them — same inputs, same numbers.

@@ -314,6 +314,75 @@ def fetch_roster(token: str, conf: dict) -> tuple[list, list]:
     return users, groups
 
 
+
+# ----------------------------------------------------------------------------
+# Technical accounts: what they can do, and what they are doing
+# ----------------------------------------------------------------------------
+# Adobe identifies the same service account three different ways, and no two
+# of them appear in the same API:
+#
+#   Access Control   2C56827C6A2932E90A495EFE@techacct.adobe.com   (IMS id)
+#   Developer Console  shows BOTH that and the one below, on one page
+#   Audit log        8531ca25-5321-4df2-a937-9450bd4af0ce@techacct.adobe.com
+#
+# So "which credential is busy, and what is it allowed to do" cannot be
+# answered from the APIs alone. The bridge has to come from Developer Console,
+# which is why CREDENTIAL_NAMES is a local file: someone reads the two ids off
+# each project and records them. It is gitignored because project names are
+# client identifiers.
+CREDENTIAL_NAMES_FILE = SCRIPT_DIR / "inputs" / "api_credential_names.csv"
+
+
+def load_credential_names() -> dict:
+    """{last4_of_tech_account_id: {"project":..., "client4":...}} or {}."""
+    out = {}
+    if not CREDENTIAL_NAMES_FILE.exists():
+        return out
+    for line in CREDENTIAL_NAMES_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [x.strip() for x in line.split(",", 1)]
+        if len(parts) >= 2 and parts[0]:
+            out[parts[0].upper()] = {"project": parts[1], "client4": ""}
+    return out
+
+
+def fetch_api_credentials(token: str, conf: dict, sandbox: str) -> dict:
+    """{ims_id: {"roles": [...], "sandboxes": {...}}} for every API credential
+    that holds an AEP role. Read from Access Control; never fatal."""
+    try:
+        import permissions_audit as pa
+    except Exception as e:
+        logger.warning(f"  Access Control unavailable ({type(e).__name__}); "
+                       f"technical accounts will show usage but no roles.")
+        return {}
+    h = {"Authorization": f"Bearer {token}",
+         "x-api-key": conf.get("api_key") or conf["client_id"],
+         "x-gw-ims-org-id": conf["org_id"], "x-sandbox-name": sandbox,
+         "Accept": "application/json"}
+    out = {}
+    try:
+        roles = pa.fetch_roles(h)
+        logger.info(f"  Access Control: {len(roles)} role(s); finding API "
+                    f"credentials ...")
+        for r in roles:
+            for subj in pa.fetch_subjects(h, r["id"]):
+                if subj.get("subjectType") != "api-integration":
+                    continue
+                rec = out.setdefault(subj["subjectId"],
+                                     {"roles": set(), "sandboxes": set()})
+                rec["roles"].add(r.get("name") or r["id"])
+                for sb in (r.get("sandboxes") or []):
+                    rec["sandboxes"].add(sb if isinstance(sb, str)
+                                         else sb.get("name", ""))
+    except Exception as e:
+        logger.warning(f"  Access Control read failed ({type(e).__name__}: {e});"
+                       f" technical accounts will show usage but no roles.")
+    logger.info(f"  Access Control: {len(out)} API credential(s) hold a role.")
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Classification
 # ----------------------------------------------------------------------------
@@ -890,38 +959,48 @@ def write_xlsx(data: dict, path: Path) -> Path:
         rr += 1
     fit(ws, 5, caps={1: 50, 2: 46})
 
-    # ---- Tech accounts -----------------------------------------------------
-    cols = ["Technical account", f"Events ({data['days']}d)", "Last seen",
-            "Sandboxes used", "Top activity", "In roster?"]
+    # ---- Technical accounts: usage AND permissions, busiest first ---------
+    cols = ["Technical account", "Project", "Client id (last 4)", "What it is",
+            f"Events ({data['days']}d)", "Last seen", "AEP roles",
+            "Role names", "Sandboxes"]
     swept = bool(data.get("swept"))
-    note = ("@techacct.adobe.com integrations seen in the log, busiest first "
-            "-- the credentials worth reviewing. These are not people.")
+    note = ("Every API credential, busiest first. Adobe identifies the same "
+            "service account differently in each API -- Access Control by IMS "
+            "id, the audit log by a UUID -- and neither API carries both, so "
+            "rows cannot yet be merged automatically. A row either has "
+            "PERMISSIONS (from Access Control) or USAGE (from the audit log), "
+            "not both. The Project column comes from a local lookup built by "
+            "reading both ids off each project in Developer Console.")
     if not swept:
-        note = ("NOT COLLECTED IN THIS RUN. Service accounts are only found "
-                "by the whole-log sweep, which this run skipped (--no-sweep). "
-                "An empty table here means nobody looked, NOT that there are "
-                "no service accounts -- the last full sweep found six, one of "
-                "them with 6.9 million events. Re-run without --no-sweep to "
-                "populate this tab.")
-    ws = sheet("Tech accounts", "Service / API accounts by volume", note, cols)
+        note += ("   WARNING: this run used --no-sweep, so NO usage was "
+                 "collected. Rows showing no events mean nobody looked.")
+    ws = sheet("Tech accounts", "API credentials - usage and permissions",
+               note, cols)
     if not swept:
         ws["A3"].font = Font(italic=True, bold=True, color="C00000")
     rr = 6
-    if not swept and not data["tech"]:
-        c = ws.cell(rr, 1, "-- not collected: this run used --no-sweep --")
-        c.font = Font(italic=True, bold=True, color="C00000")
-        rr += 1
-    for t in data["tech"]:
-        for c, v in enumerate([t["email"], t["events"],
-                               (t["last"] or "")[:16].replace("T", " "),
-                               ", ".join(f"{k} ({v2})" for k, v2 in t["per_sandbox"].items()),
-                               ", ".join(f"{k} x{v2}" for k, v2 in t["top_assets"]),
-                               t["in_roster"]], 1):
-            cell = ws.cell(rr, c, v)
-            if c == 2:
+    for c_ in data["credentials"]:
+        ev = (f"{AUDIT_PAGE_CAP}+" if (c_["events"] or 0) >= AUDIT_PAGE_CAP
+              and c_["kind"].startswith("seen") and False
+              else (c_["events"] if c_["events"] else ""))
+        vals = [c_["id"], c_["project"], c_["client4"], c_["kind"], ev,
+                (c_["last"] or "")[:16].replace("T", " "),
+                len(c_["roles"]) or "", ", ".join(c_["roles"]),
+                ", ".join(c_["sandboxes"])]
+        for i, v in enumerate(vals, 1):
+            cell = ws.cell(rr, i, v)
+            if i in (5, 7):
                 cell.alignment = centre
+            if i == 5 and isinstance(v, int) and v > 100000:
+                cell.font = red          # something is very busy
+            if i == 2 and not v:
+                cell.font = Font(color="888888")
         rr += 1
-    fit(ws, 5, caps={1: 50, 4: 30, 5: 40})
+    if not data.get("named"):
+        ws.cell(rr + 1, 1, "Project column is empty: no lookup file at "
+                           "inputs/api_credential_names.csv").font = Font(
+            italic=True, color="C00000")
+    fit(ws, 5, caps={1: 48, 2: 30, 8: 60, 9: 34})
 
     for ws_, hrow, ncols in tables:
         if ws_.max_row > hrow:
@@ -1103,6 +1182,32 @@ def main():
                           "top_assets": act["assets"].most_common(3),
                           "in_roster": "yes" if em in roster_emails else "no"})
 
+    # ---- Technical accounts: usage + what they are permitted to do --------
+    names = load_credential_names()
+    acl = fetch_api_credentials(token, conf, (sandboxes or ["prod"])[0])
+    cred_rows = []
+    # a) credentials Access Control knows about -- these have PERMISSIONS
+    for ims, rec in acl.items():
+        tail = ims.split("@")[0][-4:].upper()
+        meta = names.get(tail, {})
+        cred_rows.append({
+            "id": ims, "kind": "credential (Access Control)",
+            "project": meta.get("project", ""), "client4": meta.get("client4", ""),
+            "roles": sorted(rec["roles"]),
+            "sandboxes": sorted(x for x in rec["sandboxes"] if x),
+            "events": None, "last": "",
+        })
+    # b) accounts the AUDIT LOG saw -- these have USAGE
+    for t in tech_rows:
+        cred_rows.append({
+            "id": t["email"], "kind": "seen in audit log",
+            "project": "", "client4": "", "roles": [], "sandboxes": [],
+            "events": t["events"], "last": t["last"] or "",
+        })
+    # Busiest first; credentials with no usage figure sort after those with one.
+    cred_rows.sort(key=lambda r: (0 if r["events"] else 1,
+                                  -(r["events"] or 0), r["id"]))
+
     # Anyone active who is NOT in the roster at all -- a deleted account whose
     # events survive, or an identity the Admin Console does not list.
     ghosts = [em for em, act in activity.items()
@@ -1234,6 +1339,7 @@ def main():
         "all_accounts": people, "purge": purge, "external": external,
         "profiles": profiles, "tech": tech_rows, "sandboxes": sandboxes,
         "review": review, "swept": not opts.no_sweep,
+        "credentials": cred_rows, "named": bool(names),
         "verified": bool(verified), "incomplete": incomplete,
         "stats": {"out_of_scope_users": sum(1 for p in people
                                             if p["out"] and not p["aep"])},

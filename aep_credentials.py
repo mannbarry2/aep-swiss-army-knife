@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-credential_validator_v2.py  (AEP Swiss Army Knife)
-==================================================
-Credential Validator v2 -- manage and validate Adobe AEP OAuth
-Server-to-Server credentials that live in the **Windows Credential Manager**
-(via the `keyring` library) instead of plaintext JSON on disk.
+aep_credentials.py  (AEP Swiss Army Knife)
+==========================================
+The one credential tool. Everything about an Adobe AEP OAuth
+Server-to-Server credential, from arriving to being checked to being
+retired -- with no secret ever touching the filesystem.
 
-This is the keyring-backed successor to credential_validator.py. Same rich
-AEP probing, but no secrets ever touch the filesystem. It is the migration
-tool: import your legacy creds/*.json into Credential Manager, `validate`
-that they still work, then scrub the plaintext folder.
+    get it in      store (typed), --import-json (legacy creds/*.json),
+                   --import-postman (Adobe's "Download for Postman" export),
+                   or migrate (bulk-import the whole legacy folder)
+    check it       authenticate against IMS
+    see its reach  probe 12 Adobe services -- Query Service, Catalog, Schema
+                   Registry, Flow Service, Data Access, Real-Time CDP merge
+                   policies, Identity, Privacy, CJA, AJO, Offer Decisioning,
+                   sandboxes -- and report what this key can actually touch
+    manage them    list, delete, sweep across services, purge
+
+Formed on 21 Oct 2026 by merging three tools that had grown apart on three
+different machines: credential_validator.py (a tester reading plaintext
+JSON), credential_validator_v2.py (a keyring manager that already did the
+same probing), and postman_to_keyring.py (a third copy of "import a
+credential file", differing only in file shape). The first and last are
+deleted; this is what they became.
 
 Storage model
 -------------
@@ -32,7 +44,7 @@ Commands
     store     Prompt (no echo) for client_id / client_secret / org_id /
               tech_account_id / scopes (+ optional api_key, sandbox) and save
               them under --service. Or one-off import a legacy JSON:
-                  credential_validator_v2.py store --service aep-prod \
+                  aep_credentials.py store --service aep-prod \
                       --import-json "C:\\creds\\auth.json"
               Never writes any value back to disk; reminds you to delete the
               source folder afterward.
@@ -43,8 +55,8 @@ Commands
               HTTP status + sandbox count as proof of life. --deep adds the
               full probe (token decode, Query Service, product-surface sweep,
               AJO). On failure: a human-readable diagnosis.
-                  credential_validator_v2.py validate --service aep-prod
-                  credential_validator_v2.py validate --all --deep
+                  aep_credentials.py validate --service aep-prod
+                  aep_credentials.py validate --all --deep
 
     list      Show which keys exist under a service, values masked
               (first 4 chars + ****).
@@ -57,7 +69,7 @@ Commands
               and -- for the ones with the keys IMS needs -- attempt a token
               mint (throttled 1/sec). Prints a service | keys | OK/FAIL/
               INCOMPLETE table. Read-only; values masked; makes no changes.
-                  credential_validator_v2.py sweep   # exit 0 if all pass, 1 if any fail
+                  aep_credentials.py sweep   # exit 0 if all pass, 1 if any fail
 
     purge     Run a sweep, then for each FAILED or INCOMPLETE service offer to
               delete all its keys (y/N, then type the service name to confirm).
@@ -98,9 +110,9 @@ except ImportError as _e:  # pragma: no cover - reported cleanly in main()
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
-SCRIPT_NAME    = "credential_validator_v2"
-SCRIPT_VERSION = "2.2.0"
-SCRIPT_DATE    = "2026-07-24"
+SCRIPT_NAME    = "aep_credentials"
+SCRIPT_VERSION = "3.0.0"
+SCRIPT_DATE    = "2026-10-21"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -174,7 +186,7 @@ PRODUCT_SURFACES = [
 VERIFY_TLS = True
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches credential_validator.py style
+# ANSI / logging - matches aep_credentials.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
@@ -222,8 +234,8 @@ def print_banner() -> None:
     print(bar)
     print(f"  {ANSI['bold']}{SCRIPT_NAME} v{SCRIPT_VERSION}{ANSI['reset']}   ({SCRIPT_DATE})")
     print(f"  by {SCRIPT_AUTHOR}")
-    print(f"  {ANSI['dim']}Keyring-backed AEP credential store + validator. "
-          f"No secrets on disk.{ANSI['reset']}")
+    print(f"  {ANSI['dim']}Store, check and probe AEP credentials -- "
+          f"no secrets on disk.{ANSI['reset']}")
     print(bar)
 
 
@@ -404,7 +416,7 @@ def get_sandboxes(token: str, conf: dict) -> tuple[int, list | None, str | None]
 
 
 # ----------------------------------------------------------------------------
-# Access-token decode + deep probe (mirrors credential_validator.py)
+# Access-token decode + deep probe (mirrors aep_credentials.py)
 # ----------------------------------------------------------------------------
 def _b64url_decode(seg: str) -> bytes:
     seg += "=" * (-len(seg) % 4)
@@ -593,6 +605,11 @@ def probe_services(token: str, resp: dict, conf: dict,
 # ----------------------------------------------------------------------------
 def cmd_store(args: argparse.Namespace) -> int:
     """store: interactive getpass entry, or one-off --import-json migration."""
+    if getattr(args, "import_postman", None):
+        return _store_from_postman(
+            Path(args.import_postman),
+            args.service or Path(args.import_postman).stem.split(".")[0],
+            dry_run=getattr(args, "dry_run", False))
     if args.import_json:
         return _store_from_json(Path(args.import_json),
                                 args.service or Path(args.import_json).stem)
@@ -638,6 +655,78 @@ def _store_interactive(service: str) -> int:
     registry_add(service)
     logger.info(f"Stored {len(collected)} field(s) under service '{service}'. "
                 f"Validate with: {SCRIPT_NAME}.py validate --service {service}")
+    return 0
+
+
+def _store_from_postman(path: Path, service: str, dry_run: bool = False) -> int:
+    """Read an Adobe Postman environment and store its fields in the keyring.
+
+    No value is ever printed or written to disk -- only field names and a
+    masked length, the same rule as every other path into the vault."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        logger.error(f"Could not read {path.name}: {type(e).__name__}: {e}")
+        return 2
+    try:
+        pm, shape = postman_to_fields(doc)
+    except Exception as e:
+        logger.error(f"{path.name} is not a recognised Adobe export "
+                     f"({type(e).__name__}: {e}).")
+        return 2
+    if not pm:
+        logger.error(f"{path.name} parsed as {shape} but held no populated "
+                     f"credential fields.")
+        return 2
+
+    label = (doc.get("name") or (doc.get("project") or {}).get("title")
+             or doc.get("TECHNICAL_ACCOUNT_EMAIL") or "(unnamed)")
+    logger.info(f"{path.name}: {shape} -- '{label}' -> service '{service}'")
+
+    # Postman's variable names are not ours: map them onto the field names
+    # aep_creds expects. First candidate that is present wins.
+    conf: dict[str, str] = {}
+    for target, candidates in _PM_MAPPING.items():
+        for cand in candidates:
+            if cand in pm:
+                conf[target] = pm[cand]
+                logger.info(f"  {target:<16} <- {cand:<22} ({len(pm[cand])} chars)")
+                break
+
+    # Adobe's OAuth S2S export has no CLIENT_ID -- the API key IS the client
+    # id -- so api_key only earns its own slot when it actually differs.
+    if conf.get("api_key") and conf["api_key"] == conf.get("client_id"):
+        conf.pop("api_key")
+        logger.info("  api_key          -- same as client_id, skipped")
+
+    # A non-default IMS host implies a non-default token endpoint.
+    ims = pm.get("IMS", "")
+    if ims and "ims-na1.adobelogin.com" not in ims:
+        host = ims.replace("https://", "").replace("http://", "").strip("/")
+        conf["oauth_url"] = f"https://{host}/ims/token/v3"
+        logger.info(f"  oauth_url        <- IMS ({host})")
+
+    missing = [k for k in aep_creds.REQUIRED_KEYS if not conf.get(k)]
+    if missing:
+        logger.error(f"Missing required key(s): {', '.join(missing)}. "
+                     f"Add them by hand with:  "
+                     f"python aep_credentials.py store --service {service}")
+        return 1
+
+    if dry_run:
+        logger.info(f"DRY RUN -- nothing written. {len(conf)} key(s) would "
+                    f"be stored.")
+        return 0
+    if not aep_creds.keyring_available():
+        logger.error(f"{aep_creds.backend_name()} -- no usable keyring "
+                     f"backend, refusing to write.")
+        return 1
+
+    for k, v in sorted(conf.items()):
+        aep_creds.kr_set(service, k, v)
+    aep_creds.registry_add(service)
+    logger.info(f"Stored {len(conf)} field(s) under service '{service}'. "
+                f"Delete the source file -- it still holds the secret.")
     return 0
 
 
@@ -1250,6 +1339,110 @@ def run_interactive() -> int:
 
 # ----------------------------------------------------------------------------
 # Main / argparse
+
+# ----------------------------------------------------------------------------
+# Postman environment import
+# ----------------------------------------------------------------------------
+# Adobe's Developer Console offers "Download for Postman", and that file is
+# how most credentials arrive. It used to be handled by a separate script,
+# aep_credentials.py store --import-postman, which did the same job as --import-json with a
+# different file format -- two places to fix the same bug. Folded in here.
+# Postman variable name -> aep_creds key. First match wins.
+_PM_MAPPING = {
+    # Adobe's OAuth S2S Postman env has no CLIENT_ID -- the API key *is* the
+    # client id, so fall back to it before declaring the field missing.
+    "client_id":       ("CLIENT_ID", "CLIENTID", "API_KEY"),
+    "client_secret":   ("CLIENT_SECRET", "CLIENTSECRET"),
+    "org_id":          ("IMS_ORG", "ORG_ID", "IMS_ORG_ID", "ORGID"),
+    "tech_account_id": ("TECHNICAL_ACCOUNT_ID", "TECH_ACCOUNT_ID"),
+    "scopes":          ("SCOPES", "META_SCOPE"),
+    "api_key":         ("API_KEY", "APIKEY"),
+    "sandbox":         ("SANDBOX_NAME", "SANDBOX"),
+}
+
+
+def _pm_scalar(raw) -> str:
+    """Adobe ships some values as JSON arrays (SCOPES, CLIENT_SECRETS).
+    str() on those would silently store a Python repr, so join them."""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(v).strip() for v in raw if str(v).strip())
+    return str(raw or "").strip()
+
+
+def _pm_flatten(doc: dict) -> dict[str, str]:
+    """Postman env {'values':[{key,value,enabled}]} -> {KEY: value}."""
+    out = {}
+    for item in doc.get("values", []):
+        if item.get("enabled") is False:
+            continue
+        key = str(item.get("key", "")).strip().upper()
+        val = _pm_scalar(item.get("value"))
+        if key and val:
+            out[key] = val
+    return out
+
+
+def _pm_flatten_oauth(doc: dict) -> dict[str, str]:
+    """Console "OAuth Server-to-Server" JSON -- a flat top-level dict, with a
+    plural CLIENT_SECRETS array -- to the same flat {KEY: value} shape."""
+    out = {}
+    for key, raw in doc.items():
+        key = str(key).strip().upper()
+        val = _pm_scalar(raw)
+        if key and val:
+            out[key] = val
+    # Only the first secret is the live one; any others are rotation spares,
+    # and comma-joining them would store a value that authenticates as nothing.
+    secrets = doc.get("CLIENT_SECRETS") or []
+    out.pop("CLIENT_SECRETS", None)
+    if secrets and not out.get("CLIENT_SECRET"):
+        out["CLIENT_SECRET"] = str(secrets[0]).strip()
+    return out
+
+
+def _pm_flatten_console(doc: dict) -> dict[str, str]:
+    """Developer Console 'Download JSON' for an OAuth Server-to-Server
+    credential -> the same flat {KEY: value} shape as a Postman env."""
+    proj = doc.get("project", {})
+    out: dict[str, str] = {}
+
+    ims_org = proj.get("org", {}).get("ims_org_id", "")
+    if ims_org:
+        out["IMS_ORG"] = ims_org
+
+    creds = proj.get("workspace", {}).get("details", {}).get("credentials", [])
+    oauth = {}
+    for cred in creds:
+        if cred.get("oauth_server_to_server"):
+            oauth = cred["oauth_server_to_server"]
+            break
+    if not oauth:
+        return out
+
+    if oauth.get("client_id"):
+        out["CLIENT_ID"] = oauth["client_id"]
+    secrets = oauth.get("client_secrets") or []
+    if secrets:
+        out["CLIENT_SECRET"] = secrets[0]
+    if oauth.get("technical_account_id"):
+        out["TECHNICAL_ACCOUNT_ID"] = oauth["technical_account_id"]
+    scopes = oauth.get("scopes") or []
+    if scopes:
+        out["SCOPES"] = ",".join(scopes)
+    return out
+
+
+def postman_to_fields(doc: dict) -> tuple[dict[str, str], str]:
+    """Return (flat vars, format label) for either supported layout."""
+    if "values" in doc:
+        return _pm_flatten(doc), "Postman environment"
+    if "project" in doc:
+        return _pm_flatten_console(doc), "Developer Console JSON"
+    if "CLIENT_ID" in doc or "CLIENT_SECRETS" in doc:
+        return _pm_flatten_oauth(doc), "OAuth Server-to-Server JSON"
+    return {}, "unrecognised"
+
+
 # ----------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
@@ -1261,7 +1454,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog=f"{SCRIPT_NAME}.py",
-        description="Keyring-backed AEP credential store + validator. "
+        description="Store, check and probe AEP credentials. "
                     "Run with no command for the interactive probe (pick a "
                     "credential, pick a sandbox, sweep every API service).")
     parser.add_argument("--insecure", action="store_true",
@@ -1275,6 +1468,14 @@ def build_parser() -> argparse.ArgumentParser:
                              help="Store creds (getpass) or import a legacy JSON.")
     p_store.add_argument("--import-json", metavar="PATH",
                          help="One-off import of a legacy creds JSON into keyring.")
+    p_store.add_argument("--dry-run", action="store_true",
+                         help="Show what would be stored; write nothing.")
+    p_store.add_argument("--import-postman", metavar="PATH",
+                         help="Import an Adobe 'Download for Postman' "
+                              "environment JSON straight into the keyring. "
+                              "Same job as --import-json, different file "
+                              "shape -- both OAuth S2S and older Console "
+                              "exports are recognised.")
 
     p_val = sub.add_parser("validate", parents=[common],
                            help="Mint a token + proof-of-life sandbox call.")

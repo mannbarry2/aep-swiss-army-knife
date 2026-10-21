@@ -37,8 +37,8 @@ openpyxl is required for the .xlsx output.
 
 Credentials come from the OS keyring (Windows Credential Manager) via
 aep_creds, falling back to a plaintext creds/<service>.json only where keyring
-is unavailable. Manage them with credential_validator_v2.py; service names are
-the keys you stored -- run `credential_validator_v2.py list` to see them.
+is unavailable. Manage them with aep_credentials.py; service names are
+the keys you stored -- run `aep_credentials.py list` to see them.
 
 Usage:
     python audit_streaming_schedules.py                 # cred menu, prod, api
@@ -84,7 +84,7 @@ SANDBOX_LIST_URL = (
     "https://platform.adobe.io/data/foundation/sandbox-management/sandboxes"
 )
 # UPS (Unified Profile Service) surfaces -- confirmed in use in this repo
-# (batch_eval_timing.py, credential_validator.py).
+# (batch_eval_timing.py, aep_credentials.py).
 AUDIENCES_URL = "https://platform.adobe.io/data/core/ups/audiences"
 MERGE_POLICIES_URL = "https://platform.adobe.io/data/core/ups/config/mergePolicies"
 PREVIEW_URL = "https://platform.adobe.io/data/core/ups/preview"
@@ -1102,7 +1102,7 @@ def run_api(opts) -> "tuple[list[dict], str, str] | None":
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return None
     if opts["name"]:

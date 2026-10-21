@@ -12,8 +12,8 @@ These are the named/saved queries you see in the AEP Query Editor's
 
 Credentials come from the OS keyring (Windows Credential Manager) via the
 shared aep_creds module, falling back to plaintext creds/<service>.json only
-where keyring is unavailable. Manage them with credential_validator_v2.py;
-service names are the keys you stored (run `credential_validator_v2.py list`).
+where keyring is unavailable. Manage them with aep_credentials.py;
+service names are the keys you stored (run `aep_credentials.py list`).
 On a normal run it prompts you to:
     1. Pick which credential set (service) to use (e.g. acme-insurance).
     2. Pick which sandbox(es) to fetch from.
@@ -37,7 +37,7 @@ Optional filters (combinable; default -- no flags -- is unchanged):
 
 Any plaintext creds/*.json fallback files are gitignored -- never commit
 them. They contain the client_secret, which is a credential; prefer keyring
-(credential_validator_v2.py migrate). An `output\\sql\\` folder (also
+(aep_credentials.py migrate). An `output\\sql\\` folder (also
 gitignored) is created next to the script for the SQL exports, with one
 subfolder per tenant and per sandbox.
 
@@ -95,7 +95,7 @@ DEFAULT_SCOPES    = (
 
 def cred_menu(services: list[str]) -> list[str]:
     """Interactive picker for the credential bank. Mirrors the look of
-    credential_validator_v2.py's menu, over keyring service names. Returns the
+    aep_credentials.py's menu, over keyring service names. Returns the
     chosen service name(s) (possibly several), or [] to quit."""
     bar = f"{ANSI['bold']}{ANSI['cyan']}{'=' * 70}{ANSI['reset']}"
     print()
@@ -213,7 +213,7 @@ def tenant_for_org(org_id: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches credential_validator.py style
+# ANSI / logging - matches aep_credentials.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
@@ -1145,7 +1145,7 @@ def main() -> None:
 
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         sys.exit(1)
 

@@ -56,7 +56,7 @@ on the exit code. Logs go to stderr so `--json` stdout stays clean.
 Read-only: it never creates, edits or deletes anything in AEP.
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
-with a plaintext creds/*.json fallback; manage them with credential_validator_v2.py.
+with a plaintext creds/*.json fallback; manage them with aep_credentials.py.
 
 Usage:
     python sluggishness_detector.py                        # cred menu, dev sandbox
@@ -921,7 +921,7 @@ def main() -> int:
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store.")
+                     "folder. Add one with aep_credentials.py store.")
         return 1
 
     if opts["name"]:

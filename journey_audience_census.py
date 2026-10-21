@@ -21,7 +21,7 @@ live here, because they answer different questions:
 Credentials come from the shared aep_creds layer: the OS keyring vault first,
 falling back to a plaintext creds/ folder where keyring is unavailable. Run
 with no --creds to pick a service interactively; manage services with
-credential_validator_v2.py.
+aep_credentials.py.
 
 ------------------------------------------------------------------------------
 THE HYBRID CREDENTIAL (important -- this is why it works)
@@ -145,7 +145,7 @@ JOURNEY_LIST_FILTER = "metadata.lastModifiedAt>2000-01-01"  # widen past the def
 MAX_JOURNEY_PAGES = 500  # safety cap (~50k journeys) against an infinite paging loop
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches credential_validator.py style
+# ANSI / logging - matches aep_credentials.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
@@ -248,7 +248,7 @@ def ajo_headers(token, api_key, org_id, sandbox):
 
 
 # ----------------------------------------------------------------------------
-# Discovery / menu - matches credential_validator.py
+# Discovery / menu - matches aep_credentials.py
 # ----------------------------------------------------------------------------
 def menu(services):
     """Single-pick credential bank (the token credential). Operates on keyring
@@ -1373,7 +1373,7 @@ def main():
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return
 

@@ -28,7 +28,7 @@ The toolkit spans two product ranges:
 | Tool | What it does |
 |------|--------------|
 | [`external_access_audit.py`](external_access_audit.py) | Who can reach Experience Platform / AJO, and which of them actually use it — the removal list for access that has outlived its purpose. Read-only, enforced. See **[EXTERNAL-ACCESS-AUDIT.md](EXTERNAL-ACCESS-AUDIT.md)**. |
-| [`credential_validator.py`](credential_validator.py) | Quickly checks whether an IMS/AEP credential set is alive and what it can see. **Run this first on any new credential set.** |
+| [`aep_credentials.py`](aep_credentials.py) | **The one credential tool.** Store a credential in the keyring (typed, or imported from a legacy JSON or an Adobe Postman export), check it authenticates, and probe which of 12 Adobe services it can actually reach. Also lists, deletes, migrates and sweeps. **Run this first on any new credential set.** |
 | [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
 | [`journey_audience_census.py`](journey_audience_census.py) | Census of **journeys and audiences** (audiences formerly = segments). `--list` maps every AJO journey to the **audience behind it** (read-audience or qualification); `--audiences` inventories the **whole audience estate** across sandboxes with tags, evaluation type and the segmentation rule (PQL) rendered readable. |
@@ -69,7 +69,7 @@ control.
 ### 2. Sanity-check it
 
 ```
-python credential_validator.py my-tenant
+python aep_credentials.py my-tenant
 ```
 
 This authenticates, decodes the token (scopes, org, expiry, technical
@@ -88,7 +88,7 @@ python <tool>.py                 # interactive: pick a credential set from a men
 python <tool>.py my-tenant       # pick by filename stem (no menu)
 ```
 
-`credential_validator.py` and `babelfish_query_fetcher.py` also accept `--all`
+`aep_credentials.py` and `babelfish_query_fetcher.py` also accept `--all`
 to run across every set in the bank.
 
 ### 4. Optional dependencies
@@ -114,7 +114,7 @@ them all:
   client_id`, so a credential whose subscribed API key differs from its IMS
   client (e.g. AJO hybrids) just sets `api_key`.
 - **Token mints but 403s?** That's the technical account missing from a product
-  profile — `credential_validator.py` names this explicitly and tells you the
+  profile — `aep_credentials.py` names this explicitly and tells you the
   fix.
 - **Nothing secret is committed.** `creds/*.json` and all generated exports are
   gitignored; only `creds/example.json` is tracked.
@@ -225,7 +225,7 @@ python failed_batch_report.py                       # interactive: pick a creden
 python failed_batch_report.py my-tenant --hours=72 --sandbox=prod
 ```
 
-## credential_validator.py
+## aep_credentials.py
 
 Quickly checks whether an Adobe IMS / AEP credential set is alive. Pick a
 credential JSON from `./creds/`; it authenticates via OAuth
@@ -259,13 +259,13 @@ then `403`s on the very first call ("does not have READ permission"). The tool
 calls that out explicitly and names the fix (an admin adds the tech account to
 the product profile, then re-run — permissions are snapshotted at **mint**
 time, so a fresh token is required). See
-[`credential_validator - Overview.docx`](credential_validator%20-%20Overview.docx)
+`credential_validator - Overview.docx` *(describes the retired v1; superseded by `aep_credentials.py`)*
 for how to read every verdict, the three layers of access (scopes vs
 provisioned products vs technical-account permissions), and the AJO rules.
 
 ```
-python credential_validator.py            # interactive menu
-python credential_validator.py --all      # validate every set in ./creds/
+python aep_credentials.py            # interactive menu
+python aep_credentials.py --all      # validate every set in ./creds/
 ```
 
 ## journey_audience_census.py

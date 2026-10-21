@@ -1,0 +1,102 @@
+
+# ----------------------------------------------------------------------------
+# Postman environment import
+# ----------------------------------------------------------------------------
+# Adobe's Developer Console offers "Download for Postman", and that file is
+# how most credentials arrive. It used to be handled by a separate script,
+# postman_to_keyring.py, which did the same job as --import-json with a
+# different file format -- two places to fix the same bug. Folded in here.
+# Postman variable name -> aep_creds key. First match wins.
+_PM_MAPPING = {
+    # Adobe's OAuth S2S Postman env has no CLIENT_ID -- the API key *is* the
+    # client id, so fall back to it before declaring the field missing.
+    "client_id":       ("CLIENT_ID", "CLIENTID", "API_KEY"),
+    "client_secret":   ("CLIENT_SECRET", "CLIENTSECRET"),
+    "org_id":          ("IMS_ORG", "ORG_ID", "IMS_ORG_ID", "ORGID"),
+    "tech_account_id": ("TECHNICAL_ACCOUNT_ID", "TECH_ACCOUNT_ID"),
+    "scopes":          ("SCOPES", "META_SCOPE"),
+    "api_key":         ("API_KEY", "APIKEY"),
+    "sandbox":         ("SANDBOX_NAME", "SANDBOX"),
+}
+
+
+def _pm_pm_scalar(raw) -> str:
+    """Adobe ships some values as JSON arrays (SCOPES, CLIENT_SECRETS).
+    str() on those would silently store a Python repr, so join them."""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(v).strip() for v in raw if str(v).strip())
+    return str(raw or "").strip()
+
+
+def _pm_flatten(doc: dict) -> dict[str, str]:
+    """Postman env {'values':[{key,value,enabled}]} -> {KEY: value}."""
+    out = {}
+    for item in doc.get("values", []):
+        if item.get("enabled") is False:
+            continue
+        key = str(item.get("key", "")).strip().upper()
+        val = _pm_scalar(item.get("value"))
+        if key and val:
+            out[key] = val
+    return out
+
+
+def _pm_flatten_oauth(doc: dict) -> dict[str, str]:
+    """Console "OAuth Server-to-Server" JSON -- a flat top-level dict, with a
+    plural CLIENT_SECRETS array -- to the same flat {KEY: value} shape."""
+    out = {}
+    for key, raw in doc.items():
+        key = str(key).strip().upper()
+        val = _pm_scalar(raw)
+        if key and val:
+            out[key] = val
+    # Only the first secret is the live one; any others are rotation spares,
+    # and comma-joining them would store a value that authenticates as nothing.
+    secrets = doc.get("CLIENT_SECRETS") or []
+    out.pop("CLIENT_SECRETS", None)
+    if secrets and not out.get("CLIENT_SECRET"):
+        out["CLIENT_SECRET"] = str(secrets[0]).strip()
+    return out
+
+
+def _pm_flatten_console(doc: dict) -> dict[str, str]:
+    """Developer Console 'Download JSON' for an OAuth Server-to-Server
+    credential -> the same flat {KEY: value} shape as a Postman env."""
+    proj = doc.get("project", {})
+    out: dict[str, str] = {}
+
+    ims_org = proj.get("org", {}).get("ims_org_id", "")
+    if ims_org:
+        out["IMS_ORG"] = ims_org
+
+    creds = proj.get("workspace", {}).get("details", {}).get("credentials", [])
+    oauth = {}
+    for cred in creds:
+        if cred.get("oauth_server_to_server"):
+            oauth = cred["oauth_server_to_server"]
+            break
+    if not oauth:
+        return out
+
+    if oauth.get("client_id"):
+        out["CLIENT_ID"] = oauth["client_id"]
+    secrets = oauth.get("client_secrets") or []
+    if secrets:
+        out["CLIENT_SECRET"] = secrets[0]
+    if oauth.get("technical_account_id"):
+        out["TECHNICAL_ACCOUNT_ID"] = oauth["technical_account_id"]
+    scopes = oauth.get("scopes") or []
+    if scopes:
+        out["SCOPES"] = ",".join(scopes)
+    return out
+
+
+def postman_to_fields(doc: dict) -> tuple[dict[str, str], str]:
+    """Return (flat vars, format label) for either supported layout."""
+    if "values" in doc:
+        return _pm_flatten(doc), "Postman environment"
+    if "project" in doc:
+        return _pm_flatten_console(doc), "Developer Console JSON"
+    if "CLIENT_ID" in doc or "CLIENT_SECRETS" in doc:
+        return _pm_flatten_oauth(doc), "OAuth Server-to-Server JSON"
+    return {}, "unrecognised"

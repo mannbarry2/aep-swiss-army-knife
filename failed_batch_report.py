@@ -9,8 +9,8 @@ batch and download its failed-record files.
 
 Credentials come from the OS keyring (Windows Credential Manager) via
 aep_creds, falling back to a plaintext creds/<service>.json only where keyring
-is unavailable. Manage them with credential_validator_v2.py; run
-`credential_validator_v2.py list` to see the service names you stored.
+is unavailable. Manage them with aep_credentials.py; run
+`aep_credentials.py list` to see the service names you stored.
 
 Usage:
     python failed_batch_report.py                       # interactive cred menu, last 24h
@@ -320,7 +320,7 @@ def main():
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return
 

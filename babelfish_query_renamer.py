@@ -13,7 +13,7 @@ Credentials come from the shared aep_creds layer: the OS keyring vault
 only where keyring is unavailable. On a normal run it prompts you to pick which
 credential set (service) to use (e.g. acme-insurance, acme alpha); the service
 name can also be supplied on the CLI to run unattended (see Usage). Manage the
-stored services with credential_validator_v2.py.
+stored services with aep_credentials.py.
 
 Usage:
     python babelfish_query_renamer.py                 # interactive menu
@@ -43,7 +43,7 @@ import aep_creds  # keyring-backed credential store (replaces creds/*.json)
 # CONFIG -- shared credential bank (aep_creds: keyring first, creds/ fallback)
 # ----------------------------------------------------------------------------
 # Credentials are resolved through aep_creds by SERVICE NAME (the key you stored
-# with credential_validator_v2.py), picked interactively (or by name on the CLI).
+# with aep_credentials.py), picked interactively (or by name on the CLI).
 # Recognised keys per credential set:
 #   client_id          -- Adobe IMS client ID
 #   client_secret      -- IMS client_credentials secret (REQUIRED -- mints a
@@ -93,7 +93,7 @@ def _normalize_user_ids(raw: list) -> list[dict]:
 
 
 # ---- Coloured logging --------------------------------------------------------
-# Standard timestamped, level-coloured logging (matches credential_validator.py).
+# Standard timestamped, level-coloured logging (matches aep_credentials.py).
 # We enable VT processing on Windows so PowerShell/cmd render the ANSI colours.
 if sys.platform == "win32":
     try:
@@ -1425,7 +1425,7 @@ def main() -> None:
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         sys.exit(1)
 

@@ -45,7 +45,7 @@ the run still completes.
 Credentials come from the shared credential layer (aep_creds): the OS keyring
 vault (Windows Credential Manager) first, falling back to a plaintext
 creds/<service>.json folder only where keyring is unavailable. Manage the vault
-with credential_validator_v2.py; run `credential_validator_v2.py list` to see the
+with aep_credentials.py; run `aep_credentials.py list` to see the
 service names. On a normal run it prompts you to:
     1. Pick which credential set (service) to use (e.g. acme-insurance).
     2. Pick which sandbox(es) to scan.
@@ -1161,7 +1161,7 @@ def main() -> None:
 
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         sys.exit(1)
 

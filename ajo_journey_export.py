@@ -759,7 +759,7 @@ def main():
     if not org:
         if not service:
             logger.error("No org id: pass --org-id=, set AJO_ORG_ID, or store a credential "
-                         "(credential_validator_v2.py store).")
+                         "(aep_credentials.py store).")
             sys.exit(1)
         org = aep_creds.load_creds(service)["org_id"]
 

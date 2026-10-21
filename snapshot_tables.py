@@ -105,7 +105,7 @@ DEFAULT_SCOPES = (
 )
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches credential_validator.py / batch_fetcher.py style
+# ANSI / logging - matches aep_credentials.py / batch_fetcher.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
@@ -943,7 +943,7 @@ def main():
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return
 

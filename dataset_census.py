@@ -52,8 +52,8 @@ the table to read when the total disagrees with the UI.
 
 Credentials come from the OS keyring (Windows Credential Manager) via
 aep_creds, falling back to a plaintext creds/ folder only where keyring is
-unavailable; manage them with credential_validator_v2.py. Service names are the
-keys you stored -- run `credential_validator_v2.py list` to see them.
+unavailable; manage them with aep_credentials.py. Service names are the
+keys you stored -- run `aep_credentials.py list` to see them.
 """
 
 from __future__ import annotations
@@ -1046,7 +1046,7 @@ def main():
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return
 

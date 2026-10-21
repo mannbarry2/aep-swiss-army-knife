@@ -9,7 +9,7 @@ directory. Replaces the earlier auth.py / authandret.py / fetchbatch.py trio.
 VDI-friendly: stdlib only, no pip install required.
 
 At startup it picks a credential set from ./creds/ (the same credential bank
-used by credential_validator.py / batch_eval_timing.py), mints a fresh Adobe
+used by aep_credentials.py / batch_eval_timing.py), mints a fresh Adobe
 IMS token, then lists and downloads failed batches.
 
 Usage:
@@ -139,7 +139,7 @@ def banner(conf, sandbox):
 
 
 # ----------------------------------------------------------------------------
-# Credential bank (shared shape with credential_validator.py / batch_eval_timing.py)
+# Credential bank (shared shape with aep_credentials.py / batch_eval_timing.py)
 # ----------------------------------------------------------------------------
 def menu(services):
     """Prompt for ONE credential set (this tool targets a single sandbox).
@@ -469,7 +469,7 @@ def main():
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return
 

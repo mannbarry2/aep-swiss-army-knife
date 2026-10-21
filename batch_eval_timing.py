@@ -41,8 +41,8 @@ Read-only: it never creates, edits or deletes anything in AEP.
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
 with a plaintext creds/*.json fallback where keyring is unavailable; manage them
-with credential_validator_v2.py. Service names are the keys you stored -- run
-`credential_validator_v2.py list` to see them.
+with aep_credentials.py. Service names are the keys you stored -- run
+`aep_credentials.py list` to see them.
 
 Usage:
     python batch_eval_timing.py                 # interactive cred menu, dev sandbox
@@ -152,7 +152,7 @@ DEFAULT_SCOPES = (
 )
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches credential_validator.py / batch_fetcher.py style
+# ANSI / logging - matches aep_credentials.py / batch_fetcher.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
@@ -197,7 +197,7 @@ SSL_CTX = ssl._create_unverified_context()
 
 
 # ----------------------------------------------------------------------------
-# HTTP / IMS / credential helpers (shared shape with credential_validator.py)
+# HTTP / IMS / credential helpers (shared shape with aep_credentials.py)
 # ----------------------------------------------------------------------------
 def http(url, method="GET", headers=None, data=None, timeout=60):
     """Stdlib-only HTTP. Returns response bytes; raises HTTPError on 4xx/5xx."""
@@ -1700,7 +1700,7 @@ def main():
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store "
+                     "folder. Add one with aep_credentials.py store "
                      "(or migrate), or drop a <service>.json in creds/.")
         return
 

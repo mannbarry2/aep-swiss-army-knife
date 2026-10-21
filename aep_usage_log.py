@@ -75,7 +75,7 @@ the people sheets client-side and counted in excluded_noise too, unless
 --no-exclude-techacct is given (stream C is always counted only).
 
 Credentials come from the shared aep_creds layer (keyring service 'aep-prod'
-by default; manage with credential_validator_v2.py). Read-only: every call is
+by default; manage with aep_credentials.py). Read-only: every call is
 a GET.
 
 What people do
@@ -151,7 +151,7 @@ _HEADER_BG = "1F4E78"   # the Data Dictionary's header blue
 XL_MAX_ROWS = 1_048_576
 
 # ----------------------------------------------------------------------------
-# ANSI / logging - matches credential_validator.py style
+# ANSI / logging - matches aep_credentials.py style
 # ----------------------------------------------------------------------------
 if sys.platform == "win32":
     try:

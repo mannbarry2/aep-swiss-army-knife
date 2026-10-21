@@ -64,7 +64,7 @@ to run just the overlap report.
 Read-only: it never creates, edits or deletes anything in AEP.
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
-with a plaintext creds/*.json fallback; manage them with credential_validator_v2.py.
+with a plaintext creds/*.json fallback; manage them with aep_credentials.py.
 HTTPS_PROXY and REQUESTS_CA_BUNDLE are honoured for Zscaler-style interception.
 
 Usage:
@@ -1132,7 +1132,7 @@ def main() -> int:
     services = aep_creds.list_services()
     if not services:
         logger.error("No credentials found in the keyring vault or the creds/ "
-                     "folder. Add one with credential_validator_v2.py store.")
+                     "folder. Add one with aep_credentials.py store.")
         return 1
 
     wanted = args.service or (DEFAULT_SERVICE if DEFAULT_SERVICE in services

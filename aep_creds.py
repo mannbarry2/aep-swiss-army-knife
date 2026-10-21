@@ -33,7 +33,7 @@ The folder fallback keeps secrets in PLAINTEXT on disk. It exists for machines
 where keyring is unavailable -- it is not the happy path. Whenever a credential
 is read from the folder this module prints a one-time warning to stderr. To
 keep that exposure contained:
-  * Prefer keyring wherever it works (`credential_validator_v2.py migrate`).
+  * Prefer keyring wherever it works (`aep_credentials.py migrate`).
   * Put the folder on encrypted and/or removable storage, NOT your own machine's
     plain disk. Override the location with the AEP_CREDS_DIR env var.
   * `creds/*.json` is gitignored (only creds/example.json is tracked) -- never
@@ -49,7 +49,7 @@ working backend we go straight to the folder). ``win32ctypes`` is used lazily
 for vault enumeration. This module never writes a secret value to disk.
 
 The authoritative store/validate/migrate/sweep CLI lives in
-credential_validator_v2.py; this module is the read/pick layer scripts share.
+aep_credentials.py; this module is the read/pick layer scripts share.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ except ImportError:
 
 
 # ----------------------------------------------------------------------------
-# Field / service model  (kept in lockstep with credential_validator_v2.py)
+# Field / service model  (kept in lockstep with aep_credentials.py)
 # ----------------------------------------------------------------------------
 # Required fields mint a token; the rest are optional (api_key defaults to
 # client_id, scopes has a default, etc.).
@@ -263,7 +263,7 @@ def _warn_plaintext(service: str) -> None:
         f"{hot}[SECURITY] Loaded credentials for {service!r} from PLAINTEXT "
         f"{path}\n"
         f"           ({why}). Secrets are unencrypted on disk. Prefer keyring "
-        f"(credential_validator_v2.py migrate), keep this folder on\n"
+        f"(aep_credentials.py migrate), keep this folder on\n"
         f"           encrypted/removable storage, and delete it when done.{off}",
         file=sys.stderr,
     )
@@ -360,7 +360,7 @@ def load_creds(service: str, *, require: list[str] | None = None,
                     f"*.json. Drop a <service>.json there or set AEP_CREDS_DIR.")
         else:
             hint = (" No services stored yet -- run "
-                    "credential_validator_v2.py store (or migrate).")
+                    "aep_credentials.py store (or migrate).")
         raise CredsError(f"No credentials found for service {service!r}.{hint}")
 
     missing = [k for k in require if not conf.get(k)]
@@ -509,7 +509,7 @@ def pick_service(preselect: str | None = None, *,
     if not services:
         raise CredsError(
             "No credentials available from keyring or the creds folder. Add one "
-            "with credential_validator_v2.py store, or drop a <service>.json in "
+            "with aep_credentials.py store, or drop a <service>.json in "
             f"{CREDS_DIR}.")
 
     if len(services) == 1:
