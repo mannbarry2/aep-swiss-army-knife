@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 22, 2026 · **Latest version:** v3.4.13 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 23, 2026 · **Latest version:** v3.4.14 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,6 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
+| [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
 | [October 16, 2026](#october-16-2026) | v3.4.8 – v3.4.11 | Lookup schemas kept; Dropped Schemas and Dropped Field Index tabs; the run keeps the PC awake |
 | [October 8, 2026](#october-8-2026) | v3.4.7 | Overlap tabs; one workbook per tool |
@@ -26,6 +27,43 @@
 | [August 14, 2026](#august-14-2026) | v3.4.0 – v3.4.1 | Complete Profile coverage; credential name gone from the workbook |
 | [August 13, 2026](#august-13-2026) | v3.3.0 | Audiences tab; provenance line; How to Use tab |
 | [Earlier releases](#earlier-releases) | v3.0.0 – v3.2.0 | The baseline; Profile coverage; SQL table names |
+
+---
+
+## October 23, 2026
+
+**Release date: October 23, 2026** · v3.4.14
+
+New features and updates to existing features in the Data Dictionary:
+
+- **Field history:** fixes from its first full prod run (beta).
+- **Running the dictionary:** every pass ends with an Adobe endpoint health report.
+
+### Field history
+
+The first full prod run of `--history` took seven hours, of which six were the
+history pass; 38% of months could not be read and 12 datasets were lost
+outright. Adobe's Data Access file lists were slow all morning, but the engine
+made it worse than it had to be.
+
+**Fixes and improvements**
+
+| Fix | Description |
+| --- | --- |
+| No dataset lost to one timeout ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.14` | Each dataset began by asking Catalog for its oldest batch. On very large datasets that sort returned 504 Gateway Timeout, and the whole dataset was given up -- 12 in prod, including the Analytics feed and every orders and returns dataset. Months are now walked with Catalog's newest-first query bounded to the month, which answers in about 0.2 s, and the exact start date is looked up only inside the first month that has data. |
+| One file list per read ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.14` | The reader fetched a file list for up to 40 files of a batch before choosing one; history needs one. It now asks for one, and waits 90 s for it instead of 30: the first request for a batch's file list was measured at 17.8 s and often passed 30 s, while the repeat took 0.6 s. |
+| Locked datasets skipped ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.14` | A dataset Data Access refuses outright (HTTP 403, e.g. the semi-smart coupon dataset) is recognised on its first read and skipped, with the reason on its schema tab, instead of being retried month after month. |
+| Back-off when Adobe struggles ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.14` | When most of the last 20 Data Access calls time out or return 5xx, every history worker pauses for three minutes rather than piling up unreadable months. Unreadable months are never cached, so the next run retries them. |
+
+### Running the dictionary
+
+**New features**
+
+| Feature | Description |
+| --- | --- |
+| Adobe endpoint health ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.14` | Every request is counted per Adobe endpoint (Catalog, Data Access file lists, downloads, Schema Registry, Profile). The run log shows a health table after the schema and coverage passes and after history: calls, failures by kind (no answer in time, HTTP 504 ...), median, 95th percentile and slowest response. Retry messages now name the endpoint and the reason, e.g. *Data Access file list ...: no answer in 90s; retry 2/2*. |
+
+For more information, read the [README](README.md).
 
 ---
 

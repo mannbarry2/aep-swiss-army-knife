@@ -87,6 +87,16 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.14 -- History engine hardened after the first UK prod run (7 h, 38% of
+months unreadable, 12 datasets lost to one 504). No dataset-wide "oldest batch"
+query any more: months are walked with the fast newest-first Catalog query and
+the exact start is looked up only inside the first month with data. ONE file
+list per batch read (was up to 40) with a 90 s wait (was 30). A locked dataset
+(HTTP 403) is recognised at once and skipped. When most recent Data Access
+calls fail, history pauses 3 min instead of piling up unreadable months. Every
+request is now counted per Adobe endpoint: retries name the endpoint and the
+reason, and each pass ends with an endpoint health report.
+
 v3.4.13 -- BETA: "Have we got it?" (--history). How many months of UNBROKEN
 data each field has, up to now -- for building audiences. Per dataset and
 month, Catalog finds that month's batches and one is read through the Data
@@ -236,11 +246,13 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -257,8 +269,8 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.13"
-SCRIPT_DATE    = "2026-10-22"
+SCRIPT_VERSION = "3.4.14"
+SCRIPT_DATE    = "2026-10-23"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -372,6 +384,16 @@ HISTORY_MIN_ROWS = 50          # a month this thin is looked at again
 HISTORY_RESAMPLES = 2          # extra samples for a thin / odd / gappy month
 HISTORY_SPARSE = 10            # % -- under this, a one-month hole is a likely miss
 HISTORY_WORKERS = 3            # datasets read in parallel
+# v3.4.14: how a history read talks to Data Access. ONE file list per batch
+# (the reader used to fetch up to 40 before choosing a file -- history needs
+# one), and 90 s for it: the first request for a batch's file list was measured
+# at 17.8 s on 2026-10-23 and often passed 30 s, while the repeat took 0.6 s.
+HISTORY_LISTING = {"max_entries": 1, "meta_timeout": 90, "meta_attempts": 2,
+                   "meta_pause": 5}
+# Back-off: when this many of the last 20 Data Access calls failed, every
+# history worker pauses this long instead of piling up unreadable months.
+HISTORY_TRIP_FAILS = 12
+HISTORY_PAUSE_SECS = 180
 HISTORY_CACHE_VERSION = 1
 # A finished month's batches never change, so each one is cached and a later run
 # reads only the current month. Kept beside the repo: a working file, not a
@@ -537,10 +559,79 @@ SSL_CTX = ssl._create_unverified_context()
 # ----------------------------------------------------------------------------
 # HTTP / IMS / credential helpers  (shared house style)
 # ----------------------------------------------------------------------------
+# Every request is timed and counted per Adobe endpoint, so a slow or failing
+# run can say WHICH endpoint is the problem -- not just that "something timed
+# out" -- and the history pass can back off when Data Access is struggling.
+_EP_LOCK = threading.Lock()
+_EP_STATS = {}                     # endpoint -> {"calls", "outcomes": Counter, "secs": []}
+_EP_RECENT = deque(maxlen=20)      # recent Data Access outcomes, for the back-off
+_PAUSE_UNTIL = [0.0]
+
+
+def _endpoint_of(url: str) -> str:
+    """Plain-English name of the Adobe endpoint a URL belongs to."""
+    if "/export/files/" in url:
+        return ("Data Access: file download (GET /export/files/{id}?path=)"
+                if "path=" in url else "Data Access: file list (GET /export/files/{id})")
+    if "/export/batches/" in url:
+        return "Data Access: batch's files (GET /export/batches/{id}/files)"
+    if "/catalog/batches" in url:
+        return "Catalog: batches (GET /catalog/batches)"
+    if "/catalog/dataSets" in url:
+        return "Catalog: datasets (GET /catalog/dataSets)"
+    if "/schemaregistry/" in url:
+        return "Schema Registry"
+    if "/ups/" in url:
+        return "Profile / Segmentation (/data/core/ups)"
+    if "adobelogin.com" in url:
+        return "IMS token"
+    return "other"
+
+
+def _record(ep: str, outcome: str, secs: float) -> None:
+    with _EP_LOCK:
+        s = _EP_STATS.setdefault(ep, {"calls": 0, "outcomes": Counter(), "secs": []})
+        s["calls"] += 1
+        s["outcomes"][outcome] += 1
+        s["secs"].append(secs)
+        if ep.startswith("Data Access"):
+            _EP_RECENT.append(outcome)
+
+
+def endpoint_report(title: str) -> None:
+    """Log one line per Adobe endpoint used since the last report -- calls,
+    failures by kind, and response times -- then start counting afresh."""
+    with _EP_LOCK:
+        stats = dict(_EP_STATS)
+        _EP_STATS.clear()
+    if not stats:
+        return
+    logger.info(f"  {ANSI['bold']}Adobe endpoint health -- {title}{ANSI['reset']}")
+    for ep, s in sorted(stats.items(), key=lambda kv: -kv[1]["calls"]):
+        secs = sorted(s["secs"])
+        bad = {k: v for k, v in s["outcomes"].items() if k != "ok"}
+        p95 = secs[min(len(secs) - 1, int(len(secs) * 0.95))]
+        logger.info(f"    {ep:<62} {s['calls']:>6,} calls  "
+                    f"{s['outcomes'].get('ok', 0):>6,} ok  "
+                    f"{', '.join(f'{v} {k}' for k, v in sorted(bad.items())) or 'no failures':<26} "
+                    f"median {secs[len(secs) // 2]:5.1f}s  p95 {p95:5.1f}s  max {secs[-1]:5.1f}s")
+
+
 def http(url, method="GET", headers=None, data=None, timeout=60):
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-    with urllib.request.urlopen(req, context=SSL_CTX, timeout=timeout) as r:
-        return r.read(), dict(r.headers)
+    t0, outcome = time.perf_counter(), "ok"
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+        with urllib.request.urlopen(req, context=SSL_CTX, timeout=timeout) as r:
+            return r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        outcome = f"HTTP {e.code}"
+        raise
+    except (TimeoutError, OSError) as e:
+        outcome = ("no answer in time" if "timed out" in str(e).lower()
+                   or isinstance(e, TimeoutError) else type(e).__name__)
+        raise
+    finally:
+        _record(_endpoint_of(url), outcome, time.perf_counter() - t0)
 
 
 def flatten_err(text: str, limit: int = 200) -> str:
@@ -1105,9 +1196,11 @@ def _get_json_retry(url, headers, timeout, attempts=3, pause=8, label=""):
             last = e
             if i == attempts - 1:
                 raise
-        logger.info(f"      {ANSI['dim']}{label or 'request'} retry "
-                    f"{i + 2}/{attempts} (warming after "
-                    f"{type(last).__name__}){ANSI['reset']}")
+        why = (f"HTTP {last.code}" if isinstance(last, urllib.error.HTTPError)
+               else f"no answer in {timeout}s" if "timed out" in str(last).lower()
+               or isinstance(last, TimeoutError) else type(last).__name__)
+        logger.info(f"      {ANSI['dim']}{label or _endpoint_of(url)}: {why}; "
+                    f"retry {i + 2}/{attempts} in {pause}s{ANSI['reset']}")
         time.sleep(pause)
     raise last
 
@@ -1126,7 +1219,8 @@ def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30,
     # physical files fast. Both are retried to ride out the cold-start 504.
     url = f"{EXPORT_URL}/batches/{bid}/files?limit={max_entries}"
     files = _get_json_retry(url, headers, meta_timeout, attempts=meta_attempts,
-                            pause=meta_pause, label="batch files")
+                            pause=meta_pause,
+                            label=f"Data Access batch's files {bid[:26]}")
     entries = (files.get("data") if isinstance(files, dict) else files) or []
     for fe in entries[:max_entries]:
         fid = fe.get("dataSetFileId")
@@ -1134,7 +1228,7 @@ def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30,
             continue
         meta = _get_json_retry(f"{EXPORT_URL}/files/{fid}", headers, meta_timeout,
                                attempts=meta_attempts, pause=meta_pause,
-                               label=f"file manifest {fid[:24]}")
+                               label=f"Data Access file list {fid[:30]}")
         for phys in (meta.get("data") if isinstance(meta, dict) else meta) or []:
             name = phys.get("name") or ""
             if not name.endswith(".parquet"):
@@ -1149,7 +1243,8 @@ def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30,
 
 
 def _download_batch_rows(headers, bid, need, smallest_first=False,
-                         file_timeout=75, quiet=False, patient=None):
+                         file_timeout=75, quiet=False, patient=None,
+                         listing=None):
     """Download a SUCCESS batch's Parquet file(s) and return (rows, bytes). Logs
     each physical file it streams (name, size, rows parsed).
 
@@ -1158,7 +1253,9 @@ def _download_batch_rows(headers, bid, need, smallest_first=False,
     files first. http() pulls a whole file into memory before parsing, so a giant
     partition would time out; the smallest one yields the sample cheaply.
     patient: how hard to retry the file listings; defaults to smallest_first.
-    quiet: per-file lines go to the debug log (the history pass reads hundreds)."""
+    quiet: per-file lines go to the debug log (the history pass reads hundreds).
+    listing: explicit kwargs for _list_batch_parquet_files (max_entries,
+    meta_timeout, meta_attempts, meta_pause), overriding `patient`."""
     rows, total_bytes = [], 0
     log = logger.debug if quiet else logger.info
     patient = smallest_first if patient is None else patient
@@ -1169,9 +1266,9 @@ def _download_batch_rows(headers, bid, need, smallest_first=False,
     # as coverage MISSING. Worth being markedly more patient on that path.
     cand = _list_batch_parquet_files(
         headers, bid,
-        meta_timeout=file_timeout if patient else 30,
-        meta_attempts=6 if patient else 3,
-        meta_pause=20 if patient else 8)
+        **(listing or {"meta_timeout": file_timeout if patient else 30,
+                       "meta_attempts": 6 if patient else 3,
+                       "meta_pause": 20 if patient else 8}))
     if smallest_first:
         # Unknown sizes (length is None) sort last so we prefer a known-small one.
         cand.sort(key=lambda c: (c[2] is None, c[2] if c[2] is not None else 0))
@@ -3800,11 +3897,51 @@ def _typical_batches(cands, used):
     return sorted(pool, key=key)
 
 
+class _DatasetLocked(Exception):
+    """Data Access refuses this dataset outright (HTTP 403) -- every month would
+    fail the same way, so the dataset is skipped at once and says why."""
+
+
+def _why(e: Exception) -> str:
+    """Short reason for a failed read, naming the endpoint where we can."""
+    if isinstance(e, urllib.error.HTTPError):
+        return f"{_endpoint_of(e.url or '').split(' (')[0]}: HTTP {e.code}"
+    if "timed out" in str(e).lower() or isinstance(e, TimeoutError):
+        return "Data Access: no answer in time"
+    return type(e).__name__
+
+
+def _history_backoff() -> None:
+    """Pause every history worker when Data Access is struggling: if most of the
+    last 20 Data Access calls timed out or 5xx'd, wait HISTORY_PAUSE_SECS rather
+    than carry on collecting unreadable months. 4xx (a locked dataset) does not
+    count -- that is a permission, not a struggling platform."""
+    with _EP_LOCK:
+        now = time.time()
+        wait = _PAUSE_UNTIL[0] - now
+        if wait <= 0:
+            recent = list(_EP_RECENT)
+            fails = [o for o in recent if o == "no answer in time"
+                     or o.startswith("HTTP 5")]
+            if len(recent) >= _EP_RECENT.maxlen and len(fails) >= HISTORY_TRIP_FAILS:
+                _PAUSE_UNTIL[0] = now + HISTORY_PAUSE_SECS
+                _EP_RECENT.clear()
+                wait = HISTORY_PAUSE_SECS
+                logger.warning(f"  Adobe Data Access is struggling: {len(fails)} of the "
+                               f"last {len(recent)} calls failed "
+                               f"({', '.join(f'{v} {k}' for k, v in Counter(fails).items())}). "
+                               f"Pausing history reads for {HISTORY_PAUSE_SECS // 60} min.")
+    if wait > 0:
+        time.sleep(wait)
+
+
 def _history_read(headers, bid, paths):
     """Read one batch -> (records read, {path: records carrying it}, earliest
-    event date seen as 'YYYY-MM-DD' or None)."""
+    event date seen as 'YYYY-MM-DD' or None). One file list, 90 s wait."""
+    _history_backoff()
     rows, _ = _download_batch_rows(headers, bid, HISTORY_ROWS, smallest_first=True,
-                                   file_timeout=75, quiet=True, patient=False)
+                                   file_timeout=75, quiet=True,
+                                   listing=HISTORY_LISTING)
     counts = {}
     for p in paths:
         n = sum(1 for r in rows if _extract_values(r, p))
@@ -3827,7 +3964,7 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
     except Exception as e:
         logger.debug(f"      history: batch list {dsid} {a:%Y-%m-%d} failed ({e})")
         if whole_month:
-            rec["state"] = "unsure"
+            rec["state"], rec["why"] = "unsure", f"Catalog batch list: {_why(e)}"
         return rec
     cands = [(bid, x) for bid, x in cands
              if a_ms <= int(x.get("created") or 0) < b_ms]
@@ -3837,8 +3974,15 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
         rec["batches"].append(bid)
         try:
             n, counts, ts = _history_read(headers, bid, paths)
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                raise _DatasetLocked(_why(e)) from None
+            rec["why"] = _why(e)
+            logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
+            continue
         except Exception as e:
-            logger.debug(f"      history: batch {bid} unreadable ({e})")
+            rec["why"] = _why(e)
+            logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
             continue
         if not n:
             continue
@@ -3858,24 +4002,36 @@ def dataset_history(headers, ds, months, paths, cached):
     rec["state"] is 'none' (no batches that month, or before the dataset's first
     batch, or past its TTL), 'sampled' ("rows" records read, "fields" = records
     carrying each path) or 'unsure' (batches exist, none could be read).
-    `cached` is this dataset's finished months from earlier runs."""
+    `cached` is this dataset's finished months from earlier runs.
+
+    v3.4.14: no dataset-wide "oldest batch" question any more. Sorting a huge
+    dataset's batches oldest-first 504'd on 12 prod datasets on 2026-10-23 and
+    sank each of them; the newest-first, month-bounded Catalog query answers in
+    ~0.2 s, so every month is simply asked in turn. The exact first date is
+    looked up only inside the first month that has data."""
     dsid = ds["id"]
-    first_b = _history_batches(headers, dsid, "&orderBy=asc:created", limits=(1,))
-    first_ms = next((int(b.get("created") or 0) for _, b in first_b), 0)
-    first = datetime.fromtimestamp(first_ms / 1000, timezone.utc) if first_ms else None
     ttl = ds.get("lake_ttl_days")
     cutoff = months[-1][2] - timedelta(days=ttl) if ttl else None
     current = months[-1][0]
-    out, read, n_cached = {}, [], 0
+    out, read, n_cached, locked = {}, [], 0, None
     for label, a, b in months:
-        if first is None or b <= first or (cutoff and b <= cutoff):
+        if cutoff and b <= cutoff:
             out[label] = {"state": "none"}
         elif label != current and label in cached:
             out[label] = cached[label]
             n_cached += 1
+        elif locked:
+            out[label] = {"state": "unsure", "why": locked, "batches": []}
         else:
-            out[label] = _history_sample(headers, dsid, a, b, paths)
-            read.append((label, a, b))
+            try:
+                out[label] = _history_sample(headers, dsid, a, b, paths)
+                read.append((label, a, b))
+            except _DatasetLocked as e:
+                locked = f"locked: {e}"
+                out[label] = {"state": "unsure", "why": locked, "batches": []}
+    if locked:
+        return {"first": None, "first_month": None, "months": out, "read": len(read),
+                "cached": n_cached, "locked": locked}
 
     # A second look at any month read this run that looks doubtful: unreadable,
     # thin where the dataset is usually full, carrying far fewer fields than
@@ -3900,10 +4056,37 @@ def dataset_history(headers, ds, months, paths, cached):
             continue
         span = (b - a) / (HISTORY_RESAMPLES + 1)
         for i in range(HISTORY_RESAMPLES):
-            _history_sample(headers, dsid, a + i * span, a + (i + 1) * span,
-                            paths, rec=r, whole_month=False)
+            try:
+                _history_sample(headers, dsid, a + i * span, a + (i + 1) * span,
+                                paths, rec=r, whole_month=False)
+            except _DatasetLocked:
+                break
         r["resampled"] = True
-    return {"first": f"{first:%Y-%m-%d}" if first else None, "months": out,
+
+    # Where the data starts. Only the first month that has any batches is
+    # searched for its earliest batch -- a bounded query that answers -- and
+    # only when that month is not the edge of the window or the TTL (data may
+    # go back further than we looked). If even that fails, the month stands.
+    first, first_month = None, None
+    lab0 = next((lab for lab, _, _ in months
+                 if out[lab].get("state") in ("sampled", "unsure")
+                 and out[lab].get("batches")), None)
+    if lab0:
+        a0, b0 = next((a, b) for lab, a, b in months if lab == lab0)
+        at_edge = lab0 == months[0][0] or (cutoff and a0 <= cutoff)
+        if not at_edge:
+            first_month = lab0
+            try:
+                fb = _history_batches(headers, dsid, f"&createdAfter={_ms(a0)}"
+                                      f"&createdBefore={_ms(b0)}&orderBy=asc:created",
+                                      limits=(1,))
+                fms = next((int(x.get("created") or 0) for _, x in fb), 0)
+                if fms:
+                    first = datetime.fromtimestamp(fms / 1000, timezone.utc)
+            except Exception as e:
+                logger.debug(f"      history: first batch in {lab0} for {dsid}: {_why(e)}")
+    return {"first": f"{first:%Y-%m-%d}" if first else None,
+            "first_month": first_month, "months": out,
             "read": len(read), "cached": n_cached}
 
 
@@ -3942,7 +4125,7 @@ def _spark(state: str, cov) -> str:
     return {"empty": SPARK_EMPTY, "unsure": SPARK_UNSURE}.get(state, SPARK_NONE)
 
 
-def _history_verdict(cells, months, firsts, cutoff, now):
+def _history_verdict(cells, months, firsts, cutoff, now, first_months=()):
     """(months of unbroken data up to now, plain-English detail) for one field.
     cells: [(state, coverage%)] oldest first; state is data / empty / unsure /
     none. Months are counted from the real start where it is known -- the
@@ -3975,6 +4158,8 @@ def _history_verdict(cells, months, firsts, cutoff, now):
     hit = [f for f in firsts if a <= f < b]
     if hit:
         start, why = min(hit), f"since {min(hit):%d %b %Y}"
+    elif label in first_months:          # the data starts here; exact day unknown
+        start, why = a, f"since {_mon(label)}"
     elif cutoff and a <= cutoff < b:
         start, why = cutoff, "everything kept -- older data is past the TTL"
     elif j == 0:
@@ -3999,6 +4184,8 @@ def schema_history(k, recs, dsets, months, now):
     labels = [m[0] for m in months]
     firsts = [datetime.strptime(r["first"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
               for r in recs if r.get("first")]
+    first_months = {r["first_month"] for r in recs
+                    if r.get("first_month") and not r.get("first")}
     ttls = [d.get("lake_ttl_days") for d in dsets]
     # Only when EVERY dataset expires data has the oldest of it truly gone.
     cutoff = now - timedelta(days=max(ttls)) if ttls and all(ttls) else None
@@ -4029,7 +4216,7 @@ def schema_history(k, recs, dsets, months, now):
                 if (cells[i][0] == "empty" and cells[i - 1][0] == "data"
                         and cells[i + 1][0] == "data"):
                     cells[i] = ("unsure", None)
-        n, detail = _history_verdict(cells, months, firsts, cutoff, now)
+        n, detail = _history_verdict(cells, months, firsts, cutoff, now, first_months)
         out[path] = {
             "months": n, "detail": detail,
             "spark": "".join(_spark(s, c) for s, c in cells),
@@ -4104,19 +4291,31 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
                     r = fut.result()
                 except Exception as e:
                     logger.warning(f"  history [{i}/{len(jobs)}] {name}: FAILED "
-                                   f"({type(e).__name__}: {e}) -- its fields read "
-                                   f"as unknown.")
+                                   f"({_why(e)}) -- its fields read as unknown; "
+                                   f"it is retried in full next run.")
                     continue
                 recs[dsid] = r
+                ms = [r["months"].get(lab) or {} for lab, _, _ in months]
                 beat = "".join(
                     SPARK_NONE if m.get("state") == "none" else
                     SPARK_UNSURE if m.get("state") == "unsure" else SPARK_LEVELS[-1]
-                    for m in (r["months"].get(lab) or {} for lab, _, _ in months))
-                logger.info(f"  history [{i}/{len(jobs)}] {name}: first batch "
-                            f"{r['first'] or 'none'}, TTL {ds.get('lake_ttl') or 'none'}; "
-                            f"{r['read']} month(s) read, {r['cached']} cached  "
-                            f"{beat}  {ANSI['dim']}"
-                            f"({(time.perf_counter() - t0) / 60:.1f} min){ANSI['reset']}")
+                    for m in ms)
+                start = (f"data since {r['first']}" if r.get("first") else
+                         f"data since {_mon(r['first_month'])}" if r.get("first_month") else
+                         "data before the window" if any(m.get("state") == "sampled" for m in ms)
+                         else "no data in the window")
+                why = Counter(m.get("why") for m in ms if m.get("state") == "unsure")
+                tail = (f"  {ANSI['yellow']}LOCKED ({r['locked']}) -- skipped"
+                        f"{ANSI['reset']}" if r.get("locked") else
+                        f"  {ANSI['yellow']}{sum(why.values())} month(s) unreadable, "
+                        f"retried next run: "
+                        + "; ".join(f"{k or 'no rows'} x{v}" for k, v in why.most_common(3))
+                        + ANSI["reset"] if why else "")
+                logger.info(f"  history [{i}/{len(jobs)}] {name}: {start}, TTL "
+                            f"{ds.get('lake_ttl') or 'none'}; {r['read']} month(s) read, "
+                            f"{r['cached']} cached  {beat}  {ANSI['dim']}"
+                            f"({(time.perf_counter() - t0) / 60:.1f} min){ANSI['reset']}"
+                            + tail)
 
         buckets = {"<1": 0, "1-5": 0, "6-11": 0, "12-23": 0, "24+": 0, "none": 0}
         for k in in_scope:
@@ -4127,10 +4326,15 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
             if not got:
                 k["history_note"] = "UNREADABLE -- no dataset could be checked"
                 continue
+            notes = []
             if len(got) < len(k["history_dsids"]):
-                k["history_note"] = (f"{len(k['history_dsids']) - len(got)} of "
-                                     f"{len(k['history_dsids'])} dataset(s) could "
-                                     f"not be checked")
+                notes.append(f"{len(k['history_dsids']) - len(got)} of "
+                             f"{len(k['history_dsids'])} dataset(s) could not be checked")
+            locked = [d.get("table") or d.get("name") for r, d in got if r.get("locked")]
+            if locked:
+                notes.append(f"Data Access refuses {', '.join(locked)} (HTTP 403)")
+            if notes:
+                k["history_note"] = "; ".join(notes)
             k["history"] = schema_history(k, [r for r, _ in got],
                                           [d for _, d in got], months, now)
             k["history_labels"] = [m[0] for m in months]
@@ -4300,6 +4504,8 @@ def run(service: str, sandbox_arg: str | None,
         logger.info(f"{ANSI['dim']}Data dictionary not requested -- pass "
                     f"--data-dict to sample real values + coverage "
                     f"(adds minutes).{ANSI['reset']}")
+    endpoint_report("schemas, datasets, audiences"
+                    + (" and the coverage pass" if dd_scope is not None else ""))
 
     if history_scope is not None:
         logger.info(f"{ANSI['bold']}Field history (BETA) ENABLED{ANSI['reset']} "
@@ -4317,6 +4523,7 @@ def run(service: str, sandbox_arg: str | None,
             for res in results:
                 for k in res["kept"]:
                     k.pop("history", None)
+        endpoint_report("the field history pass")
 
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     client = client_label(conf)
