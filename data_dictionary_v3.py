@@ -87,6 +87,18 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.13 -- BETA: "Have we got it?" (--history). How many months of UNBROKEN
+data each field has, up to now -- for building audiences. Per dataset and
+month, Catalog finds that month's batches and one is read through the Data
+Access API; that one download answers for every field, so the cost is datasets
+x months, not fields x months. A thin, odd or gappy month is sampled again from
+earlier in the month before it is believed. Three columns on the end of the
+Field Index and every schema tab (months, plain-English detail, a heartbeat
+with one bar per month) and a Field History tab, month by month, shaded.
+Test/perf/temp datasets are left out; months go by LOAD date. Finished months
+are cached in output/field_history_cache/, so only the first run is long.
+See add_field_history.
+
 v3.4.12 -- Two changes to the --data-dict sample columns. (1) TOP values go
 from 5 to 10. (2) PII obfuscation: any sampled value that is an email address,
 or that sits in an identifier / contact field (user id, CRM id, phone, ...), is
@@ -207,6 +219,8 @@ Usage:
     python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict=profile  # one schema
     python data_dictionary_v3.py "acme-k" --sandbox=prod --data-dict \
         --profile-snapshot=67dc0539eaafb02aeeb92ed7   # override snapshot dataset
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --history     # BETA: months of data
+    python data_dictionary_v3.py "acme-k" --sandbox=prod --history=order --history-months=36
 
 Credentials come from the OS keyring (Windows Credential Manager) via aep_creds,
 falling back to a plaintext creds/ folder where keyring is unavailable; manage
@@ -227,7 +241,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aep_creds  # keyring-backed credential store (replaces creds/*.json)
@@ -243,8 +257,8 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.12"
-SCRIPT_DATE    = "2026-10-18"
+SCRIPT_VERSION = "3.4.13"
+SCRIPT_DATE    = "2026-10-22"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -348,6 +362,29 @@ DD_DEFAULT_SCOPE = "all"
 DD_DEFAULT_ROWS = 1000
 # Profile Snapshot Export partitions are large; give each file download longer.
 DD_SNAPSHOT_TIMEOUT = 120
+
+# Field history -- "Have we got it?" (v3.4.13, BETA). How many months of
+# UNBROKEN data each field has, read from one to three batches per dataset per
+# month. See add_field_history.
+HISTORY_MONTHS = 24
+HISTORY_ROWS = 500             # records read per sample
+HISTORY_MIN_ROWS = 50          # a month this thin is looked at again
+HISTORY_RESAMPLES = 2          # extra samples for a thin / odd / gappy month
+HISTORY_SPARSE = 10            # % -- under this, a one-month hole is a likely miss
+HISTORY_WORKERS = 3            # datasets read in parallel
+HISTORY_CACHE_VERSION = 1
+# A finished month's batches never change, so each one is cached and a later run
+# reads only the current month. Kept beside the repo: a working file, not a
+# deliverable, so never under AEP_OUTPUT_DIR.
+HISTORY_CACHE_DIR = SCRIPT_DIR / "output" / "field_history_cache"
+# Test / perf / temp datasets can make a field look older than the real feed.
+_HISTORY_SKIP_RE = re.compile(
+    r"(?:^|[\s_-])(?:test|tests|testing|perftest|perf|loadtest|temp|tmp|dummy|"
+    r"poc|jotestmode)(?:$|[\s_-])", re.I)
+SPARK_NONE, SPARK_EMPTY, SPARK_UNSURE = "░", "▁", "?"     # ░ ▁ ?
+SPARK_LEVELS = "▂▃▄▅▆▇█"          # ▂ to █
+# Months as a number that reads naturally: 0, <1, then whole months.
+HISTORY_MONTHS_FMT = '[=0]"0";[<1]"<1";0'
 
 DEFAULT_SCOPES = (
     "openid,AdobeID,read_organizations,"
@@ -1112,15 +1149,19 @@ def _list_batch_parquet_files(headers, bid, max_entries=40, meta_timeout=30,
 
 
 def _download_batch_rows(headers, bid, need, smallest_first=False,
-                         file_timeout=75):
+                         file_timeout=75, quiet=False, patient=None):
     """Download a SUCCESS batch's Parquet file(s) and return (rows, bytes). Logs
     each physical file it streams (name, size, rows parsed).
 
     smallest_first: for huge datasets (Profile Snapshot Export -- tens of
     millions of rows split into many partitions), download the SMALLEST partition
     files first. http() pulls a whole file into memory before parsing, so a giant
-    partition would time out; the smallest one yields the sample cheaply."""
+    partition would time out; the smallest one yields the sample cheaply.
+    patient: how hard to retry the file listings; defaults to smallest_first.
+    quiet: per-file lines go to the debug log (the history pass reads hundreds)."""
     rows, total_bytes = [], 0
+    log = logger.debug if quiet else logger.info
+    patient = smallest_first if patient is None else patient
     # Snapshot listings are large/slow; give the metadata calls the same patience
     # as the file downloads when we're in the smallest-first (snapshot) path.
     # A 504 on the SNAPSHOT manifest is expensive far beyond this one batch: the
@@ -1128,15 +1169,15 @@ def _download_batch_rows(headers, bid, need, smallest_first=False,
     # as coverage MISSING. Worth being markedly more patient on that path.
     cand = _list_batch_parquet_files(
         headers, bid,
-        meta_timeout=file_timeout if smallest_first else 30,
-        meta_attempts=6 if smallest_first else 3,
-        meta_pause=20 if smallest_first else 8)
+        meta_timeout=file_timeout if patient else 30,
+        meta_attempts=6 if patient else 3,
+        meta_pause=20 if patient else 8)
     if smallest_first:
         # Unknown sizes (length is None) sort last so we prefer a known-small one.
         cand.sort(key=lambda c: (c[2] is None, c[2] if c[2] is not None else 0))
         sizes = [f"{c[2]/1024/1024:.0f}MB" if c[2] else "?" for c in cand[:5]]
-        logger.info(f"      {len(cand)} partition file(s) listed; smallest: "
-                    f"{', '.join(sizes)}")
+        log(f"      {len(cand)} partition file(s) listed; smallest: "
+            f"{', '.join(sizes)}")
     for fid, name, length in cand:
         if len(rows) >= need:
             break
@@ -1148,10 +1189,10 @@ def _download_batch_rows(headers, bid, need, smallest_first=False,
         total_bytes += len(raw)
         parsed = _read_parquet_rows(raw, need - len(rows))
         rows.extend(parsed)
-        logger.info(f"      file {name[:46]} "
-                    f"{ANSI['dim']}{len(raw)/1024:.0f} KB -> "
-                    f"{len(parsed)} rows in "
-                    f"{time.perf_counter() - t0:.1f}s{ANSI['reset']}")
+        log(f"      file {name[:46]} "
+            f"{ANSI['dim']}{len(raw)/1024:.0f} KB -> "
+            f"{len(parsed)} rows in "
+            f"{time.perf_counter() - t0:.1f}s{ANSI['reset']}")
     return rows[:need], total_bytes
 
 
@@ -2572,6 +2613,25 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     conf_font = Font(bold=True, size=11, color="C00000")
     center = Alignment(horizontal="center")
     any_dd = any(k.get("datadict") for res in results for k in res["kept"])
+    # Field history (BETA): three columns on the end of the Field Index and the
+    # schema tabs, plus the Field History tab -- only when --history ran.
+    any_hist = any(k.get("history") for res in results for k in res["kept"])
+    hist_labels = next((k["history_labels"] for res in results for k in res["kept"]
+                        if k.get("history_labels")), [])
+    hist_cols = (["Have we got it? (months, BETA)", "History detail (BETA)",
+                  f"History {hist_labels[0]} > {hist_labels[-1]} (BETA)"]
+                 if hist_labels else [])
+    spark_font = Font(name="Consolas")
+
+    def put_history(ws, row, col, h):
+        """Write one field's three history cells from column `col`."""
+        if not h:
+            return
+        c = ws.cell(row, col, h["months"])
+        c.number_format = HISTORY_MONTHS_FMT
+        c.alignment = center
+        ws.cell(row, col + 1, h["detail"])
+        ws.cell(row, col + 2, h["spark"]).font = spark_font
 
     def style_header(ws, ncols, row=1):
         for c in range(1, ncols + 1):
@@ -2607,7 +2667,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     used = {"summary", "how to use", "schemas", "field index", "datasets",
             "audiences", "snapshot summary", "snapshot tables",
             "overlap cut-list", "overlap full report", "dropped schemas",
-            "dropped field index"}
+            "dropped field index", "field history"}
     tabbed = []  # (res, k, sheet_name)
     for res in results:
         for k in res["kept"]:
@@ -2683,6 +2743,14 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             "(right-click any tab > Unhide).").font = Font(italic=True,
                                                           color="666666")
     r += 1
+    if any_hist:
+        ws.cell(r, 1, f"Field history (BETA): how many months of unbroken data "
+                f"each field has, read from batches back to {_mon(hist_labels[0])} "
+                f"-- the 'Have we got it?' columns on the Field Index and every "
+                f"schema tab, and month by month on the Field History tab. Test, "
+                f"perf and temp datasets are left out.").font = Font(
+                    italic=True, color="6E3FA3")
+        r += 1
 
     # ---- Data completeness: what's MISSING ----------------------------------
     # On a --data-dict run, list every schema whose coverage is not trustworthy
@@ -2774,6 +2842,15 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "Person > Full name > First name), description, whether it is an "
          "identity, and (when the coverage pass ran) how often it is actually "
          "populated plus its ten commonest values (PII starred)."),
+        ("...know how far back a field's data goes (BETA)",
+         "'Have we got it?' columns / Field History",
+         "How many months of UNBROKEN data each field has, up to now -- what "
+         "you need to know before building an audience on it. The Field Index "
+         "and every schema tab end with the number of months, a plain-English "
+         "detail ('since 28 Sep 2026', 'stopped -- last seen Aug 2026') and a "
+         "heartbeat with one bar per month, oldest on the left. The Field "
+         "History tab has the same months as columns, % filled, shaded green. "
+         "Only there when the run was given --history."),
         ("...read it in plain English",
          "Friendly Name / Description",
          "Every tab carries the human-readable name next to the technical one: "
@@ -2814,6 +2891,17 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "Taken from up to a thousand real records, not the whole dataset. "
          "Treat it as 'roughly how often this is filled in', not an exact "
          "figure."),
+        ("'Have we got it?' is a spot-check (BETA)",
+         "Field Index / schema tabs / Field History",
+         "Each month is judged from one to three real batches per dataset, not "
+         "every record, so a field that is rarely filled in can be missed in a "
+         f"month. Heartbeat: {SPARK_NONE} no data at all that month, "
+         f"{SPARK_EMPTY} data arrived but the field was empty, "
+         f"{SPARK_LEVELS[0]} to {SPARK_LEVELS[-1]} how often it was filled, "
+         f"{SPARK_UNSURE} could not be checked. Test, perf and temp datasets "
+         "are left out. Months go by LOAD date: data backfilled later counts "
+         "from when it was loaded, and the schema tab says when a sample showed "
+         "a backfill."),
         ("MISSING is not the same as 0%",
          "Summary",
          "0% means we looked and the field was empty. MISSING means we could "
@@ -2931,22 +3019,24 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 "> Unhide).")
     fi["A3"].font = Font(italic=True, color="666666")
     hr = 5
-    for c, nm in enumerate(FIELD_INDEX_COLUMNS, 1):
+    fi_cols = FIELD_INDEX_COLUMNS + (hist_cols if any_hist else [])
+    for c, nm in enumerate(fi_cols, 1):
         fi.cell(hr, c, nm)
-    style_header(fi, len(FIELD_INDEX_COLUMNS), row=hr)
+    style_header(fi, len(fi_cols), row=hr)
     index_rows = []
     for res, k, name in tabbed:
         dd = k.get("datadict") or {}
+        hist = k.get("history") or {}
         tnames = _sql_table_names(k)
         for (fpath, dtype, friendly, fpath_t, desc, req, ident, rel) in k["fields"]:
             info = dd.get(fpath, {})
             index_rows.append((fpath, dtype, friendly, fpath_t, desc, ident,
                                k["title"], tnames, name, info.get("coverage"),
-                               info.get("top")))
+                               info.get("top"), hist.get(fpath)))
     index_rows.sort(key=lambda x: (x[0].lower(), x[6].lower()))
     ridx = hr + 1
     for (fpath, dtype, friendly, fpath_t, desc, ident, sch, tnames, tab, cov,
-         top) in index_rows:
+         top, h) in index_rows:
         fi.cell(ridx, 1, fpath)
         fi.cell(ridx, 2, dtype)
         fi.cell(ridx, 3, friendly)
@@ -2961,8 +3051,60 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             cc.alignment = center
             cc.number_format = '0"%"'
         fi.cell(ridx, 11, top)
+        put_history(fi, ridx, 12, h)
         ridx += 1
-    autofit(fi, [52, 18, 28, 40, 50, 20, 38, 34, 24, 11, 60])
+    autofit(fi, [52, 18, 28, 40, 50, 20, 38, 34, 24, 11, 60]
+            + ([13, 46, len(hist_labels) + 4] if any_hist else []))
+
+    # ---- Field History (BETA): the heartbeat as numbers, month by month -----
+    if any_hist:
+        from openpyxl.formatting.rule import ColorScaleRule
+        fh = wb.create_sheet("Field History")
+        fh.sheet_properties.tabColor = "6E3FA3"
+        confidential(fh)
+        fh["A2"] = f"Field History (BETA)  -  {label}"
+        fh["A2"].font = title_font
+        fh["A3"] = ("How far back each field's data goes. Each month column is "
+                    "the % of sampled records carrying the field: blank = no "
+                    "data at all that month, 0 = data arrived but the field was "
+                    "empty, ? = could not be checked. Read from one to three "
+                    "batches per dataset per month (test, perf and temp datasets "
+                    "left out), by the month the data was LOADED.")
+        fh["A3"].font = Font(italic=True, color="666666")
+        hr = 5
+        fh_cols = (["Field (dot notation)", "Schema", "Tab"] + hist_cols[:2]
+                   + [_mon(lab) for lab in hist_labels])
+        for c, nm in enumerate(fh_cols, 1):
+            fh.cell(hr, c, nm)
+        style_header(fh, len(fh_cols), row=hr)
+        fh.freeze_panes = fh.cell(hr + 1, 2)
+        none_fill = PatternFill("solid", fgColor="F2F2F2")
+        first_m = 6
+        ridx = hr + 1
+        for (fpath, _t, _f, _ft, _d, _i, sch, _tn, tab, _c, _top, h) in index_rows:
+            if not h:
+                continue
+            fh.cell(ridx, 1, fpath)
+            fh.cell(ridx, 2, sch)
+            fh.cell(ridx, 3, tab)
+            mc = fh.cell(ridx, 4, h["months"])
+            mc.number_format = HISTORY_MONTHS_FMT
+            mc.alignment = center
+            fh.cell(ridx, 5, h["detail"])
+            for i, v in enumerate(h["cells"]):
+                cell = fh.cell(ridx, first_m + i, v)
+                cell.alignment = center
+                if v is None:
+                    cell.fill = none_fill
+                elif isinstance(v, int):
+                    cell.number_format = '0"%"'
+            ridx += 1
+        last_col = get_column_letter(first_m + len(hist_labels) - 1)
+        fh.conditional_formatting.add(
+            f"{get_column_letter(first_m)}{hr + 1}:{last_col}{max(ridx - 1, hr + 1)}",
+            ColorScaleRule(start_type="num", start_value=0, start_color="FFFFFF",
+                           end_type="num", end_value=100, end_color="63BE7B"))
+        autofit(fh, [52, 38, 24, 13, 46] + [9] * len(hist_labels))
 
     # ---- Schemas index tab (one row per kept schema) ------------------------
     sh = wb.create_sheet("Schemas")
@@ -3261,6 +3403,17 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             a3 += f'   |   data dictionary: sampled {k.get("dd_rows", 0)} records'
             if k.get("dd_source"):
                 a3 += f'   |   source: {k["dd_source"]}'
+        hist = k.get("history")
+        if hist or k.get("history_note"):
+            srcs, skipped = k.get("history_sources") or [], k.get("history_skipped") or []
+            a3 += (f'   |   history (BETA): {len(srcs)} dataset(s)'
+                   + (f', {len(skipped)} test/temp left out' if skipped else ''))
+            if k.get("history_backfill"):
+                a3 += (f' -- backfill seen: events dated back to '
+                       f'{k["history_backfill"]} were loaded later, and history '
+                       f'goes by load month')
+            if k.get("history_note"):
+                a3 += f'   |   /!\\ HISTORY {k["history_note"]}'
         # Loud flag when coverage is missing/partial so this tab is never read as
         # gospel: data exists but couldn't be sampled, or only some batches read.
         a3_color = "666666"
@@ -3290,6 +3443,9 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         cols = list(SCHEMA_FIELD_COLUMNS)
         if dd:
             cols += ["Coverage %", "Top values (count)"]
+        hist_at = len(cols) + 1
+        if hist:
+            cols += hist_cols
         hr = 7
         for c, nm in enumerate(cols, 1):
             sheet.cell(hr, c, nm)
@@ -3310,9 +3466,12 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 cov.alignment = center
                 cov.number_format = '0"%"'
                 sheet.cell(ridx, 10, info.get("top"))
+            if hist:
+                put_history(sheet, ridx, hist_at, hist.get(fpath))
             ridx += 1
         autofit(sheet, [50, 20, 28, 40, 50, 9, 22, 42]
-                + ([11, 70] if dd else []))
+                + ([11, 70] if dd else [])
+                + ([13, 46, len(hist_labels) + 4] if hist else []))
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship
@@ -3564,6 +3723,436 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
                             f"tally {time.perf_counter() - t0:.1f}s.")
 
 
+# ----------------------------------------------------------------------------
+# Field history -- "Have we got it?" (v3.4.13, BETA)
+# ----------------------------------------------------------------------------
+# How many months of UNBROKEN data each field has, up to now -- the question
+# behind building an audience on it. Query Service would need a query per field
+# per month. Instead, for each dataset and month, Catalog finds that month's
+# batches (createdAfter/createdBefore, ~0.2 s) and ONE of them is read through
+# the Data Access API with the coverage pass's reader. That one download answers
+# for every field at once, so the cost is datasets x months, not fields x months.
+# Months before a dataset's first batch, or past its TTL, cost nothing.
+#
+# Measured on prod on 2026-10-22: slot expiry's first batch is 2026-09-28, so its
+# fields read "<1"; order events go back to 2025-04-23 under a 2-year TTL. One
+# sample a month can fake a gap -- April's order sample was an odd 101-row batch
+# carrying 9 of 16 fields -- so a month that is thin, short of fields, or missing
+# a field both neighbours have is sampled again from earlier in the month.
+def _ms(dt):
+    return int(dt.timestamp() * 1000)
+
+
+def _mon(label: str) -> str:
+    """'2026-04' -> 'Apr 2026'."""
+    return datetime.strptime(label, "%Y-%m").strftime("%b %Y")
+
+
+def _median(xs):
+    xs = sorted(xs)
+    return xs[len(xs) // 2] if xs else 0
+
+
+def _history_months(n, now=None):
+    """[(label 'YYYY-MM', start, end)] for the last n calendar months, oldest
+    first, in UTC. The current month is partial: it ends now."""
+    now = now or datetime.now(timezone.utc)
+    y, m = now.year, now.month
+    out = []
+    for _ in range(n):
+        start = datetime(y, m, 1, tzinfo=timezone.utc)
+        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+        out.append((f"{y:04d}-{m:02d}", start,
+                    min(datetime(ny, nm, 1, tzinfo=timezone.utc), now)))
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    return out[::-1]
+
+
+def _history_batches(headers, dsid, extra, limits=(10, 3, 1)):
+    """Success batches of a dataset matching `extra` (a Catalog filter and sort
+    suffix), as [(batchId, meta)]. The page size steps down on a timeout, as in
+    sample_schema_rows: Catalog answers a small page where a large one 504s."""
+    base = f"{CATALOG_BATCHES_URL}?dataSet={dsid}&status=success{extra}"
+    last = None
+    for lim in limits:
+        try:
+            d = _get_json_retry(f"{base}&limit={lim}", headers, 60, attempts=2,
+                                label=f"history batches {dsid[:24]}")
+        except Exception as e:
+            last = e
+            continue
+        return [(bid, b) for bid, b in (d.items() if isinstance(d, dict) else [])
+                if isinstance(b, dict)]
+    raise last
+
+
+def _typical_batches(cands, used):
+    """Readable batches not yet read, most TYPICAL first: big enough to prove
+    something, then nearest the median size. A month's odd batch (a handful of
+    records of some other kind) is what fakes a gap."""
+    pool = [(bid, b) for bid, b in cands if bid not in used
+            and _batch_record_count(b) != 0 and not _is_consolidation_batch(b)]
+    med = _median([_batch_record_count(b) for _, b in pool])
+
+    def key(kv):
+        n = _batch_record_count(kv[1])
+        return (0 <= n < HISTORY_MIN_ROWS, abs(n - med))
+    return sorted(pool, key=key)
+
+
+def _history_read(headers, bid, paths):
+    """Read one batch -> (records read, {path: records carrying it}, earliest
+    event date seen as 'YYYY-MM-DD' or None)."""
+    rows, _ = _download_batch_rows(headers, bid, HISTORY_ROWS, smallest_first=True,
+                                   file_timeout=75, quiet=True, patient=False)
+    counts = {}
+    for p in paths:
+        n = sum(1 for r in rows if _extract_values(r, p))
+        if n:
+            counts[p] = n
+    stamps = [str(r.get("timestamp"))[:10] for r in rows if r.get("timestamp")]
+    return len(rows), counts, (min(stamps) if stamps else None)
+
+
+def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
+    """Read one more typical batch created in [a, b) into the month record
+    `rec` (a fresh one when None) and return it. A whole month with no batches
+    stays 'none'; a part-month window that finds nothing changes nothing."""
+    if rec is None:
+        rec = {"state": "none", "rows": 0, "fields": {}, "ts": None, "batches": []}
+    a_ms, b_ms = _ms(a), _ms(b)
+    try:
+        cands = _history_batches(headers, dsid, f"&createdAfter={a_ms}"
+                                 f"&createdBefore={b_ms}&orderBy=desc:created")
+    except Exception as e:
+        logger.debug(f"      history: batch list {dsid} {a:%Y-%m-%d} failed ({e})")
+        if whole_month:
+            rec["state"] = "unsure"
+        return rec
+    cands = [(bid, x) for bid, x in cands
+             if a_ms <= int(x.get("created") or 0) < b_ms]
+    if whole_month and all(_batch_record_count(x) == 0 for _, x in cands):
+        return rec          # no batches, or only empty ones: 'none'
+    for bid, _ in _typical_batches(cands, set(rec["batches"]))[:2]:
+        rec["batches"].append(bid)
+        try:
+            n, counts, ts = _history_read(headers, bid, paths)
+        except Exception as e:
+            logger.debug(f"      history: batch {bid} unreadable ({e})")
+            continue
+        if not n:
+            continue
+        rec["rows"] += n
+        for p, c in counts.items():
+            rec["fields"][p] = rec["fields"].get(p, 0) + c
+        if ts and (rec["ts"] is None or ts < rec["ts"]):
+            rec["ts"] = ts
+        break
+    rec["state"] = "sampled" if rec["rows"] else "unsure"
+    return rec
+
+
+def dataset_history(headers, ds, months, paths, cached):
+    """One dataset, month by month:
+        {"first": 'YYYY-MM-DD' | None, "months": {label: rec}, "read", "cached"}
+    rec["state"] is 'none' (no batches that month, or before the dataset's first
+    batch, or past its TTL), 'sampled' ("rows" records read, "fields" = records
+    carrying each path) or 'unsure' (batches exist, none could be read).
+    `cached` is this dataset's finished months from earlier runs."""
+    dsid = ds["id"]
+    first_b = _history_batches(headers, dsid, "&orderBy=asc:created", limits=(1,))
+    first_ms = next((int(b.get("created") or 0) for _, b in first_b), 0)
+    first = datetime.fromtimestamp(first_ms / 1000, timezone.utc) if first_ms else None
+    ttl = ds.get("lake_ttl_days")
+    cutoff = months[-1][2] - timedelta(days=ttl) if ttl else None
+    current = months[-1][0]
+    out, read, n_cached = {}, [], 0
+    for label, a, b in months:
+        if first is None or b <= first or (cutoff and b <= cutoff):
+            out[label] = {"state": "none"}
+        elif label != current and label in cached:
+            out[label] = cached[label]
+            n_cached += 1
+        else:
+            out[label] = _history_sample(headers, dsid, a, b, paths)
+            read.append((label, a, b))
+
+    # A second look at any month read this run that looks doubtful: unreadable,
+    # thin where the dataset is usually full, carrying far fewer fields than
+    # usual, or missing a well-filled field that both neighbours have.
+    sampled = [r for r in out.values() if r["state"] == "sampled"]
+    med_rows = _median([r["rows"] for r in sampled])
+    med_fields = _median([len(r["fields"]) for r in sampled])
+
+    def strong(r):
+        return {p for p, n in r["fields"].items()
+                if 100 * n / r["rows"] >= HISTORY_SPARSE}
+    seq = [lab for lab, _, _ in months if out[lab]["state"] == "sampled"]
+    gappy = {c for p, c, n in zip(seq, seq[1:], seq[2:])
+             if (strong(out[p]) & strong(out[n])) - set(out[c]["fields"])}
+    for label, a, b in read:
+        r = out[label]
+        if not (r["state"] == "unsure"
+                or (r["state"] == "sampled"
+                    and ((med_rows >= HISTORY_MIN_ROWS and r["rows"] < HISTORY_MIN_ROWS)
+                         or (med_fields and len(r["fields"]) < 0.6 * med_fields)
+                         or label in gappy))):
+            continue
+        span = (b - a) / (HISTORY_RESAMPLES + 1)
+        for i in range(HISTORY_RESAMPLES):
+            _history_sample(headers, dsid, a + i * span, a + (i + 1) * span,
+                            paths, rec=r, whole_month=False)
+        r["resampled"] = True
+    return {"first": f"{first:%Y-%m-%d}" if first else None, "months": out,
+            "read": len(read), "cached": n_cached}
+
+
+def _history_cache_file(sandbox: str, dsid: str) -> Path:
+    return (HISTORY_CACHE_DIR / re.sub(r"[^0-9A-Za-z_-]+", "_", sandbox)
+            / f"{dsid}.json")
+
+
+def _history_cache_load(sandbox: str, dsid: str) -> dict:
+    try:
+        d = json.loads(_history_cache_file(sandbox, dsid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if d.get("v") != HISTORY_CACHE_VERSION or d.get("rows") != HISTORY_ROWS:
+        return {}
+    return d.get("months") or {}
+
+
+def _history_cache_save(sandbox: str, dsid: str, months: dict, current: str):
+    """Keep the finished months that were actually looked at. The current month
+    is still filling, and an unreadable month deserves another try next run."""
+    keep = {lab: r for lab, r in months.items()
+            if lab != current and "batches" in r and r["state"] != "unsure"}
+    path = _history_cache_file(sandbox, dsid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"v": HISTORY_CACHE_VERSION, "rows": HISTORY_ROWS,
+                               "months": keep}), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _spark(state: str, cov) -> str:
+    if state == "data":
+        return SPARK_LEVELS[min(len(SPARK_LEVELS) - 1,
+                                int(cov * len(SPARK_LEVELS) / 100))]
+    return {"empty": SPARK_EMPTY, "unsure": SPARK_UNSURE}.get(state, SPARK_NONE)
+
+
+def _history_verdict(cells, months, firsts, cutoff, now):
+    """(months of unbroken data up to now, plain-English detail) for one field.
+    cells: [(state, coverage%)] oldest first; state is data / empty / unsure /
+    none. Months are counted from the real start where it is known -- the
+    dataset's first batch, or the edge of its retention -- not whole months."""
+    i = len(cells) - 1
+    # This month is still filling: no batch yet, or none readable, says nothing
+    # against the field.
+    if i > 0 and cells[i][0] in ("none", "unsure"):
+        i -= 1
+    if cells[i][0] != "data":
+        seen = [j for j, (s, _) in enumerate(cells) if s == "data"]
+        if seen:
+            return 0, f"stopped -- last seen {_mon(months[seen[-1]][0])}"
+        if any(s == "empty" for s, _ in cells):
+            return 0, "never seen in the data"
+        if any(s == "unsure" for s, _ in cells):
+            return None, "unknown -- the data could not be read"
+        return 0, "no data in the window"
+    j, unsure_n = i, 0
+    while j > 0:
+        s = cells[j - 1][0]
+        if s == "data":
+            j -= 1
+        elif s == "unsure" and j > 1 and cells[j - 2][0] == "data":
+            j -= 1
+            unsure_n += 1
+        else:
+            break
+    label, a, b = months[j]
+    hit = [f for f in firsts if a <= f < b]
+    if hit:
+        start, why = min(hit), f"since {min(hit):%d %b %Y}"
+    elif cutoff and a <= cutoff < b:
+        start, why = cutoff, "everything kept -- older data is past the TTL"
+    elif j == 0:
+        start, why = a, (f"the whole {len(months)}-month window -- "
+                         f"may go back further")
+    else:
+        prev = _mon(months[j - 1][0])
+        start = a
+        why = {"empty": f"since {_mon(label)} -- missing in {prev}",
+               "none": f"since {_mon(label)} -- no data at all in {prev}",
+               "unsure": f"since {_mon(label)} -- {prev} could not be checked",
+               }[cells[j - 1][0]]
+    if unsure_n:
+        why += f" ({unsure_n} month{'s' if unsure_n != 1 else ''} unsure)"
+    return round(max(0.0, (now - start).days / 30.44), 1), why
+
+
+def schema_history(k, recs, dsets, months, now):
+    """Per field of kept schema `k`, from its datasets' month records `recs`
+    (parallel to `dsets`): {path: {"months", "detail", "spark", "cells"}}.
+    A month counts for a field if ANY of the schema's datasets carried it."""
+    labels = [m[0] for m in months]
+    firsts = [datetime.strptime(r["first"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+              for r in recs if r.get("first")]
+    ttls = [d.get("lake_ttl_days") for d in dsets]
+    # Only when EVERY dataset expires data has the oldest of it truly gone.
+    cutoff = now - timedelta(days=max(ttls)) if ttls and all(ttls) else None
+    out = {}
+    for f in k["fields"]:
+        path = f[0]
+        cells = []
+        for lab in labels:
+            covs, unsure = [], False
+            for r in recs:
+                m = r["months"].get(lab) or {}
+                if m.get("state") == "sampled" and m.get("rows"):
+                    covs.append(100 * m["fields"].get(path, 0) / m["rows"])
+                elif m.get("state") == "unsure":
+                    unsure = True
+            if any(c > 0 for c in covs):
+                cells.append(("data", max(covs)))
+            elif unsure:
+                cells.append(("unsure", None))
+            elif covs:
+                cells.append(("empty", 0))
+            else:
+                cells.append(("none", None))
+        # A rarely-filled field can simply be missed by a sample: a one-month
+        # hole between two months that have it is called unsure, not a break.
+        if max((c for s, c in cells if s == "data"), default=0) < HISTORY_SPARSE:
+            for i in range(1, len(cells) - 1):
+                if (cells[i][0] == "empty" and cells[i - 1][0] == "data"
+                        and cells[i + 1][0] == "data"):
+                    cells[i] = ("unsure", None)
+        n, detail = _history_verdict(cells, months, firsts, cutoff, now)
+        out[path] = {
+            "months": n, "detail": detail,
+            "spark": "".join(_spark(s, c) for s, c in cells),
+            "cells": [max(1, round(c)) if s == "data" else
+                      0 if s == "empty" else "?" if s == "unsure" else None
+                      for s, c in cells],
+        }
+    return out
+
+
+def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
+    """Attach k['history'] -- {path: months / detail / spark / cells} -- to every
+    kept schema in scope: the 'Have we got it?' columns (BETA). Test, perf and
+    temp datasets are left out so they cannot make a field look older than the
+    real feed. Mutates `results` in place."""
+    try:
+        import pyarrow  # noqa: F401  (fail early if the reader is missing)
+    except ImportError:
+        logger.error("--history needs pyarrow (pip install pyarrow). Skipping "
+                     "field history; the rest still ran.")
+        return
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    months = _history_months(n_months)
+    now = months[-1][2]
+    for res in results:
+        sandbox = res["name"]
+        headers = aep_headers(token, conf, sandbox)
+        by_id = {d["id"]: d for d in res.get("datasets") or []}
+        in_scope = [k for k in res["kept"] if _in_dd_scope(k["title"], scope)]
+        if not in_scope:
+            logger.warning(f"  field history: no kept schema in {sandbox} matches "
+                           f"scope '{scope}'.")
+            continue
+        jobs = {}                               # dataset id -> (dataset, paths)
+        for k in in_scope:
+            use, skipped = [], []
+            for nm, table, dsid in k.get("tables") or []:
+                ds = by_id.get(dsid) or {"id": dsid, "name": nm, "table": table}
+                if (_HISTORY_SKIP_RE.search(nm or "") or _HISTORY_SKIP_RE.search(table or "")
+                        or _SKIP_DS_RE.search(nm or "")
+                        or str(ds.get("profile") or "").startswith("snapshot")):
+                    skipped.append(table or nm)
+                    continue
+                use.append(ds)
+            k["history_dsids"] = [d["id"] for d in use]
+            k["history_sources"] = [d.get("table") or d.get("name") for d in use]
+            k["history_skipped"] = skipped
+            paths = [f[0] for f in k["fields"]]
+            for d in use:
+                jobs[d["id"]] = (d, paths)
+        logger.info(f"  field history (BETA): {len(jobs)} dataset(s) behind "
+                    f"{len(in_scope)} schema(s) in {sandbox}, {n_months} months "
+                    f"back; finished months cached in "
+                    f"{_history_cache_file(sandbox, 'x').parent}")
+
+        def work(dsid):
+            ds, paths = jobs[dsid]
+            r = dataset_history(headers, ds, months, paths,
+                                _history_cache_load(sandbox, dsid))
+            _history_cache_save(sandbox, dsid, r["months"], months[-1][0])
+            return r
+
+        recs, t0 = {}, time.perf_counter()
+        with ThreadPoolExecutor(max_workers=HISTORY_WORKERS) as pool:
+            futs = {pool.submit(work, dsid): dsid for dsid in jobs}
+            for i, fut in enumerate(as_completed(futs), 1):
+                dsid = futs[fut]
+                ds = jobs[dsid][0]
+                name = ds.get("table") or ds.get("name") or dsid
+                try:
+                    r = fut.result()
+                except Exception as e:
+                    logger.warning(f"  history [{i}/{len(jobs)}] {name}: FAILED "
+                                   f"({type(e).__name__}: {e}) -- its fields read "
+                                   f"as unknown.")
+                    continue
+                recs[dsid] = r
+                beat = "".join(
+                    SPARK_NONE if m.get("state") == "none" else
+                    SPARK_UNSURE if m.get("state") == "unsure" else SPARK_LEVELS[-1]
+                    for m in (r["months"].get(lab) or {} for lab, _, _ in months))
+                logger.info(f"  history [{i}/{len(jobs)}] {name}: first batch "
+                            f"{r['first'] or 'none'}, TTL {ds.get('lake_ttl') or 'none'}; "
+                            f"{r['read']} month(s) read, {r['cached']} cached  "
+                            f"{beat}  {ANSI['dim']}"
+                            f"({(time.perf_counter() - t0) / 60:.1f} min){ANSI['reset']}")
+
+        buckets = {"<1": 0, "1-5": 0, "6-11": 0, "12-23": 0, "24+": 0, "none": 0}
+        for k in in_scope:
+            if not k["history_dsids"]:
+                k["history_note"] = "no dataset left to check once test/temp ones are set aside"
+                continue
+            got = [(recs[d], jobs[d][0]) for d in k["history_dsids"] if d in recs]
+            if not got:
+                k["history_note"] = "UNREADABLE -- no dataset could be checked"
+                continue
+            if len(got) < len(k["history_dsids"]):
+                k["history_note"] = (f"{len(k['history_dsids']) - len(got)} of "
+                                     f"{len(k['history_dsids'])} dataset(s) could "
+                                     f"not be checked")
+            k["history"] = schema_history(k, [r for r, _ in got],
+                                          [d for _, d in got], months, now)
+            k["history_labels"] = [m[0] for m in months]
+            # Data loaded long after the events it records: history is by LOAD
+            # month, so say so where the samples show it.
+            old = [m["ts"] for r, _ in got for lab, a, _ in months
+                   if (m := r["months"].get(lab) or {}).get("ts")
+                   and m["ts"] < f"{a - timedelta(days=31):%Y-%m-%d}"]
+            if old:
+                k["history_backfill"] = min(old)
+            for h in k["history"].values():
+                n = h["months"]
+                key = ("none" if not n else "<1" if n < 1 else "1-5" if n < 6
+                       else "6-11" if n < 12 else "12-23" if n < 24 else "24+")
+                buckets[key] += 1
+        logger.info(f"  field history done in {sandbox} "
+                    f"({(time.perf_counter() - t0) / 60:.1f} min): fields with "
+                    + ", ".join(f"{k} months: {v:,}" for k, v in buckets.items()
+                                if k != "none")
+                    + f"; none now: {buckets['none']:,}")
+
+
 def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
     """Naked-run opt-in: ask whether to also run the slow data-dictionary pass
     (coverage % + top values). Returns the scope string ('all') on yes, else
@@ -3594,7 +4183,8 @@ def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:
 
 def run(service: str, sandbox_arg: str | None,
         dd_scope: str | None = None, dd_rows: int = DD_DEFAULT_ROWS,
-        profile_snapshot: str | None = None):
+        profile_snapshot: str | None = None,
+        history_scope: str | None = None, history_months: int = HISTORY_MONTHS):
     bar = ANSI["cyan"] + "=" * 60 + ANSI["reset"]
     print()
     print(bar)
@@ -3711,6 +4301,23 @@ def run(service: str, sandbox_arg: str | None,
                     f"--data-dict to sample real values + coverage "
                     f"(adds minutes).{ANSI['reset']}")
 
+    if history_scope is not None:
+        logger.info(f"{ANSI['bold']}Field history (BETA) ENABLED{ANSI['reset']} "
+                    f"(scope: '{history_scope}', {history_months} months back). "
+                    f"The first run on a sandbox reads every month -- hours on a "
+                    f"big one; later runs read only the current month.")
+        # A beta must never cost the dictionary: if the history pass falls over,
+        # say so and write the workbook without it.
+        try:
+            add_field_history(token, conf, results, history_scope, history_months)
+        except Exception as e:
+            logger.error(f"Field history (BETA) failed -- writing the dictionary "
+                         f"without it: {type(e).__name__}: {e}")
+            logger.debug(traceback.format_exc())
+            for res in results:
+                for k in res["kept"]:
+                    k.pop("history", None)
+
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     client = client_label(conf)
     xlsx_path = write_xlsx(results, client, datestr,
@@ -3718,9 +4325,11 @@ def run(service: str, sandbox_arg: str | None,
                            overlaps=overlaps)
     if xlsx_path:
         n_tabs = sum(len(r["kept"]) for r in results)
+        has_hist = any(k.get("history") for r in results for k in r["kept"])
         logger.info(f"XLSX written: {xlsx_path}  "
                     f"({n_tabs} schema tab(s) + Summary + Field Index + "
-                    f"Schemas index + Datasets + Snapshot Summary + "
+                    + ("Field History (BETA) + " if has_hist else "")
+                    + f"Schemas index + Datasets + Snapshot Summary + "
                     f"Snapshot Tables + Overlap cut-list + Overlap full report)")
 
     # Audience rules: how many, how many the sheet could not hold whole, and
@@ -3790,10 +4399,21 @@ def main():
     dd_scope = None
     dd_rows = DD_DEFAULT_ROWS
     profile_snapshot = None
+    history_scope = None
+    history_months = HISTORY_MONTHS
     positional = []
     for a in args:
         if a.startswith("--sandbox="):
             sandbox_arg = a.split("=", 1)[1]
+        elif a == "--history":
+            history_scope = DD_DEFAULT_SCOPE      # ALL kept schemas, by default
+        elif a.startswith("--history-months="):
+            try:
+                history_months = max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                logger.warning(f"Ignoring bad --history-months value in {a!r}.")
+        elif a.startswith("--history="):
+            history_scope = a.split("=", 1)[1].strip().lower() or DD_DEFAULT_SCOPE
         elif a in ("--data-dict", "--dd"):
             dd_scope = DD_DEFAULT_SCOPE          # ALL kept schemas, by default
         elif a.startswith("--data-dict="):
@@ -3839,7 +4459,8 @@ def main():
                     "released when the run ends).")
     try:
         run(chosen, sandbox_arg, dd_scope, dd_rows,
-            profile_snapshot=profile_snapshot)
+            profile_snapshot=profile_snapshot,
+            history_scope=history_scope, history_months=history_months)
     finally:
         keep_awake(False)
 

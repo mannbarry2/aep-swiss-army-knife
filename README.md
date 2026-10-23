@@ -37,7 +37,7 @@ The toolkit spans two product ranges:
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
 | [`aep_usage_log.py`](aep_usage_log.py) | Who is actively using AEP: per-user **activity** (not sign-ins) from the audit log over the last N days, with the tech-account suppression-list noise excluded and counted separately. |
 | [`audience_renamer.py`](audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
-| [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, and — with `--data-dict` — real field coverage + top-5 example values sampled in-memory. [Release notes](RELEASE_NOTES.md). |
+| [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, with `--data-dict` real field coverage + top-10 example values sampled in-memory (PII starred), and with `--history` (beta) how many months of unbroken data each field has. [Release notes](RELEASE_NOTES.md). |
 | [`release_notes_html.py`](release_notes_html.py) | Builds `RELEASE_NOTES.html`, the colour edition of the Data Dictionary release notes (laid out like Adobe Experience League release notes), from `RELEASE_NOTES.md`. Re-run it after editing the Markdown. Stdlib only. |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
@@ -774,14 +774,16 @@ added in v3.4.5 / v3.4.6:
 
 ### Data dictionary (`--data-dict`)
 
-Adds field-level **coverage** and **top-5 values** by sampling real ingested
+Adds field-level **coverage** and **top-10 values** by sampling real ingested
 data. AEP has no API that returns a value distribution for a field, and Query
 Service `GROUP BY` per field is too slow, so the tool finds the schema's
 datasets, downloads recent successful batch files (Snappy-Parquet) via the
 **Data Access** API, and tallies locally — **one download covers every field**.
 Two columns are added to the schema tab: **Coverage %** (share of sampled rows
-where the field is populated) and **Top values (count)** (the five most common
-values, pipe-separated). It skips empty batches via `recordCount`, spreads the
+where the field is populated) and **Top values (count)** (the ten most common
+values, pipe-separated; email addresses and identifier / contact fields such as
+user ids have two characters starred, DULE label or not). It skips empty
+batches via `recordCount`, spreads the
 sample across the schema's datasets, and streams Parquet through memory —
 **nothing is written to disk**; only the sampled rows (≤ the row target) are
 held, then dropped.
@@ -813,3 +815,34 @@ A full prod run takes the best part of an hour, so on Windows the script holds
 the PC awake (system and screen) until it finishes, and releases the hold
 however it ends (v3.4.11). Nothing in the power settings changes; closing the
 lid still sleeps.
+
+### Field history (`--history`, beta)
+
+**"Have we got it?"** How many months of *unbroken* data each field has, up to
+now — what you need to know before building an audience on it (the slot fields,
+repaired in September 2026, read "<1"; order fields go back to April 2025).
+Querying each field month by month in Query Service would take forever, so for
+each dataset and month Catalog finds that month's batches and one is read
+through the Data Access API, the same reader as `--data-dict`. One download
+answers for every field, so the cost is datasets × months, not fields × months.
+A month that looks thin, odd, or is missing a well-filled field both neighbours
+have is sampled again from earlier in the month before it is believed.
+
+Three columns go on the end of the Field Index and every schema tab: **Have we
+got it? (months)**, a plain-English **detail** (`since 28 Sep 2026`, `stopped --
+last seen Aug 2026`, `since May 2026 -- missing in Apr 2026`) and a
+**heartbeat**, one bar per month, oldest first: `░` no data at all, `▁` data
+arrived but the field was empty, `▂`–`█` how often it was filled, `?` could not
+be checked. A **Field History** tab has the months as columns, shaded green.
+
+Test, perf and temp datasets are left out, so they can't make a field look
+older than the real feed. Months go by *load* date. Default 24 months
+(`--history-months=N`), capped by each dataset's TTL; `--history=<substr>`
+limits it to schemas whose title matches. Finished months are cached in
+`output/field_history_cache/` (local, never synced), so only the first run on a
+sandbox is long — hours on a big one — and later runs read the current month.
+
+```
+python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict --history
+python data_dictionary_v3.py "acme k" --sandbox=prod --history=order --history-months=36
+```

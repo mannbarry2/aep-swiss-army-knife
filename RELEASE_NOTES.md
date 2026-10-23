@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 16, 2026 · **Latest version:** v3.4.11 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 22, 2026 · **Latest version:** v3.4.13 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,6 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
+| [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
 | [October 16, 2026](#october-16-2026) | v3.4.8 – v3.4.11 | Lookup schemas kept; Dropped Schemas and Dropped Field Index tabs; the run keeps the PC awake |
 | [October 8, 2026](#october-8-2026) | v3.4.7 | Overlap tabs; one workbook per tool |
 | [October 6, 2026](#october-6-2026) | v3.4.6 | Audience complexity score (beta) |
@@ -25,6 +26,59 @@
 | [August 14, 2026](#august-14-2026) | v3.4.0 – v3.4.1 | Complete Profile coverage; credential name gone from the workbook |
 | [August 13, 2026](#august-13-2026) | v3.3.0 | Audiences tab; provenance line; How to Use tab |
 | [Earlier releases](#earlier-releases) | v3.0.0 – v3.2.0 | The baseline; Profile coverage; SQL table names |
+
+---
+
+## October 22, 2026
+
+**Release date: October 22, 2026** · v3.4.12 – v3.4.13
+
+New features and updates to existing features in the Data Dictionary:
+
+- **Field history:** how many months of unbroken data each field has, for building audiences (beta).
+- **Sample values:** the top 10 instead of the top 5, with personal data starred.
+
+### Field history
+
+Coverage % says how often a field is filled in *now*. Building an audience also
+needs to know how far back the field goes: a "purchased in the last 12 months"
+audience is no good on a field that has only been arriving for six weeks.
+
+**New features**
+
+| Feature | Description |
+| --- | --- |
+| "Have we got it?" ![Beta](https://img.shields.io/badge/Beta-6E3FA3?style=flat-square)<br>`v3.4.13` | `--history` adds three columns to the end of the Field Index and every schema tab: **months** of unbroken data up to now, a plain-English **detail** (*since 28 Sep 2026*, *stopped -- last seen Aug 2026*, *since May 2026 -- missing in Apr 2026*) and a **heartbeat**, one bar per month, oldest first: ░ no data at all, ▁ data arrived but the field was empty, ▂ to █ how often it was filled, ? could not be checked. The start is the real date where it is known (the dataset's first batch, or the edge of its TTL), not a whole month. In prod the slot expiry fields read *<1* (first batch September 28) while order events go back to April 2025. |
+| Field History tab ![Beta](https://img.shields.io/badge/Beta-6E3FA3?style=flat-square)<br>`v3.4.13` | The same months as columns, the % of sampled records carrying each field, shaded green. Blank is no data at all that month, 0 is data without the field. |
+
+**How it works.** Querying each field month by month in Query Service would mean
+a query per field per month. Instead, for each dataset and month, Catalog finds
+that month's batches (`createdAfter` / `createdBefore`, about 0.2 s) and one of
+them is read through the Data Access API with the coverage pass's reader. That
+one download answers for every field at once, so the cost is datasets × months,
+not fields × months; months before a dataset's first batch, or past its TTL,
+cost nothing. Test, perf and temp datasets are left out so they cannot make a
+field look older than the real feed. Finished months are cached locally in
+`output/field_history_cache/`, so only the first run on a sandbox is long.
+
+**Known issues**
+
+| Issue | Description |
+| --- | --- |
+| A sample can miss | Each month is judged from one to three batches, not every record. One sample a month faked a gap in testing (April's order sample was an odd 101-row batch carrying 9 of 16 fields), so a month that is thin, short of fields or missing a well-filled field both neighbours have is sampled again from earlier in the month. A rarely-filled field's one-month hole is shown as ? rather than a break. |
+| Months go by load date | History follows when data was *loaded*. Events backfilled later count from the load; the schema tab says when a sample showed events much older than their batch. |
+| The first run is long | Every month of every dataset is read once: hours on a big sandbox. Later runs read only the current month. |
+
+### Sample values
+
+**Updates**
+
+| Update | Description |
+| --- | --- |
+| Top 10 values ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.12` | The sample columns show the ten commonest values instead of five. |
+| Personal data starred ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.12` | Email addresses (by value) and identifier / contact fields (by name: user id, CRM id, ECID, phone and the like) have two characters starred before they are counted, whether or not the field carries a DULE label: `j**n.doe@acme.com`. The shape and the ranking survive; a whole real identifier does not. A How to Use row says so. |
+
+For more information, read the [README](README.md).
 
 ---
 
