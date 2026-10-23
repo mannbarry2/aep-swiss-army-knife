@@ -83,7 +83,7 @@ First prod run (6 Oct 2026): 2,205 scored — 64 RED, 482 AMBER, 1,659 GREEN. Ev
 - **v3.4.5** — the dictionary moves to its own folder (`output/data_dictionary/`); the full-PQL sidecar; silent PQL truncation ended.
 - **v3.4.6** — the audience **complexity score** (beta) with RED / AMBER / GREEN and the reasons, from `audience_complexity.py`.
 
-Full detail: **[RELEASE_NOTES.md](RELEASE_NOTES.md)**.
+Full detail: **[RELEASE_NOTES.md](../RELEASE_NOTES.md)**.
 
 ## Known limitations — for review
 

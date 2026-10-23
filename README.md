@@ -1,4 +1,4 @@
-![AEP Swiss Army Knife Banner](banner.png)
+![AEP Swiss Army Knife Banner](docs/images/banner.png)
 
 # AEP Swiss Army Knife
 
@@ -7,6 +7,19 @@ Experience Platform (AEP) from a locked-down VDI. They're deliberately
 lightweight — every tool here today runs on the Python standard library
 alone, so it needs no `pip install` — but that's a convenience, not a hard
 rule: new tools may pull in a dependency where it genuinely earns its keep.
+
+## What's where
+
+| Folder / file | What it holds |
+|---|---|
+| `*.py` in this folder | **The tools** -- the things you run. Every one is listed below. |
+| [`RELEASE_NOTES.md`](RELEASE_NOTES.md) / `.html` | Data Dictionary release notes (the HTML edition is the page on GitHub Pages). |
+| [`docs/`](docs/) | Everything else to read: [Adobe API gotchas](docs/adobe-api-gotchas.md), the [external access audit](docs/external-access-audit.md), the [Data Dictionary overview](docs/data-dictionary-overview.md), per-tool notes in [`docs/tools/`](docs/tools/), plans in [`docs/plans/`](docs/plans/), images in `docs/images/`. |
+| [`parked/`](parked/) | Kept, but not for use: unfinished or one-off work. See its [README](parked/README.md). |
+| [`reference/`](reference/) | Reference material, not tools: Craig's original [AJO journey export](reference/ajo-journey-export/) (Node) and the AutoLID / Luma diagrams. |
+| `demo/` | The bundled Luma sample data the Data Dictionary can be tried on. |
+| `baselines/` | Hand-measured guardrail baselines the guardrail audit compares against. |
+| `creds/`, `output/`, `config.json` | Never committed: credentials, generated workbooks and caches, local labels. Old outputs live in `output/archive/`. |
 
 **One credential model for the whole toolkit.** Every tool authenticates the
 same way: it reads a per-tenant JSON from `creds/`, lets you pick which set to
@@ -27,7 +40,7 @@ The toolkit spans two product ranges:
 
 | Tool | What it does |
 |------|--------------|
-| [`external_access_audit.py`](external_access_audit.py) | Who can reach Experience Platform / AJO, and which of them actually use it — the removal list for access that has outlived its purpose. Read-only, enforced. See **[EXTERNAL-ACCESS-AUDIT.md](EXTERNAL-ACCESS-AUDIT.md)**. |
+| [`external_access_audit.py`](external_access_audit.py) | Who can reach Experience Platform / AJO, and which of them actually use it — the removal list for access that has outlived its purpose. Read-only, enforced. See **[docs/external-access-audit.md](docs/external-access-audit.md)**. |
 | [`aep_credentials.py`](aep_credentials.py) | **The one credential tool.** Store a credential in the keyring (typed, or imported from a legacy JSON or an Adobe Postman export), check it authenticates, and probe which of 12 Adobe services it can actually reach. Also lists, deletes, migrates and sweeps. **Run this first on any new credential set.** |
 | [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
@@ -36,7 +49,7 @@ The toolkit spans two product ranges:
 | [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
 | [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
 | [`aep_usage_log.py`](aep_usage_log.py) | Who is actively using AEP: per-user **activity** (not sign-ins) from the audit log over the last N days, with the tech-account suppression-list noise excluded and counted separately. |
-| [`audience_renamer.py`](audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
+| [`parked/audience_renamer.py`](parked/audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, with `--data-dict` real field coverage + top-10 example values sampled in-memory (PII starred), and with `--history` (beta) how many months of unbroken data each field has. [Release notes](RELEASE_NOTES.md). |
 | [`release_notes_html.py`](release_notes_html.py) | Builds `RELEASE_NOTES.html`, the colour edition of the Data Dictionary release notes (laid out like Adobe Experience League release notes), from `RELEASE_NOTES.md`. Re-run it after editing the Markdown. Stdlib only. |
 
@@ -258,10 +271,10 @@ A token minting fine does **not** mean it can do anything: a credential whose
 then `403`s on the very first call ("does not have READ permission"). The tool
 calls that out explicitly and names the fix (an admin adds the tech account to
 the product profile, then re-run — permissions are snapshotted at **mint**
-time, so a fresh token is required). See
-`credential_validator - Overview.docx` *(describes the retired v1; superseded by `aep_credentials.py`)*
-for how to read every verdict, the three layers of access (scopes vs
-provisioned products vs technical-account permissions), and the AJO rules.
+time, so a fresh token is required). The three layers of access (scopes vs
+provisioned products vs technical-account permissions) and the AJO rules are
+explained in the tool's own `--help` and in
+[docs/adobe-api-gotchas.md](docs/adobe-api-gotchas.md).
 
 ```
 python aep_credentials.py            # interactive menu
@@ -286,9 +299,7 @@ mint the token from the credential that has the *permission* and send the
 api-key that's *AJO-subscribed* — `--creds` picks the token credential,
 `--api-key` (or an `api_key` field in the creds JSON) supplies the subscribed
 key. Once an admin enables one credential fully for AJO, drop the hybrid and
-just use `--creds`. Read-only, stdlib-only. See
-[`ajo_journey_checker - Overview.docx`](ajo_journey_checker%20-%20Overview.docx)
-for the full write-up.
+just use `--creds`. Read-only, stdlib-only.
 
 Run it **bare** (`python journey_audience_census.py`) and it prompts you through the
 choices — pick the token credential, then pick the AJO-subscribed credential
@@ -386,7 +397,7 @@ python dataset_census.py my-tenant --all-datasets     # census every dataset, no
 python dataset_census.py my-tenant --limit=25 --warn=22   # your guardrail, not the default 20
 ```
 
-## ajo-journey-export/  *(Node, contributed by Craig)*
+## reference/ajo-journey-export/  *(Node, contributed by Craig)*
 
 A dependency-free **Node 18+** script, `ajo-journey-export.mjs`, that pulls
 every **Adobe Journey Optimizer journey definition** — all nodes/steps, the same
@@ -399,7 +410,7 @@ API behind the AJO canvas, using a user bearer token and org id lifted from the
 browser's DevTools and the UI's own `x-api-key` (`voyager_ui`). Service-account
 credentials are not entitled for it, the token dies within ~24h, and Adobe can
 change the endpoint without notice — so it's for inspection and reporting, not
-automation. See [its README](ajo-journey-export/README.md) for the token dance
+automation. See [its README](reference/ajo-journey-export/README.md) for the token dance
 and the gotchas (lowercase sandbox name, stale list names vs `/latest` names).
 Complements `journey_audience_census.py`, which uses the supported gateway but
 cannot see inside the journey.
@@ -436,7 +447,7 @@ credential; only the journey definitions need the browser token. What does
 session token lifted from the browser, so you paste one in each run (masked
 prompt, `AJO_BEARER_TOKEN`, or `--token=`) — the script prints the DevTools
 steps at the prompt and again on a 401/403. A screenshot of exactly where the
-token sits in DevTools lives in `screenshots/ajo-journey-export-token.png`.
+token sits in DevTools is still to be added (it needs redacting first).
 
 ```
 python ajo_journey_export.py aep-prod --sandbox=prod            # paste token at the prompt
@@ -531,7 +542,7 @@ python aep_usage_log.py --days=30
 python aep_usage_log.py --days=90 --no-noise-count
 ```
 
-## audience_renamer.py  *(in development — do not use)*
+## parked/audience_renamer.py  *(in development — do not use)*
 
 > **Parked 2026-10-02.** This project was stopped part-way and is kept only so
 > it can be picked up later. It is not a working tool: it refuses to run, and
@@ -798,9 +809,9 @@ coverage properly needs the Real-Time Customer Profile (Profile Access) store,
 not batch files. Defaults to the Acme Profile Schema for safety; in practice
 pass an event schema, e.g. `--data-dict="acme order event schema"`.
 `--data-dict=all` does every kept schema, `--data-dict=<substr>` matches by
-title. Needs `pyarrow` + `tzdata`. See
-[`Data Dictionary v3 - Overview.docx`](Data%20Dictionary%20v3%20-%20Overview.docx)
-for the design write-up and known limitations.
+title. Needs `pyarrow` + `tzdata`. See the
+[Data Dictionary overview](docs/data-dictionary-overview.md) for the design
+write-up and known limitations.
 
 ```
 python data_dictionary_v3.py                       # interactive menus

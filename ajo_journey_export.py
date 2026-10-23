@@ -2,8 +2,8 @@
 ajo_journey_export.py  --  AJO journey definitions, every node, for a sandbox
 ==========================================================================
 
-Python port of Craig's ajo-journey-export/ajo-journey-export.mjs (kept in the
-repo for provenance; the two produce interchangeable JSON + index.csv). Pulls
+Python port of Craig's reference/ajo-journey-export/ajo-journey-export.mjs (kept
+in the repo for provenance; the two produce interchangeable JSON + index.csv). Pulls
 Adobe Journey Optimizer journey definitions -- every node/step, i.e. the same
 content as the UI's "Copy technical details" -- for a whole sandbox, straight
 from the AJO authoring API, and writes:

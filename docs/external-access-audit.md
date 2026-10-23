@@ -206,7 +206,7 @@ the platform every day. Emails are lower-cased before querying.
 **3. A failed query was counted as a negative answer.** Fixed by the `UNKNOWN`
 verdict described above.
 
-See [ADOBE-API-GOTCHAS.md](ADOBE-API-GOTCHAS.md) for the API-level detail.
+See [adobe-api-gotchas.md](adobe-api-gotchas.md) for the API-level detail.
 
 ---
 
