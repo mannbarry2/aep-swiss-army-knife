@@ -27,7 +27,7 @@ starts returning:
 HTTP 422  {"detail":"The minimum start date cannot be less than 90 days ago."}
 ```
 
-In `external_access_audit.py` this hit at **request 86 of 2,286**. Everything
+In `platform_access_and_audit/external_access_entitlement_and_usage_audit.py` this hit at **request 86 of 2,286**. Everything
 before it succeeded; everything after it failed.
 
 **Do this instead** — recompute per item, with a margin:

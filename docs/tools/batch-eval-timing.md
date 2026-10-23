@@ -1,4 +1,4 @@
-# batch_eval_timing.py
+# performance_and_guardrails/batch_audience_evaluation_timing.py
 
 A read-only diagnostic for **Adobe Experience Platform (AEP) batch audience
 evaluation**. It answers the questions people actually ask when a batch audience
@@ -33,9 +33,9 @@ locked-down/VDI machine.
 2. Run it. On Windows use the `py` launcher:
 
    ```bash
-   py -3 batch_eval_timing.py                 # interactive credential menu, dev sandbox
-   py -3 batch_eval_timing.py prod            # pick creds/prod.json by filename stem
-   py -3 batch_eval_timing.py "my creds" --sandbox=prod
+   py -3 performance_and_guardrails/batch_audience_evaluation_timing.py                 # interactive credential menu, dev sandbox
+   py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod            # pick creds/prod.json by filename stem
+   py -3 performance_and_guardrails/batch_audience_evaluation_timing.py "my creds" --sandbox=prod
    ```
 
 Outputs are written to `./output/` (CSV). That folder is git-ignored — it holds
@@ -48,9 +48,9 @@ live tenant data and must not be committed.
 ### 1. Estate report (default)
 
 ```bash
-py -3 batch_eval_timing.py prod
-py -3 batch_eval_timing.py prod --all-methods   # include streaming/edge, not just batch
-py -3 batch_eval_timing.py prod --jobs=50        # cap to 50 jobs (default: all)
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --all-methods   # include streaming/edge, not just batch
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --jobs=50        # cap to 50 jobs (default: all)
 ```
 
 Lists every audience with its evaluation method (batch / streaming / edge),
@@ -70,9 +70,9 @@ num_segments`
 ### 2. Single-audience probe — "is this one stuck, or just new?"
 
 ```bash
-py -3 batch_eval_timing.py prod --audience                       # filter-and-pick menu
-py -3 batch_eval_timing.py prod --audience=<audienceId>
-py -3 batch_eval_timing.py prod --audience="MY_AUDIENCE_NAME"
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --audience                       # filter-and-pick menu
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --audience=<audienceId>
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --audience="MY_AUDIENCE_NAME"
 ```
 
 Prints a **timing card** for one audience: created / last-modified time, current
@@ -86,7 +86,7 @@ place to look.
 ### 3. Schedule config — "is the estate really on the 4am schedule?"
 
 ```bash
-py -3 batch_eval_timing.py prod --schedules
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --schedules
 ```
 
 Dumps the sandbox's scheduled-segmentation config (`/config/schedules`): each
@@ -98,8 +98,8 @@ test of "is the daily run configured to cover everything?". Writes
 ### 4. Verify-run — "did *this* job actually evaluate these audiences?"
 
 ```bash
-py -3 batch_eval_timing.py prod --verify-run --date=2026-07-01 --ids=id1,id2
-py -3 batch_eval_timing.py prod --verify-run --job=<jobId> --ids-file=ids.txt
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --verify-run --date=2026-07-01 --ids=id1,id2
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --verify-run --job=<jobId> --ids-file=ids.txt
 ```
 
 Given a job id (or a date, which finds that day's scheduler run) and a set of
@@ -120,8 +120,8 @@ Writes `output/verify_run_<sandbox>_<stamp>.csv`.
 ### 5. FAE audit — "who is burning the on-demand evaluation quota?"
 
 ```bash
-py -3 batch_eval_timing.py prod --fae-audit                       # year-to-date
-py -3 batch_eval_timing.py prod --fae-audit --from=2026-01-01 --to=2026-07-01
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --fae-audit                       # year-to-date
+py -3 performance_and_guardrails/batch_audience_evaluation_timing.py prod --fae-audit --from=2026-01-01 --to=2026-07-01
 ```
 
 Inventories **Flexible Audience Evaluation** runs — the on-demand / API-triggered

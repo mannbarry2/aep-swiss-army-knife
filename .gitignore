@@ -5,14 +5,14 @@ config.json
 # Generated query exports (per-tenant SQL + the mega Markdown file).
 sql/
 
-# Downloaded failed-batch payloads from batch_fetcher.
+# Downloaded failed-batch payloads from failed_batch_file_downloader.
 failed_batches/
 
 # Schedule audit exports (contain per-tenant sandbox + schedule details).
 batch_schedules_*.csv
 batch_schedules_*.xlsx
 
-# Batch evaluation timing exports from batch_eval_timing.py (per-tenant job data).
+# Batch evaluation timing exports from batch_audience_evaluation_timing.py (per-tenant job data).
 output/
 
 # Credential bank for credential_validator.py / hot-swap testing. Only the example template

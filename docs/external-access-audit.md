@@ -1,4 +1,4 @@
-# external_access_audit.py
+# platform_access_and_audit/external_access_entitlement_and_usage_audit.py
 
 **Who can reach Experience Platform, and which of them are actually using it.**
 
@@ -66,10 +66,10 @@ that change deserves.
 
 ```bash
 # the one you will use most: ~1 minute
-python external_access_audit.py kuba --days 90 --sandboxes prod --no-sweep
+python platform_access_and_audit/external_access_entitlement_and_usage_audit.py kuba --days 90 --sandboxes prod --no-sweep
 
 # the occasional deeper pass: ~2 hours
-python external_access_audit.py kuba --days 90 --sandboxes prod
+python platform_access_and_audit/external_access_entitlement_and_usage_audit.py kuba --days 90 --sandboxes prod
 ```
 
 ### Two modes, two different questions

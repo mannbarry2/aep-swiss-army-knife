@@ -1,4 +1,4 @@
-# dd_audience_countdown.py
+# data_dictionary/data_distiller_audience_expiry_countdown.py
 
 A read-only **expiry countdown for Data Distiller audiences** in Adobe
 Experience Platform (AEP). It answers the one question worth asking before a
@@ -94,12 +94,12 @@ truthful, it's a one-line change in `_last_refresh()`.
 3. Run it. On Windows use the `py` launcher:
 
    ```bash
-   py -3 dd_audience_countdown.py                 # interactive credential + sandbox menus
-   py -3 dd_audience_countdown.py prod            # pick creds/prod.json by filename stem
-   py -3 dd_audience_countdown.py "my creds" --sandbox=prod
-   py -3 dd_audience_countdown.py --all           # every credential set in ./creds/
-   py -3 dd_audience_countdown.py prod --keep-alive-only  # only keep-alive-tagged
-   py -3 dd_audience_countdown.py prod --yes      # skip the confirmation prompt
+   py -3 data_dictionary/data_distiller_audience_expiry_countdown.py                 # interactive credential + sandbox menus
+   py -3 data_dictionary/data_distiller_audience_expiry_countdown.py prod            # pick creds/prod.json by filename stem
+   py -3 data_dictionary/data_distiller_audience_expiry_countdown.py "my creds" --sandbox=prod
+   py -3 data_dictionary/data_distiller_audience_expiry_countdown.py --all           # every credential set in ./creds/
+   py -3 data_dictionary/data_distiller_audience_expiry_countdown.py prod --keep-alive-only  # only keep-alive-tagged
+   py -3 data_dictionary/data_distiller_audience_expiry_countdown.py prod --yes      # skip the confirmation prompt
    ```
 
 Outputs are written to `./output/`. That folder is git-ignored — it holds live
@@ -238,4 +238,4 @@ Audience-object field names have drifted across AEP versions, so each field is
 read tolerantly (several candidate keys per field, matching the defensive style
 used elsewhere in this toolkit). If a future deployment renames a field, add the
 new key to the relevant list near the top of the fetch section in
-`dd_audience_countdown.py`.
+`data_dictionary/data_distiller_audience_expiry_countdown.py`.

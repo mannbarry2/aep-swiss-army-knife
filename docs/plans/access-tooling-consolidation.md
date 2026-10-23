@@ -11,13 +11,13 @@ different machines.
 
 | file | lines | what it answers |
 |---|---:|---|
-| `aep_creds.py` | 554 | where credentials live. **Shared, works, leave alone.** |
-| `aep_credentials.py` | 767 | is a credential alive? *(v1, plaintext JSON)* |
-| `aep_credentials.py` | 1,343 | manage + validate credentials in the keyring |
-| `aep_usage_log.py` | 967 | what each person did, from the audit log |
-| `permissions_audit.py` | 384 | who can do what, from Access Control |
-| `role_permissions_grid.py` | 220 | role → permission grid, no people |
-| `external_access_audit.py` | 1,407 | entitlement vs usage, the purge list |
+| `toolkit_internals/credential_loader.py` | 554 | where credentials live. **Shared, works, leave alone.** |
+| `platform_access_and_audit/credential_keyring_manager_and_access_probe.py` | 767 | is a credential alive? *(v1, plaintext JSON)* |
+| `platform_access_and_audit/credential_keyring_manager_and_access_probe.py` | 1,343 | manage + validate credentials in the keyring |
+| `platform_access_and_audit/user_activity_log_from_audit_events.py` | 967 | what each person did, from the audit log |
+| `platform_access_and_audit/who_can_do_what_permissions_audit.py` | 384 | who can do what, from Access Control |
+| `platform_access_and_audit/role_to_permission_grid.py` | 220 | role → permission grid, no people |
+| `platform_access_and_audit/external_access_entitlement_and_usage_audit.py` | 1,407 | entitlement vs usage, the purge list |
 
 Roughly **4,700 lines across five tools** that all answer parts of one
 question: *who can reach the platform, and what are they doing on it.*
@@ -29,14 +29,14 @@ question: *who can reach the platform, and what are they doing on it.*
 ### 1. They have already started merging themselves, badly
 
 ```
-aep_creds           <- everything
-aep_usage_log       <- permissions_audit, external_access_audit
-permissions_audit   <- role_permissions_grid, external_access_audit
-data_dictionary_v3  <- permissions_audit, role_permissions_grid,
-                       external_access_audit
+credential_loader           <- everything
+user_activity_log_from_audit_events       <- who_can_do_what_permissions_audit, external_access_entitlement_and_usage_audit
+who_can_do_what_permissions_audit   <- role_to_permission_grid, external_access_entitlement_and_usage_audit
+data_dictionary_v3  <- who_can_do_what_permissions_audit, role_to_permission_grid,
+                       external_access_entitlement_and_usage_audit
 ```
 
-`external_access_audit.py` already imports three other tools. That happened by
+`platform_access_and_audit/external_access_entitlement_and_usage_audit.py` already imports three other tools. That happened by
 accident, not design, and it has an ugly consequence: **three tools import
 `data_dictionary_v3` purely to borrow `http()`, `authenticate()` and
 `list_sandboxes()`.**
@@ -47,8 +47,8 @@ in the current arrangement and the easiest to fix.
 
 ### 2. The same plumbing is written three times
 
-`authenticate()` and `http()` are reimplemented in `aep_credentials.py`,
-`aep_credentials.py` and `aep_usage_log.py`. They differ in retry
+`authenticate()` and `http()` are reimplemented in `platform_access_and_audit/credential_keyring_manager_and_access_probe.py`,
+`platform_access_and_audit/credential_keyring_manager_and_access_probe.py` and `platform_access_and_audit/user_activity_log_from_audit_events.py`. They differ in retry
 behaviour, timeout handling and error reporting, so a fix in one does not
 reach the others. The audit-window bug found on 20 Oct existed only in one of
 them.
@@ -70,7 +70,7 @@ single AJO journey, where v2 lists them.
 `postman_to_keyring.py` was a third copy of the same idea: import a credential
 file into the keyring, just a different file shape from `--import-json`.
 
-All three are now one tool, **`aep_credentials.py`**: store, import (JSON or
+All three are now one tool, **`platform_access_and_audit/credential_keyring_manager_and_access_probe.py`**: store, import (JSON or
 Postman), authenticate, probe what the key can reach, and manage the set.
 Postman parsing was moved across and proved identical on both export shapes
 before the originals were deleted.
@@ -82,7 +82,7 @@ before the originals were deleted.
 ### Keep separate, deliberately
 
 - **`data_dictionary_v3.py`** — a different job entirely. Not in scope.
-- **`aep_creds.py`** — already the right shape. Nothing to do.
+- **`toolkit_internals/credential_loader.py`** — already the right shape. Nothing to do.
 
 ### Create one small shared layer
 
@@ -93,8 +93,8 @@ authenticate()      one implementation, with the retry and window-drift
 http()              fixes already learned
 aep_headers()
 list_sandboxes()
-AuditClient         lifted out of aep_usage_log
-readonly_guard()    lifted out of external_access_audit
+AuditClient         lifted out of user_activity_log_from_audit_events
+readonly_guard()    lifted out of external_access_entitlement_and_usage_audit
 ```
 
 Every tool imports this instead of borrowing from `data_dictionary_v3`. This
@@ -106,10 +106,10 @@ change alone is worth doing even if nothing else happens.
 
 | mode | answers | replaces |
 |---|---|---|
-| `--mode people` | who has access, who uses it, who to purge | `external_access_audit` |
-| `--mode usage` | per-person activity detail | `aep_usage_log` |
-| `--mode permissions` | subject × role × permission | `permissions_audit` |
-| `--mode roles` | the role → permission grid | `role_permissions_grid` |
+| `--mode people` | who has access, who uses it, who to purge | `external_access_entitlement_and_usage_audit` |
+| `--mode usage` | per-person activity detail | `user_activity_log_from_audit_events` |
+| `--mode permissions` | subject × role × permission | `who_can_do_what_permissions_audit` |
+| `--mode roles` | the role → permission grid | `role_to_permission_grid` |
 | `--mode credentials` | technical accounts: usage + entitlement | *(new, the gap)* |
 | `--mode all` | every tab in one workbook | — |
 
@@ -128,7 +128,7 @@ Profiles           what grants access, and to how many
 
 ### Merge the validators
 
-`aep_credentials.py` absorbs v1's liveness probes. `aep_credentials.py`
+`platform_access_and_audit/credential_keyring_manager_and_access_probe.py` absorbs v1's liveness probes. `platform_access_and_audit/credential_keyring_manager_and_access_probe.py`
 is deleted. One tool: store a credential, check it works, see what it can reach.
 
 ---
@@ -175,7 +175,7 @@ the next.
 
 1. **Extract `aep_api.py`.** Stop three tools importing the data dictionary for
    an HTTP helper. No behaviour change, immediately safer.
-2. **Retire `aep_credentials.py`**, moving its probes into v2.
+2. **Retire `platform_access_and_audit/credential_keyring_manager_and_access_probe.py`**, moving its probes into v2.
 3. **Build `aep_access.py` around the existing code**, mode by mode, starting
    with `people` because it is the one in use. Keep the old tools working until
    each mode is proven against them — same inputs, same numbers.
@@ -191,8 +191,8 @@ produce trusted numbers is how trusted numbers stop being trusted.
 ## Why this happened, for the record
 
 Three machines, branches that did not merge cleanly, and each machine solving
-the problem in front of it. `permissions_audit` and `role_permissions_grid`
-were written on one machine; `external_access_audit` on another, the same week,
+the problem in front of it. `who_can_do_what_permissions_audit` and `role_to_permission_grid`
+were written on one machine; `external_access_entitlement_and_usage_audit` on another, the same week,
 against the same APIs.
 
 Nothing here is wasted work — the overlap is mostly *plumbing*, and the

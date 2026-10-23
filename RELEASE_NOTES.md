@@ -8,7 +8,7 @@
 > later can be traced to exactly what the code did at the time. The notes
 > come in two editions: this Markdown file, and a colour HTML edition,
 > `RELEASE_NOTES.html`, built from it by
-> [`release_notes_html.py`](release_notes_html.py). How to run the tool: the
+> [`data_dictionary/release_notes_html_builder.py`](data_dictionary/release_notes_html_builder.py). How to run the tool: the
 > [README](README.md).
 
 **Labels:** ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square) a new capability · ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square) a change to something that already existed · ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square) a bug fix · ![Beta](https://img.shields.io/badge/Beta-6E3FA3?style=flat-square) works, but still being tuned

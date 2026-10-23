@@ -10,9 +10,19 @@ rule: new tools may pull in a dependency where it genuinely earns its keep.
 
 ## What's where
 
+The tools live in **theme folders**. Run any of them from the repo root, e.g.
+`python query_service/query_service_templates_export.py`. Each folder has a
+README listing its tools in one line each.
+
 | Folder / file | What it holds |
 |---|---|
-| `*.py` in this folder | **The tools** -- the things you run. Every one is listed below. |
+| [`data_dictionary/`](data_dictionary/) | **What exists in a sandbox:** schemas, fields, datasets, audiences, journeys, snapshots, overlap. The Data Dictionary itself (`data_dictionary_v3.py`, at the root for now) joins this folder once its current run has finished. |
+| [`platform_access_and_audit/`](platform_access_and_audit/) | **Who can reach the platform and what they do there:** access audit, user activity log, permissions, the role grid, audit-log investigations, and the credential manager. |
+| [`query_service/`](query_service/) | **Query Service:** saved query templates (export, rename), scheduled queries, external PostgreSQL clients. |
+| [`performance_and_guardrails/`](performance_and_guardrails/) | **How the platform is performing:** the guardrail scoreboard, batch evaluation timing, snapshot timing history, the 8am audience counts. |
+| [`ingestion/`](ingestion/) | **Getting data in:** failed batches, and what drove a jump in Profile. |
+| [`toolkit_internals/`](toolkit_internals/) | **Internal to this toolkit, not for other people to use:** the plumbing every tool imports: the credential loader and the house-style Excel writer. |
+| `aep_creds.py`, `house_xlsx.py`, `snapshot_tables.py`, `overlap_report.py`, `audience_complexity.py` | Temporary forwarding files, only for the Data Dictionary run that was in progress when everything moved (23 Oct 2026). They go when the Data Dictionary moves into its folder. |
 | [`RELEASE_NOTES.md`](RELEASE_NOTES.md) / `.html` | Data Dictionary release notes (the HTML edition is the page on GitHub Pages). |
 | [`docs/`](docs/) | Everything else to read: [Adobe API gotchas](docs/adobe-api-gotchas.md), the [external access audit](docs/external-access-audit.md), the [Data Dictionary overview](docs/data-dictionary-overview.md), per-tool notes in [`docs/tools/`](docs/tools/), plans in [`docs/plans/`](docs/plans/), images in `docs/images/`. |
 | [`parked/`](parked/) | Kept, but not for use: unfinished or one-off work. See its [README](parked/README.md). |
@@ -20,6 +30,46 @@ rule: new tools may pull in a dependency where it genuinely earns its keep.
 | `demo/` | The bundled Luma sample data the Data Dictionary can be tried on. |
 | `baselines/` | Hand-measured guardrail baselines the guardrail audit compares against. |
 | `creds/`, `output/`, `config.json` | Never committed: credentials, generated workbooks and caches, local labels. Old outputs live in `output/archive/`. |
+
+### Renamed on 23 October 2026
+
+Every tool was renamed to say what it does and moved into its theme folder. If you knew the old name:
+
+| Old name | Now |
+|---|---|
+| `aep_credentials.py` | [`platform_access_and_audit/credential_keyring_manager_and_access_probe.py`](platform_access_and_audit/credential_keyring_manager_and_access_probe.py) |
+| `aep_creds.py` | [`toolkit_internals/credential_loader.py`](toolkit_internals/credential_loader.py) |
+| `house_xlsx.py` | [`toolkit_internals/house_style_excel_writer.py`](toolkit_internals/house_style_excel_writer.py) |
+| `aep_usage_log.py` | [`platform_access_and_audit/user_activity_log_from_audit_events.py`](platform_access_and_audit/user_activity_log_from_audit_events.py) |
+| `external_access_audit.py` | [`platform_access_and_audit/external_access_entitlement_and_usage_audit.py`](platform_access_and_audit/external_access_entitlement_and_usage_audit.py) |
+| `permissions_audit.py` | [`platform_access_and_audit/who_can_do_what_permissions_audit.py`](platform_access_and_audit/who_can_do_what_permissions_audit.py) |
+| `role_permissions_grid.py` | [`platform_access_and_audit/role_to_permission_grid.py`](platform_access_and_audit/role_to_permission_grid.py) |
+| `audit_hunt.py` | [`platform_access_and_audit/who_loaded_data_into_datasets_investigation.py`](platform_access_and_audit/who_loaded_data_into_datasets_investigation.py) |
+| `babelfish_query_fetcher.py` | [`query_service/query_service_templates_export.py`](query_service/query_service_templates_export.py) |
+| `babelfish_query_renamer.py` | [`query_service/query_service_templates_renamer.py`](query_service/query_service_templates_renamer.py) |
+| `audit_batch_schedules_v2.py` | [`query_service/query_service_scheduled_queries_audit.py`](query_service/query_service_scheduled_queries_audit.py) |
+| `qs_postgres_hunt.py` | [`query_service/query_service_external_postgres_client_finder.py`](query_service/query_service_external_postgres_client_finder.py) |
+| `journey_audience_census.py` | [`data_dictionary/journeys_and_audiences_census.py`](data_dictionary/journeys_and_audiences_census.py) |
+| `ajo_journey_export.py` | [`data_dictionary/journey_definitions_full_export.py`](data_dictionary/journey_definitions_full_export.py) |
+| `audit_streaming_schedules.py` | [`data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py`](data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py) |
+| `dd_audience_countdown.py` | [`data_dictionary/data_distiller_audience_expiry_countdown.py`](data_dictionary/data_distiller_audience_expiry_countdown.py) |
+| `single_schema_extractor.py` | [`data_dictionary/single_schema_and_sample_data_extractor.py`](data_dictionary/single_schema_and_sample_data_extractor.py) |
+| `snapshot_tables.py` | [`data_dictionary/profile_snapshot_export_tables_inventory.py`](data_dictionary/profile_snapshot_export_tables_inventory.py) |
+| `overlap_report.py` | [`data_dictionary/profile_dataset_overlap_report.py`](data_dictionary/profile_dataset_overlap_report.py) |
+| `audience_complexity.py` | [`data_dictionary/audience_complexity_score.py`](data_dictionary/audience_complexity_score.py) |
+| `release_notes_html.py` | [`data_dictionary/release_notes_html_builder.py`](data_dictionary/release_notes_html_builder.py) |
+| `guardrail_audit.py` | [`performance_and_guardrails/platform_guardrails_scoreboard.py`](performance_and_guardrails/platform_guardrails_scoreboard.py) |
+| `guardrail_audit_pptx.py` | [`performance_and_guardrails/platform_guardrails_scoreboard_slide.py`](performance_and_guardrails/platform_guardrails_scoreboard_slide.py) |
+| `dataset_census.py` | [`performance_and_guardrails/profile_enabled_datasets_per_class_census.py`](performance_and_guardrails/profile_enabled_datasets_per_class_census.py) |
+| `batch_eval_timing.py` | [`performance_and_guardrails/batch_audience_evaluation_timing.py`](performance_and_guardrails/batch_audience_evaluation_timing.py) |
+| `snapshot_history.py` | [`performance_and_guardrails/profile_snapshot_timing_history.py`](performance_and_guardrails/profile_snapshot_timing_history.py) |
+| `sluggishness_detector.py` | [`performance_and_guardrails/audience_count_board_real_counts_at_8am.py`](performance_and_guardrails/audience_count_board_real_counts_at_8am.py) |
+| `failed_batch_report.py` | [`ingestion/failed_batches_summary_report.py`](ingestion/failed_batches_summary_report.py) |
+| `batch_fetcher.py` | [`ingestion/failed_batch_file_downloader.py`](ingestion/failed_batch_file_downloader.py) |
+| `profile_jump.py` | [`ingestion/profile_count_jump_investigation.py`](ingestion/profile_count_jump_investigation.py) |
+| `audience_renamer.py, adhoc_schema_patch_probe.py` | `parked/ (not for use)` |
+
+`data_dictionary_v3.py` keeps its name and place until its current run finishes, then moves into `data_dictionary/`.
 
 **One credential model for the whole toolkit.** Every tool authenticates the
 same way: it reads a per-tenant JSON from `creds/`, lets you pick which set to
@@ -33,25 +83,25 @@ The toolkit spans two product ranges:
 
 | Tool | What it does |
 |------|--------------|
-| [`babelfish_query_renamer.py`](babelfish_query_renamer.py) | Tidies up messy Query Service SQL template names (optionally AI-suggested via Claude) and pushes renames back. |
-| [`babelfish_query_fetcher.py`](babelfish_query_fetcher.py) | Strict read-only export of Query Service templates to local Markdown + RTF. Never writes back. |
+| [`query_service/query_service_templates_renamer.py`](query_service/query_service_templates_renamer.py) | Tidies up messy Query Service SQL template names (optionally AI-suggested via Claude) and pushes renames back. |
+| [`query_service/query_service_templates_export.py`](query_service/query_service_templates_export.py) | Strict read-only export of Query Service templates to local Markdown + RTF. Never writes back. |
 
 **AEP Swiss Army range** — batch / credential / audit utilities:
 
 | Tool | What it does |
 |------|--------------|
-| [`external_access_audit.py`](external_access_audit.py) | Who can reach Experience Platform / AJO, and which of them actually use it — the removal list for access that has outlived its purpose. Read-only, enforced. See **[docs/external-access-audit.md](docs/external-access-audit.md)**. |
-| [`aep_credentials.py`](aep_credentials.py) | **The one credential tool.** Store a credential in the keyring (typed, or imported from a legacy JSON or an Adobe Postman export), check it authenticates, and probe which of 12 Adobe services it can actually reach. Also lists, deletes, migrates and sweeps. **Run this first on any new credential set.** |
-| [`batch_fetcher.py`](batch_fetcher.py) | Lists recent batches, then downloads a chosen batch's files locally. |
-| [`failed_batch_report.py`](failed_batch_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
-| [`journey_audience_census.py`](journey_audience_census.py) | Census of **journeys and audiences** (audiences formerly = segments). `--list` maps every AJO journey to the **audience behind it** (read-audience or qualification); `--audiences` inventories the **whole audience estate** across sandboxes with tags, evaluation type and the segmentation rule (PQL) rendered readable. |
-| [`audit_batch_schedules_v2.py`](audit_batch_schedules_v2.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
-| [`audit_streaming_schedules.py`](audit_streaming_schedules.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
-| [`batch_eval_timing.py`](batch_eval_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
-| [`aep_usage_log.py`](aep_usage_log.py) | Who is actively using AEP: per-user **activity** (not sign-ins) from the audit log over the last N days, with the tech-account suppression-list noise excluded and counted separately. |
+| [`platform_access_and_audit/external_access_entitlement_and_usage_audit.py`](platform_access_and_audit/external_access_entitlement_and_usage_audit.py) | Who can reach Experience Platform / AJO, and which of them actually use it — the removal list for access that has outlived its purpose. Read-only, enforced. See **[docs/external-access-audit.md](docs/external-access-audit.md)**. |
+| [`platform_access_and_audit/credential_keyring_manager_and_access_probe.py`](platform_access_and_audit/credential_keyring_manager_and_access_probe.py) | **The one credential tool.** Store a credential in the keyring (typed, or imported from a legacy JSON or an Adobe Postman export), check it authenticates, and probe which of 12 Adobe services it can actually reach. Also lists, deletes, migrates and sweeps. **Run this first on any new credential set.** |
+| [`ingestion/failed_batch_file_downloader.py`](ingestion/failed_batch_file_downloader.py) | Lists recent batches, then downloads a chosen batch's files locally. |
+| [`ingestion/failed_batches_summary_report.py`](ingestion/failed_batches_summary_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
+| [`data_dictionary/journeys_and_audiences_census.py`](data_dictionary/journeys_and_audiences_census.py) | Census of **journeys and audiences** (audiences formerly = segments). `--list` maps every AJO journey to the **audience behind it** (read-audience or qualification); `--audiences` inventories the **whole audience estate** across sandboxes with tags, evaluation type and the segmentation rule (PQL) rendered readable. |
+| [`query_service/query_service_scheduled_queries_audit.py`](query_service/query_service_scheduled_queries_audit.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
+| [`data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py`](data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |
+| [`performance_and_guardrails/batch_audience_evaluation_timing.py`](performance_and_guardrails/batch_audience_evaluation_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
+| [`platform_access_and_audit/user_activity_log_from_audit_events.py`](platform_access_and_audit/user_activity_log_from_audit_events.py) | Who is actively using AEP: per-user **activity** (not sign-ins) from the audit log over the last N days, with the tech-account suppression-list noise excluded and counted separately. |
 | [`parked/audience_renamer.py`](parked/audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, with `--data-dict` real field coverage + top-10 example values sampled in-memory (PII starred), and with `--history` (beta) how many months of unbroken data each field has. [Release notes](RELEASE_NOTES.md). |
-| [`release_notes_html.py`](release_notes_html.py) | Builds `RELEASE_NOTES.html`, the colour edition of the Data Dictionary release notes (laid out like Adobe Experience League release notes), from `RELEASE_NOTES.md`. Re-run it after editing the Markdown. Stdlib only. |
+| [`data_dictionary/release_notes_html_builder.py`](data_dictionary/release_notes_html_builder.py) | Builds `RELEASE_NOTES.html`, the colour edition of the Data Dictionary release notes (laid out like Adobe Experience League release notes), from `RELEASE_NOTES.md`. Re-run it after editing the Markdown. Stdlib only. |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
 cleanly across multiple Adobe orgs without folder collisions. `creds/*.json`
@@ -82,7 +132,7 @@ control.
 ### 2. Sanity-check it
 
 ```
-python aep_credentials.py my-tenant
+python platform_access_and_audit/credential_keyring_manager_and_access_probe.py my-tenant
 ```
 
 This authenticates, decodes the token (scopes, org, expiry, technical
@@ -101,7 +151,7 @@ python <tool>.py                 # interactive: pick a credential set from a men
 python <tool>.py my-tenant       # pick by filename stem (no menu)
 ```
 
-`aep_credentials.py` and `babelfish_query_fetcher.py` also accept `--all`
+`platform_access_and_audit/credential_keyring_manager_and_access_probe.py` and `query_service/query_service_templates_export.py` also accept `--all`
 to run across every set in the bank.
 
 ### 4. Optional dependencies
@@ -127,7 +177,7 @@ them all:
   client_id`, so a credential whose subscribed API key differs from its IMS
   client (e.g. AJO hybrids) just sets `api_key`.
 - **Token mints but 403s?** That's the technical account missing from a product
-  profile — `aep_credentials.py` names this explicitly and tells you the
+  profile — `platform_access_and_audit/credential_keyring_manager_and_access_probe.py` names this explicitly and tells you the
   fix.
 - **Nothing secret is committed.** `creds/*.json` and all generated exports are
   gitignored; only `creds/example.json` is tracked.
@@ -152,7 +202,7 @@ Every tool that writes a workbook or deck follows these:
 - **One file, overwritten.** Every tool writes a single workbook with a stable
   name and replaces it on each run: no timestamped copies, no CSV or JSON
   alongside, so `output/` doesn't fill up. The shared writer is
-  [`house_xlsx.py`](house_xlsx.py) (`Book(...).sheet(...).save(...)`): it
+  [`toolkit_internals/house_style_excel_writer.py`](toolkit_internals/house_style_excel_writer.py) (`Book(...).sheet(...).save(...)`): it
   applies the banner, author, header style, filters, frozen panes, widths and
   RAG fills, and wraps an existing workbook when a tool folds its tabs into the
   Data Dictionary. The only non-workbook files left are caches and inputs
@@ -164,7 +214,7 @@ Every tool that writes a workbook or deck follows these:
 
 # Babelfish range
 
-## babelfish_query_renamer.py
+## query_service/query_service_templates_renamer.py
 
 Tidies up SQL query templates in AEP's Query Service (nicknamed *Babelfish*)
 by pulling them down, suggesting sensible names — optionally via the Claude
@@ -187,11 +237,11 @@ per-tenant. Since it writes back to AEP, it targets one credential set per run
 (no `--all`).
 
 ```
-python babelfish_query_renamer.py                 # interactive: pick a credential set
-python babelfish_query_renamer.py my-tenant       # pick by stem
+python query_service/query_service_templates_renamer.py                 # interactive: pick a credential set
+python query_service/query_service_templates_renamer.py my-tenant       # pick by stem
 ```
 
-## babelfish_query_fetcher.py
+## query_service/query_service_templates_export.py
 
 A strict read-only fork of the renamer: it **never writes back to AEP** —
 no PUT, no rename, no name suggestions. It authenticates,
@@ -204,14 +254,14 @@ default; pass them on the CLI (plus `--all` for every set) to run unattended
 on a schedule.
 
 ```
-python babelfish_query_fetcher.py                      # interactive menus
-python babelfish_query_fetcher.py my-tenant --sandbox prod
-python babelfish_query_fetcher.py --all                # every set in creds/
+python query_service/query_service_templates_export.py                      # interactive menus
+python query_service/query_service_templates_export.py my-tenant --sandbox prod
+python query_service/query_service_templates_export.py --all                # every set in creds/
 ```
 
 # AEP Swiss Army range
 
-## batch_fetcher.py
+## ingestion/failed_batch_file_downloader.py
 
 Pulls a single AEP batch's files down to your local machine. It lists the
 most recent batches in the sandbox, you paste (or pick) the batch ID you
@@ -221,24 +271,24 @@ embedded error payloads. Replaces three earlier scripts (`auth.py`,
 (override via `region` in the creds JSON).
 
 ```
-python batch_fetcher.py                 # interactive: pick a credential set
-python batch_fetcher.py my-tenant       # pick by stem; then choose a batch
+python ingestion/failed_batch_file_downloader.py                 # interactive: pick a credential set
+python ingestion/failed_batch_file_downloader.py my-tenant       # pick by stem; then choose a batch
 ```
 
-## failed_batch_report.py
+## ingestion/failed_batches_summary_report.py
 
 Exports a CSV summary of every batch that FAILED in the last N hours
 (default 24) in the chosen sandbox — a quick estate-wide health
-snapshot. Use `batch_fetcher.py` instead when you need to drill into one
+snapshot. Use `ingestion/failed_batch_file_downloader.py` instead when you need to drill into one
 batch and download its failed-record files. Reports are written under
 `./output/` (gitignored).
 
 ```
-python failed_batch_report.py                       # interactive: pick a credential set
-python failed_batch_report.py my-tenant --hours=72 --sandbox=prod
+python ingestion/failed_batches_summary_report.py                       # interactive: pick a credential set
+python ingestion/failed_batches_summary_report.py my-tenant --hours=72 --sandbox=prod
 ```
 
-## aep_credentials.py
+## platform_access_and_audit/credential_keyring_manager_and_access_probe.py
 
 Quickly checks whether an Adobe IMS / AEP credential set is alive. Pick a
 credential JSON from `./creds/`; it authenticates via OAuth
@@ -277,11 +327,11 @@ explained in the tool's own `--help` and in
 [docs/adobe-api-gotchas.md](docs/adobe-api-gotchas.md).
 
 ```
-python aep_credentials.py            # interactive menu
-python aep_credentials.py --all      # validate every set in ./creds/
+python platform_access_and_audit/credential_keyring_manager_and_access_probe.py            # interactive menu
+python platform_access_and_audit/credential_keyring_manager_and_access_probe.py --all      # validate every set in ./creds/
 ```
 
-## journey_audience_census.py
+## data_dictionary/journeys_and_audiences_census.py
 
 Lists every **Adobe Journey Optimizer** journey in a sandbox and pulls out the
 **audience behind each one** — whether the journey *reads* an audience or is
@@ -301,7 +351,7 @@ api-key that's *AJO-subscribed* — `--creds` picks the token credential,
 key. Once an admin enables one credential fully for AJO, drop the hybrid and
 just use `--creds`. Read-only, stdlib-only.
 
-Run it **bare** (`python journey_audience_census.py`) and it prompts you through the
+Run it **bare** (`python data_dictionary/journeys_and_audiences_census.py`) and it prompts you through the
 choices — pick the token credential, then pick the AJO-subscribed credential
 for the `x-api-key` — and lists the whole estate. The header names both
 credentials (e.g. `Token from: acme alpha … Api-key from: acme beta`) and a
@@ -310,12 +360,12 @@ first N; `--xlsx` writes `output/ajo_journeys_<creds>_<sandbox>_<date>.xlsx`
 (needs `openpyxl`).
 
 ```
-python journey_audience_census.py                                   # bare: prompts for both creds, lists all
-python journey_audience_census.py --creds "acme alpha" --api-key <key> --list --limit 10 --xlsx
-python journey_audience_census.py --creds "acme alpha" --api-key <key> <journeyId> [<journeyId> ...]
+python data_dictionary/journeys_and_audiences_census.py                                   # bare: prompts for both creds, lists all
+python data_dictionary/journeys_and_audiences_census.py --creds "acme alpha" --api-key <key> --list --limit 10 --xlsx
+python data_dictionary/journeys_and_audiences_census.py --creds "acme alpha" --api-key <key> <journeyId> [<journeyId> ...]
 ```
 
-## audit_batch_schedules_v2.py
+## query_service/query_service_scheduled_queries_audit.py
 
 Audits the Query Service schedules across an org's sandboxes, then
 **classifies and flags** each one. It authenticates, lists every sandbox
@@ -343,11 +393,11 @@ forward. The XLSX needs `openpyxl` (`pip install -r requirements.txt`); if
 it's missing, the CSV is still written.
 
 ```
-python audit_batch_schedules_v2.py            # interactive menus
-python audit_batch_schedules_v2.py prod       # pick a credential set by stem
+python query_service/query_service_scheduled_queries_audit.py            # interactive menus
+python query_service/query_service_scheduled_queries_audit.py prod       # pick a credential set by stem
 ```
 
-## audit_streaming_schedules.py
+## data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py
 
 Catalogues and triages the **streaming audiences/segments** in a sandbox — a
 read-only inventory used to plan the move to streaming (HTS) evaluation. Pick a
@@ -357,12 +407,12 @@ with the detail needed to decide what to migrate, and writes the catalogue to
 `./output/`.
 
 ```
-python audit_streaming_schedules.py                 # interactive: pick a credential set, live from AEP
-python audit_streaming_schedules.py my-tenant       # pick by stem
-python audit_streaming_schedules.py my-tenant --source=files   # offline, from a local dump
+python data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py                 # interactive: pick a credential set, live from AEP
+python data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py my-tenant       # pick by stem
+python data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py my-tenant --source=files   # offline, from a local dump
 ```
 
-## batch_eval_timing.py
+## performance_and_guardrails/batch_audience_evaluation_timing.py
 
 Measures how long **batch audience evaluation** actually takes in a sandbox —
 read-only timing telemetry for spotting slow or drifting evaluation windows.
@@ -370,11 +420,11 @@ Pick a credential set and it reports the timing per the sandbox's batch
 evaluation activity.
 
 ```
-python batch_eval_timing.py                 # interactive: pick a credential set
-python batch_eval_timing.py my-tenant       # pick by stem
+python performance_and_guardrails/batch_audience_evaluation_timing.py                 # interactive: pick a credential set
+python performance_and_guardrails/batch_audience_evaluation_timing.py my-tenant       # pick by stem
 ```
 
-## dataset_census.py
+## performance_and_guardrails/profile_enabled_datasets_per_class_census.py
 
 Counts the **profile-enabled datasets** in a sandbox and groups them by the XDM
 base class behind each one — the fast answer to "how close am I to the
@@ -390,11 +440,11 @@ either the dataset carries no `schemaRef`, or the schema is an Adobe system
 schema with no `meta:class`. Read-only; `--csv` writes to `./output/`.
 
 ```
-python dataset_census.py                              # interactive: creds + sandbox
-python dataset_census.py my-tenant --sandbox=prod
-python dataset_census.py my-tenant --sandbox=all --csv
-python dataset_census.py my-tenant --all-datasets     # census every dataset, not just profile-enabled
-python dataset_census.py my-tenant --limit=25 --warn=22   # your guardrail, not the default 20
+python performance_and_guardrails/profile_enabled_datasets_per_class_census.py                              # interactive: creds + sandbox
+python performance_and_guardrails/profile_enabled_datasets_per_class_census.py my-tenant --sandbox=prod
+python performance_and_guardrails/profile_enabled_datasets_per_class_census.py my-tenant --sandbox=all --csv
+python performance_and_guardrails/profile_enabled_datasets_per_class_census.py my-tenant --all-datasets     # census every dataset, not just profile-enabled
+python performance_and_guardrails/profile_enabled_datasets_per_class_census.py my-tenant --limit=25 --warn=22   # your guardrail, not the default 20
 ```
 
 ## reference/ajo-journey-export/  *(Node, contributed by Craig)*
@@ -412,7 +462,7 @@ credentials are not entitled for it, the token dies within ~24h, and Adobe can
 change the endpoint without notice — so it's for inspection and reporting, not
 automation. See [its README](reference/ajo-journey-export/README.md) for the token dance
 and the gotchas (lowercase sandbox name, stale list names vs `/latest` names).
-Complements `journey_audience_census.py`, which uses the supported gateway but
+Complements `data_dictionary/journeys_and_audiences_census.py`, which uses the supported gateway but
 cannot see inside the journey.
 
 ```
@@ -421,7 +471,7 @@ export AJO_BEARER_TOKEN="eyJ..." AJO_ORG_ID="...@AdobeOrg" AJO_SANDBOX=prod
 node ajo-journey-export.mjs --out ./export-2026-09
 ```
 
-**Python port: `ajo_journey_export.py`.** Same endpoint, same raw output
+**Python port: `data_dictionary/journey_definitions_full_export.py`.** Same endpoint, same raw output
 (per-journey JSON + `index.csv` with Craig's columns — the two are
 interchangeable), in the knife's house style, **plus a readable workbook**
 `output/AJO Journeys - <sandbox> - <date>.xlsx` in the Data Dictionary style:
@@ -450,11 +500,11 @@ steps at the prompt and again on a 401/403. A screenshot of exactly where the
 token sits in DevTools is still to be added (it needs redacting first).
 
 ```
-python ajo_journey_export.py aep-prod --sandbox=prod            # paste token at the prompt
-python ajo_journey_export.py aep-prod --sandbox=dev --journey=<uid>
-python ajo_journey_export.py --org-id=...@AdobeOrg --sandbox=prod --token=eyJ...
-python ajo_journey_export.py aep-prod --from-dir=output/ajo-journeys_dev_2026-09-25   # rebuild the workbook, no token
-python ajo_journey_export.py aep-prod --sandbox=prod --no-xlsx  # Craig's raw output only
+python data_dictionary/journey_definitions_full_export.py aep-prod --sandbox=prod            # paste token at the prompt
+python data_dictionary/journey_definitions_full_export.py aep-prod --sandbox=dev --journey=<uid>
+python data_dictionary/journey_definitions_full_export.py --org-id=...@AdobeOrg --sandbox=prod --token=eyJ...
+python data_dictionary/journey_definitions_full_export.py aep-prod --from-dir=output/ajo-journeys_dev_2026-09-25   # rebuild the workbook, no token
+python data_dictionary/journey_definitions_full_export.py aep-prod --sandbox=prod --no-xlsx  # Craig's raw output only
 ```
 
 **Known limit — lineage.** Because this is scraped from the UI's private API,
@@ -465,7 +515,7 @@ but they do not join through to the rest of the Data Dictionary's lineage
 workbook, with the dictionary's workflow asking for the browser token when you
 want journeys included.
 
-## guardrail_audit.py  *(beta)*
+## performance_and_guardrails/platform_guardrails_scoreboard.py  *(beta)*
 
 **AEP Guardrail Estimator.** Re-measures the guardrail scoreboard for a sandbox
 straight from the APIs — the monthly "are we still inside Adobe's guardrails?"
@@ -497,18 +547,18 @@ present. Guardrails are Adobe's published defaults in `GUARDRAILS` — edit them
 if your contract differs.
 
 ```
-python guardrail_audit.py aep-prod --sandbox=prod
-python guardrail_audit.py aep-prod --sandbox=prod --days=7 --include-system
-python guardrail_audit.py aep-prod --sandbox=prod --no-batches     # skip the batch scans
-python guardrail_audit_pptx.py                                     # one-slide deck from the latest audit
+python performance_and_guardrails/platform_guardrails_scoreboard.py aep-prod --sandbox=prod
+python performance_and_guardrails/platform_guardrails_scoreboard.py aep-prod --sandbox=prod --days=7 --include-system
+python performance_and_guardrails/platform_guardrails_scoreboard.py aep-prod --sandbox=prod --no-batches     # skip the batch scans
+python performance_and_guardrails/platform_guardrails_scoreboard_slide.py                                     # one-slide deck from the latest audit
 ```
 
-`guardrail_audit_pptx.py` (needs `python-pptx`) turns the latest audit JSON
+`performance_and_guardrails/platform_guardrails_scoreboard_slide.py` (needs `python-pptx`) turns the latest audit JSON
 into a single-slide **scoreboard deck** in `output/`: RAG dot, check, how things
 stood at the start of the project (first baseline column), and Now on the right.
 `--all-columns` adds every baseline column and the previous run.
 
-## aep_usage_log.py
+## platform_access_and_audit/user_activity_log_from_audit_events.py
 
 **Who is actively using AEP**, per person, over the last N days (default 90),
 read from the Audit events API. It replaces the UI export, which stops at
@@ -537,9 +587,9 @@ Workbook `output/aep_usage_log_<sandbox>_<YYYYMMDD>.xlsx`, with sheets
 the noise; `--no-noise-count` skips that. Read-only.
 
 ```
-python aep_usage_log.py                         # aep-prod, prod, last 90 days
-python aep_usage_log.py --days=30
-python aep_usage_log.py --days=90 --no-noise-count
+python platform_access_and_audit/user_activity_log_from_audit_events.py                         # aep-prod, prod, last 90 days
+python platform_access_and_audit/user_activity_log_from_audit_events.py --days=30
+python platform_access_and_audit/user_activity_log_from_audit_events.py --days=90 --no-noise-count
 ```
 
 ## parked/audience_renamer.py  *(in development — do not use)*
@@ -548,7 +598,7 @@ python aep_usage_log.py --days=90 --no-noise-count
 > it can be picked up later. It is not a working tool: it refuses to run, and
 > nobody should use it. What follows describes what it was meant to do.
 
-The `babelfish_query_renamer` idea, for audiences: gives every rule-based
+The `query_service_templates_renamer` idea, for audiences: gives every rule-based
 audience in a sandbox a friendly name built from a naming convention. It does
 no fetching of its own — it **follows on from a Data Dictionary run** and reads
 that run's PQL sidecar and workbook (Audiences tab, Field Index friendly names).
@@ -574,7 +624,7 @@ descriptions on file were written in a Claude Code session instead.
 python audience_renamer.py        # refuses: "IN DEVELOPMENT and parked -- it is not for use"
 ```
 
-## permissions_audit.py
+## platform_access_and_audit/who_can_do_what_permissions_audit.py
 
 Who can do what in AEP, and how they got it. Reads the Access Control API —
 every role with its permission sets, sandboxes and labels, and every subject
@@ -595,14 +645,14 @@ in `output/user_directory_cache.json` so it survives a day the directory
 refuses. Group ids stay numeric until the same API can name them.
 
 ```
-python permissions_audit.py --permission=manage-datasets
-python permissions_audit.py --permission=dashboard --sandbox=prod
-python permissions_audit.py --category="Data Management"
-python permissions_audit.py --user=someone@tesco.com
-python permissions_audit.py --role="Sandbox Administrators" --days=90
+python platform_access_and_audit/who_can_do_what_permissions_audit.py --permission=manage-datasets
+python platform_access_and_audit/who_can_do_what_permissions_audit.py --permission=dashboard --sandbox=prod
+python platform_access_and_audit/who_can_do_what_permissions_audit.py --category="Data Management"
+python platform_access_and_audit/who_can_do_what_permissions_audit.py --user=someone@tesco.com
+python platform_access_and_audit/who_can_do_what_permissions_audit.py --role="Sandbox Administrators" --days=90
 ```
 
-## overlap_report.py  *(folded into the Data Dictionary)*
+## data_dictionary/profile_dataset_overlap_report.py  *(folded into the Data Dictionary)*
 
 The Profile store's **dataset overlap report**, turned from a wall of
 comma-separated dataset ids into something readable. Every row of that report
@@ -622,12 +672,12 @@ the overlap report on its own. `probe` tests which preview-sample-status
 endpoints answer and writes `overlap_probe_<sandbox>.xlsx`.
 
 ```
-python overlap_report.py dataset aep-prod --sandbox=prod
-python overlap_report.py dataset aep-prod --sandbox=prod --date=2026-10-04
-python overlap_report.py identity aep-prod --sandbox=prod       # namespace distribution
+python data_dictionary/profile_dataset_overlap_report.py dataset aep-prod --sandbox=prod
+python data_dictionary/profile_dataset_overlap_report.py dataset aep-prod --sandbox=prod --date=2026-10-04
+python data_dictionary/profile_dataset_overlap_report.py identity aep-prod --sandbox=prod       # namespace distribution
 ```
 
-## audience_complexity.py  *(beta, folded into the Data Dictionary)*
+## data_dictionary/audience_complexity_score.py  *(beta, folded into the Data Dictionary)*
 
 A crude 0-100 **complexity score** for an AEP audience, read off its PQL and
 the audience record, with a RED / AMBER / GREEN on top. Not all audiences are
@@ -721,8 +771,8 @@ dot-notation path with Ctrl-F; the Tab column says which sheet it's on),
 **Schemas** (one row per kept schema), **Datasets** (friendly name → SQL table
 name), **Audiences** (every audience, its rule, and — new in v3.4.6 — its
 **complexity score**, see below), **Snapshot Summary** / **Snapshot Tables**
-(folded in from `snapshot_tables.py`), **Overlap cut-list** / **Overlap full
-report** (folded in from `overlap_report.py`, v3.4.7: which datasets the
+(folded in from `data_dictionary/profile_snapshot_export_tables_inventory.py`), **Overlap cut-list** / **Overlap full
+report** (folded in from `data_dictionary/profile_dataset_overlap_report.py`, v3.4.7: which datasets the
 profiles are built from, what expiring one would save, and — because a sudden
 new combination is a new route in — where a jump in the profile count came
 from), then **one tab per schema**. Each schema tab opens with a title block
@@ -773,7 +823,7 @@ added in v3.4.5 / v3.4.6:
   | Breadth / other | Ordered event sequences, very many conditions, lists of 100+ values, more than one merge policy, a negated event step, Adobe's performance warning overridden at save. | small amounts, capped |
 
   RED is 55 and over, AMBER 30 to 54. The scoring is pure functions in
-  [`audience_complexity.py`](audience_complexity.py) (developed standalone,
+  [`data_dictionary/audience_complexity_score.py`](data_dictionary/audience_complexity_score.py) (developed standalone,
   folded in); the weights are constants at the top of that file and are a
   first cut to be argued with. The usual fix for a RED is to shorten the
   lookback, or move the sum / count upstream into a computed attribute and

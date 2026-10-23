@@ -14,7 +14,7 @@ Data Dictionary v3.4 authenticates to Adobe Experience Platform with a chosen cr
 - **Schemas** — one row per kept schema (class, dataset count, **SQL table name(s)**, field/identity/relationship counts).
 - **Datasets** — every dataset mapped to its **SQL table (system) name** — see below.
 - **Audiences** — every audience with tags, owner, last-modified, and its segmentation rule (PQL) rendered readable; since v3.4.5 the full rule also goes to a `.jsonl` sidecar (Excel cuts a cell at 32,767 characters), and since v3.4.6 every rule-based audience carries a **complexity score (0–100) with RED / AMBER / GREEN** and the reasons — see below.
-- **Snapshot Summary / Snapshot Tables** — every Profile / Segment snapshot export table with its merge policy (the default-policy ones highlighted), when the system evaluation ran and how long the snapshot took to write (folded in from `snapshot_tables.py`, v3.4.4).
+- **Snapshot Summary / Snapshot Tables** — every Profile / Segment snapshot export table with its merge policy (the default-policy ones highlighted), when the system evaluation ran and how long the snapshot took to write (folded in from `data_dictionary/profile_snapshot_export_tables_inventory.py`, v3.4.4).
 - **One tab per schema** — every field (dot-notation path, type, identity, relationship), plus the schema's SQL table name(s) in the header block. Ready to paste into Claude (via MCP) for a Mermaid ERD.
 
 The Profile schema's tab is coloured **purple** so the post-merge union stands out from the event and lookup schemas.
@@ -68,7 +68,7 @@ Not all audiences are created equal. One badly built audience can double the nig
 
 Every rule-based audience (format `json`) is scored 0–100 and given a RED (≥ 55) / AMBER (≥ 30) / GREEN. The four main drivers, after the miaprova.com write-ups on expensive AEP segments: **event scan and lookback** (the longer the window the more events read per profile per night; a scan with no time limit scores highest), **lookup joins** to another class (products via gtin — resolved per event, per profile), **aggregations that cannot short-circuit** (`sum` / `average` / `count` / "occurs N times"), and **base audience size** (`inSegment()` on a 20-million-profile audience scans all 20 million). Smaller signals: ordered event sequences, very many conditions, hard-coded lists of 100+ values, more than one merge policy, a negated event step, and Adobe's own performance warning having been overridden at save.
 
-On the Audiences tab the formula is printed in full above the columns, each row shows *Why this score* with the points, and the raw features sit in their own filterable columns. The weights are constants at the top of `audience_complexity.py` and are a first cut to be argued with and calibrated against real batch run times. The usual fix for a RED: shorten the lookback, or move the sum / count upstream into a computed attribute and test that instead.
+On the Audiences tab the formula is printed in full above the columns, each row shows *Why this score* with the points, and the raw features sit in their own filterable columns. The weights are constants at the top of `data_dictionary/audience_complexity_score.py` and are a first cut to be argued with and calibrated against real batch run times. The usual fix for a RED: shorten the lookback, or move the sum / count upstream into a computed attribute and test that instead.
 
 First prod run (6 Oct 2026): 2,205 scored — 64 RED, 482 AMBER, 1,659 GREEN. Every RED had the same shape: an event scan with no time limit, a product lookup join, and a base audience of 13–23 million profiles.
 
@@ -79,9 +79,9 @@ First prod run (6 Oct 2026): 2,205 scored — 64 RED, 482 AMBER, 1,659 GREEN. Ev
 - **v3.3** — Audiences tab, provenance line on every tab, a How to Use tab, filters/frozen headers everywhere, and the credential name dropped from the filename in favour of the sandbox.
 - **v3.4** — credential name removed from the workbook **titles** too (sandbox instead, unless a `client` key is configured), and a link to the release notes on every tab.
 - **v3.4.2 / v3.4.3** — a tab-colour system with meaning (hue = class, shade = enabled for Profile); friendly names and descriptions everywhere; the friendly-label columns renamed to "Friendly labels".
-- **v3.4.4** — Snapshot Summary and Snapshot Tables tabs, folded in from `snapshot_tables.py`.
+- **v3.4.4** — Snapshot Summary and Snapshot Tables tabs, folded in from `data_dictionary/profile_snapshot_export_tables_inventory.py`.
 - **v3.4.5** — the dictionary moves to its own folder (`output/data_dictionary/`); the full-PQL sidecar; silent PQL truncation ended.
-- **v3.4.6** — the audience **complexity score** (beta) with RED / AMBER / GREEN and the reasons, from `audience_complexity.py`.
+- **v3.4.6** — the audience **complexity score** (beta) with RED / AMBER / GREEN and the reasons, from `data_dictionary/audience_complexity_score.py`.
 
 Full detail: **[RELEASE_NOTES.md](../RELEASE_NOTES.md)**.
 
