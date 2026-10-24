@@ -87,6 +87,16 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.18 -- Two batches a month, from two directions. Comparing the v3.4.16
+(newest first) and v3.4.17 (biggest first) roi-prod runs month by month: (1)
+on some datasets the biggest batches "of 1 record" hold empty files while a
+newer batch has the rows (tesco_profile_dataset, October 2026 went to '?'), so
+when every biggest batch is empty the month is walked newest first as well;
+(2) one batch per month missed rarely-filled fields in 21 of ~400 months, and
+a miss can look like a break in a field's run, so the biggest batch and one
+typical newer batch are now both read and fields counted across the two.
+Cache v4: months read from one batch are re-read.
+
 v3.4.17 -- Field history checked against Adobe a second way, and corrected.
 An independent check of the v3.4.16 roi-prod run confirmed 34 of 36 verdicts
 (every 'data since' date, every 'data-lake files empty' month sampled, every
@@ -305,7 +315,7 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.17"
+SCRIPT_VERSION = "3.4.18"
 SCRIPT_DATE    = "2026-10-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -443,7 +453,8 @@ HISTORY_PROFILE_DAYS = 90
 # their 'none' and unreadable verdicts are not trusted -- every month is re-read.
 # 3 (v3.4.17): v2 could call a month of 1,000+ batches 'Profile only' when its
 # few readable ones sat past page 5 -- re-read with the biggest-first query.
-HISTORY_CACHE_VERSION = 3
+# 4 (v3.4.18): months are read from two batches, not one -- re-read.
+HISTORY_CACHE_VERSION = 4
 # A finished month's batches never change, so each one is cached and a later run
 # reads only the current month. Kept beside the repo: a working file, not a
 # deliverable, so never under AEP_OUTPUT_DIR.
@@ -4068,61 +4079,83 @@ def _history_read(headers, bid, paths):
 
 
 def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
-    """Read one more typical batch created in [a, b) into the month record
-    `rec` (a fresh one when None) and return it. A whole month with no batches
+    """Read batches created in [a, b) into the month record `rec` (a fresh one
+    when None) and return it: the biggest readable batch and one typical newer
+    one, fields counted across both, else the newest typical ones in turn until
+    one gives records. A whole month with no batches
     stays 'none'; a part-month window that finds nothing changes nothing.
     rec["retry"] marks an unreadable month worth asking again next run (a
     timeout or 5xx); one that can never be read is cached like any other."""
     if rec is None:
         rec = {"state": "none", "rows": 0, "fields": {}, "ts": None, "batches": []}
     a_ms, b_ms = _ms(a), _ms(b)
-    used = set(rec["batches"])
-    cands, pick = [], []
-    # Biggest first: Catalog sorts on the record count, so a month of 1,480
+    win = f"&createdAfter={a_ms}&createdBefore={b_ms}"
+
+    def in_window(got):
+        return [(bid, x) for bid, x in got if a_ms <= int(x.get("created") or 0) < b_ms]
+
+    # 1. Biggest first: Catalog sorts on the record count, so a month of 1,480
     # batches with 3 readable ones (semi-smart coupons, roi-prod, March 2026)
-    # shows them in one call. Batches without a count -- Profile-side, identity
-    # markers, some JSON loads -- sort last, so when nothing here has records the
-    # month is walked newest first, page by page, as before.
+    # shows them in one call.
     try:
-        top = _history_batches(headers, dsid, f"&createdAfter={a_ms}&createdBefore={b_ms}"
-                               f"&orderBy=desc:metrics.outputRecordCount")
-        top = [(bid, x) for bid, x in top if a_ms <= int(x.get("created") or 0) < b_ms]
-        pick = [kv for kv in _typical_batches(top, used)
-                if _batch_record_count(kv[1]) > 0][:HISTORY_TRIES]
-        if pick:
-            cands = top
+        top = in_window(_history_batches(headers, dsid,
+                                         win + "&orderBy=desc:metrics.outputRecordCount"))
     except Exception as e:
         logger.debug(f"      history: biggest-first list {dsid} {a:%Y-%m-%d} failed ({e})")
-    for page in range(0 if pick else HISTORY_PAGES):
+        top = []
+    big = [kv for kv in _typical_batches(top, set(rec["batches"]))
+           if _batch_record_count(kv[1]) > 0][:HISTORY_TRIES]
+    got_big = bool(big) and _history_read_into(rec, headers, big, paths)
+    # 2. Newest first, page by page: the batches a count cannot rank -- those
+    # without one (some JSON loads), and the ones it overstates: on roi-prod a
+    # batch "of 1 record" can hold an empty file while a newer one has the rows
+    # (tesco_profile_dataset, October 2026). It also finds what Profile
+    # received, and the months with nothing in them. When the biggest batch
+    # read, one typical newer batch is read as well and the fields are counted
+    # across both: a single batch missed rarely-filled fields in 21 of ~400
+    # roi-prod months, and a miss can look like a break in the field's run.
+    cands, pick = [], []
+    for page in range(1 if got_big else HISTORY_PAGES):
         try:
-            got = _history_batches(headers, dsid, f"&createdAfter={a_ms}"
-                                   f"&createdBefore={b_ms}&orderBy=desc:created"
-                                   f"&start={page * HISTORY_PAGE}")
+            got = in_window(_history_batches(headers, dsid, win + "&orderBy=desc:created"
+                                             f"&start={page * HISTORY_PAGE}"))
         except Exception as e:
             logger.debug(f"      history: batch list {dsid} {a:%Y-%m-%d} failed ({e})")
-            if not cands:
+            if not cands and not big:
                 if whole_month:
                     rec["state"], rec["why"] = "unsure", f"Catalog batch list: {_why(e)}"
                     rec["retry"] = True
                 return rec
             break
-        cands += [(bid, x) for bid, x in got
-                  if a_ms <= int(x.get("created") or 0) < b_ms]
-        pick = _typical_batches(cands, used)[:HISTORY_TRIES]
+        cands += got
+        pick = _typical_batches(cands, set(rec["batches"]))[:HISTORY_TRIES]
         if pick or len(got) < HISTORY_PAGE:
             break
+    if got_big:
+        if pick:
+            _history_read_into(rec, headers, pick[:2], paths)
+        return rec
     if whole_month:
         # What Profile received this month, whether or not the lake can show it.
         rec["profile_records"] = sum(int((x.get("metrics") or {}).get("recordsWritten") or 0)
                                      for _, x in cands if _is_profile_side_batch(x))
-    if whole_month and all(_batch_record_count(x) == 0 for _, x in cands):
+    if whole_month and not big and all(_batch_record_count(x) == 0 for _, x in cands):
         return rec          # no batches, or only empty ones: 'none'
-    if whole_month and not pick:
+    if whole_month and not big and not pick:
         if any(_is_profile_side_batch(x) for _, x in cands):
             rec["state"], rec["why"] = "unsure", "Profile only: no data-lake copy to read"
         elif any(_is_consolidation_batch(x) for _, x in cands):
             rec["state"], rec["why"] = "unsure", "consolidated by Adobe: Data Access cannot read it"
         return rec          # otherwise only empty / identity batches: 'none'
+    _history_read_into(rec, headers, pick, paths)
+    return rec
+
+
+def _history_read_into(rec, headers, pick, paths):
+    """Read the batches in `pick` in turn into the month record `rec` until one
+    gives records; set its state and return True when one did. A 403 locks the
+    dataset; a timeout or 5xx marks a month with nothing read yet worth
+    retrying next run."""
     for bid, _ in pick:
         rec["batches"].append(bid)
         try:
@@ -4130,17 +4163,19 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
         except urllib.error.HTTPError as e:
             if e.code == 403:
                 raise _DatasetLocked(_why(e)) from None
-            rec["why"] = _why(e)
-            rec["retry"] = rec.get("retry") or e.code >= 500
-            logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
+            logger.debug(f"      history: batch {bid} unreadable ({_why(e)})")
+            if not rec["rows"]:
+                rec["why"] = _why(e)
+                rec["retry"] = rec.get("retry") or e.code >= 500
             continue
         except Exception as e:
-            rec["why"] = _why(e)
-            rec["retry"] = True
-            logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
+            logger.debug(f"      history: batch {bid} unreadable ({_why(e)})")
+            if not rec["rows"]:
+                rec["why"], rec["retry"] = _why(e), True
             continue
         if not n:
-            rec["why"] = rec.get("why") or "data-lake files empty"
+            if not rec["rows"]:
+                rec["why"] = rec.get("why") or "data-lake files empty"
             continue
         rec["rows"] += n
         rec.pop("why", None)
@@ -4148,9 +4183,10 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
             rec["fields"][p] = rec["fields"].get(p, 0) + c
         if ts and (rec["ts"] is None or ts < rec["ts"]):
             rec["ts"] = ts
-        break
+        rec["state"] = "sampled"
+        return True
     rec["state"] = "sampled" if rec["rows"] else "unsure"
-    return rec
+    return False
 
 
 def dataset_history(headers, ds, months, paths, cached):
