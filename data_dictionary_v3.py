@@ -87,6 +87,19 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.15 -- The cause of the history pass's 504s found and removed. Every one of
+the 328 file lists that 504'd on the 2026-10-23 roi-prod run (5 h 15 min) was
+the PROFILE-SIDE half of a batch ingestion: an old-style 24-hex batch whose
+metrics are recordsRead / recordsWritten / profileFragments. Catalog lists it as
+an ordinary success batch, but it has no data-lake files, and Data Access hangs
+to the 60 s gateway limit instead of saying so -- the next morning, again, and on
+retry 30 s and 90 s later. Its data-lake batches read in seconds. These batches
+are now skipped wherever data is sampled (coverage and history), and a month
+holding nothing else is marked "Profile only" at once, not read. A month that
+cannot be read for good (Profile only, empty files, files gone: HTTP 404) is
+cached like any finished month; only a timeout or 5xx is retried next run.
+Batches with a known record count are tried before ones without.
+
 v3.4.14 -- History engine hardened after the first UK prod run (7 h, 38% of
 months unreadable, 12 datasets lost to one 504). No dataset-wide "oldest batch"
 query any more: months are walked with the fast newest-first Catalog query and
@@ -269,8 +282,8 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.14"
-SCRIPT_DATE    = "2026-10-23"
+SCRIPT_VERSION = "3.4.15"
+SCRIPT_DATE    = "2026-10-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -1165,6 +1178,26 @@ def _is_consolidation_batch(b):
     return "compaction" in str(b.get("createdClient") or "").lower()
 
 
+def _is_profile_side_batch(b):
+    """True for the Profile-store half of a batch ingestion.
+
+    Catalog lists it as an ordinary status=success batch of the dataset: an
+    old-style 24-hex id, metrics recordsRead / recordsWritten / profileFragments
+    and no file counts, tagged adobe/batchIngestion/status/targetSummaries. It
+    has no data-lake files -- and Data Access does not say so: the file list
+    (GET /export/files/{id}) hangs to the 60 s gateway limit and 504s, every
+    time. 328 of 328 such file lists on roi-prod on 2026-10-23, and again the
+    next morning, and on retry 30 s and 90 s later. The dataset's data-lake
+    batches (ULID ids, file counts in their metrics) read in seconds.
+    """
+    if "adobe/batchIngestion/status/targetSummaries" in (b.get("tags") or {}):
+        return True
+    m = b.get("metrics") or {}
+    return (("recordsWritten" in m or "profileFragments" in m)
+            and not any(k in m for k in ("inputFileCount", "outputFileCount",
+                                         "outputRecordCount")))
+
+
 def _read_parquet_rows(raw_bytes, limit):
     """Parse only up to `limit` rows (row-group streaming) so a million-row
     file isn't fully materialised into memory just to sample a handful."""
@@ -1373,7 +1406,8 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         succ_items = [(bid, b) for bid, b in batches.items()
                       if isinstance(b, dict) and b.get("status") == "success"
                       and _batch_record_count(b) != 0
-                      and not _is_consolidation_batch(b)]
+                      and not _is_consolidation_batch(b)
+                      and not _is_profile_side_batch(b)]
         succ_items.sort(key=lambda kv: _batch_record_count(kv[1]), reverse=True)
         succ = [bid for bid, _ in succ_items]
         available += len(succ)
@@ -3884,16 +3918,18 @@ def _history_batches(headers, dsid, extra, limits=(10, 3, 1)):
 
 
 def _typical_batches(cands, used):
-    """Readable batches not yet read, most TYPICAL first: big enough to prove
-    something, then nearest the median size. A month's odd batch (a handful of
-    records of some other kind) is what fakes a gap."""
+    """Readable batches not yet read, most TYPICAL first: a known record count
+    before an unknown one, big enough to prove something, then nearest the
+    median size. A month's odd batch (a handful of records of some other kind)
+    is what fakes a gap."""
     pool = [(bid, b) for bid, b in cands if bid not in used
-            and _batch_record_count(b) != 0 and not _is_consolidation_batch(b)]
-    med = _median([_batch_record_count(b) for _, b in pool])
+            and _batch_record_count(b) != 0 and not _is_consolidation_batch(b)
+            and not _is_profile_side_batch(b)]
+    med = _median([n for n in (_batch_record_count(b) for _, b in pool) if n > 0])
 
     def key(kv):
         n = _batch_record_count(kv[1])
-        return (0 <= n < HISTORY_MIN_ROWS, abs(n - med))
+        return (n < 0, 0 <= n < HISTORY_MIN_ROWS, abs(n - med))
     return sorted(pool, key=key)
 
 
@@ -3954,7 +3990,9 @@ def _history_read(headers, bid, paths):
 def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
     """Read one more typical batch created in [a, b) into the month record
     `rec` (a fresh one when None) and return it. A whole month with no batches
-    stays 'none'; a part-month window that finds nothing changes nothing."""
+    stays 'none'; a part-month window that finds nothing changes nothing.
+    rec["retry"] marks an unreadable month worth asking again next run (a
+    timeout or 5xx); one that can never be read is cached like any other."""
     if rec is None:
         rec = {"state": "none", "rows": 0, "fields": {}, "ts": None, "batches": []}
     a_ms, b_ms = _ms(a), _ms(b)
@@ -3965,12 +4003,17 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
         logger.debug(f"      history: batch list {dsid} {a:%Y-%m-%d} failed ({e})")
         if whole_month:
             rec["state"], rec["why"] = "unsure", f"Catalog batch list: {_why(e)}"
+            rec["retry"] = True
         return rec
     cands = [(bid, x) for bid, x in cands
              if a_ms <= int(x.get("created") or 0) < b_ms]
     if whole_month and all(_batch_record_count(x) == 0 for _, x in cands):
         return rec          # no batches, or only empty ones: 'none'
-    for bid, _ in _typical_batches(cands, set(rec["batches"]))[:2]:
+    pick = _typical_batches(cands, set(rec["batches"]))[:2]
+    if whole_month and not pick and any(_is_profile_side_batch(x) for _, x in cands):
+        rec["state"], rec["why"] = "unsure", "Profile only: no data-lake copy to read"
+        return rec
+    for bid, _ in pick:
         rec["batches"].append(bid)
         try:
             n, counts, ts = _history_read(headers, bid, paths)
@@ -3978,10 +4021,12 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
             if e.code == 403:
                 raise _DatasetLocked(_why(e)) from None
             rec["why"] = _why(e)
+            rec["retry"] = rec.get("retry") or e.code >= 500
             logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
             continue
         except Exception as e:
             rec["why"] = _why(e)
+            rec["retry"] = True
             logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
             continue
         if not n:
@@ -4021,14 +4066,15 @@ def dataset_history(headers, ds, months, paths, cached):
             out[label] = cached[label]
             n_cached += 1
         elif locked:
-            out[label] = {"state": "unsure", "why": locked, "batches": []}
+            out[label] = {"state": "unsure", "why": locked, "batches": [], "retry": True}
         else:
             try:
                 out[label] = _history_sample(headers, dsid, a, b, paths)
                 read.append((label, a, b))
             except _DatasetLocked as e:
                 locked = f"locked: {e}"
-                out[label] = {"state": "unsure", "why": locked, "batches": []}
+                out[label] = {"state": "unsure", "why": locked, "batches": [],
+                              "retry": True}
     if locked:
         return {"first": None, "first_month": None, "months": out, "read": len(read),
                 "cached": n_cached, "locked": locked}
@@ -4048,6 +4094,8 @@ def dataset_history(headers, ds, months, paths, cached):
              if (strong(out[p]) & strong(out[n])) - set(out[c]["fields"])}
     for label, a, b in read:
         r = out[label]
+        if str(r.get("why") or "").startswith("Profile only"):
+            continue        # nothing in the month a second look could read
         if not (r["state"] == "unsure"
                 or (r["state"] == "sampled"
                     and ((med_rows >= HISTORY_MIN_ROWS and r["rows"] < HISTORY_MIN_ROWS)
@@ -4107,9 +4155,11 @@ def _history_cache_load(sandbox: str, dsid: str) -> dict:
 
 def _history_cache_save(sandbox: str, dsid: str, months: dict, current: str):
     """Keep the finished months that were actually looked at. The current month
-    is still filling, and an unreadable month deserves another try next run."""
+    is still filling, and a month that timed out deserves another try next run;
+    one that can never be read (Profile only, empty files, files gone) is kept."""
     keep = {lab: r for lab, r in months.items()
-            if lab != current and "batches" in r and r["state"] != "unsure"}
+            if lab != current and "batches" in r
+            and not (r["state"] == "unsure" and r.get("retry"))}
     path = _history_cache_file(sandbox, dsid)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -4304,13 +4354,15 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
                          f"data since {_mon(r['first_month'])}" if r.get("first_month") else
                          "data before the window" if any(m.get("state") == "sampled" for m in ms)
                          else "no data in the window")
-                why = Counter(m.get("why") for m in ms if m.get("state") == "unsure")
+                bad = [m for m in ms if m.get("state") == "unsure"]
+                why = Counter(m.get("why") or "no rows" for m in bad)
+                again = sum(1 for m in bad if m.get("retry"))
                 tail = (f"  {ANSI['yellow']}LOCKED ({r['locked']}) -- skipped"
                         f"{ANSI['reset']}" if r.get("locked") else
-                        f"  {ANSI['yellow']}{sum(why.values())} month(s) unreadable, "
-                        f"retried next run: "
-                        + "; ".join(f"{k or 'no rows'} x{v}" for k, v in why.most_common(3))
-                        + ANSI["reset"] if why else "")
+                        f"  {ANSI['yellow']}{len(bad)} month(s) unreadable: "
+                        + "; ".join(f"{k} x{v}" for k, v in why.most_common(3))
+                        + (f" -- {again} retried next run" if again else "")
+                        + ANSI["reset"] if bad else "")
                 logger.info(f"  history [{i}/{len(jobs)}] {name}: {start}, TTL "
                             f"{ds.get('lake_ttl') or 'none'}; {r['read']} month(s) read, "
                             f"{r['cached']} cached  {beat}  {ANSI['dim']}"
@@ -4333,6 +4385,12 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
             locked = [d.get("table") or d.get("name") for r, d in got if r.get("locked")]
             if locked:
                 notes.append(f"Data Access refuses {', '.join(locked)} (HTTP 403)")
+            prof = sorted({d.get("table") or d.get("name") for r, d in got
+                           if any(str(m.get("why") or "").startswith("Profile only")
+                                  for m in r["months"].values())})
+            if prof:
+                notes.append(f"{', '.join(prof)}: some months were loaded to Profile "
+                             f"only, with no data-lake copy to check (shown as ?)")
             if notes:
                 k["history_note"] = "; ".join(notes)
             k["history"] = schema_history(k, [r for r, _ in got],
@@ -4355,6 +4413,13 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
                     + ", ".join(f"{k} months: {v:,}" for k, v in buckets.items()
                                 if k != "none")
                     + f"; none now: {buckets['none']:,}")
+        bad = [m for r in recs.values() for m in r["months"].values()
+               if m.get("state") == "unsure"]
+        if bad:
+            logger.info(f"  unreadable dataset-months in {sandbox}: {len(bad)} -- "
+                        + "; ".join(f"{k} x{v}" for k, v in Counter(
+                            m.get("why") or "no rows" for m in bad).most_common())
+                        + f"; {sum(1 for m in bad if m.get('retry'))} retried next run")
 
 
 def prompt_data_dict(dd_rows: int = DD_DEFAULT_ROWS) -> str | None:

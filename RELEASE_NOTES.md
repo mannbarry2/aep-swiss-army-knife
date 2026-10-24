@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 23, 2026 · **Latest version:** v3.4.14 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 24, 2026 · **Latest version:** v3.4.15 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,6 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
+| [October 24, 2026](#october-24-2026) | v3.4.15 | The cause of field history's timeouts found: Profile-only batches, now skipped |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
 | [October 16, 2026](#october-16-2026) | v3.4.8 – v3.4.11 | Lookup schemas kept; Dropped Schemas and Dropped Field Index tabs; the run keeps the PC awake |
@@ -27,6 +28,38 @@
 | [August 14, 2026](#august-14-2026) | v3.4.0 – v3.4.1 | Complete Profile coverage; credential name gone from the workbook |
 | [August 13, 2026](#august-13-2026) | v3.3.0 | Audiences tab; provenance line; How to Use tab |
 | [Earlier releases](#earlier-releases) | v3.0.0 – v3.2.0 | The baseline; Profile coverage; SQL table names |
+
+---
+
+## October 24, 2026
+
+**Release date: October 24, 2026** · v3.4.15
+
+New features and updates to existing features in the Data Dictionary:
+
+- **Field history:** the cause of its timeouts found and removed (beta).
+
+### Field history
+
+The first full ROI prod run of `--history` took 5 h 15 min, and 656 of its
+1,227 Data Access file lists ended in 504 Gateway Timeout at exactly 60 s. It
+was not a bad night at Adobe. **Every one** of the 328 batches behind those
+timeouts was the *Profile-side* half of a batch ingestion: Catalog lists it as an
+ordinary successful batch of the dataset, but it has no data-lake files, and
+Data Access hangs until the gateway gives up instead of saying so. The same
+batches still timed out the next morning, and on retry 30 s and 90 s later; the
+datasets' data-lake batches read in seconds.
+
+**Fixes and improvements**
+
+| Fix | Description |
+| --- | --- |
+| Profile-side batches skipped ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.15` | A batch with an old-style 24-character id and Profile write metrics (records read / written, profile fragments, no file counts) is no longer read, in history or in coverage sampling -- the same way consolidation batches are already skipped. Each one cost two minutes of waiting. |
+| "Profile only" months ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.15` | A month that holds nothing but Profile-side batches is marked at once -- *Profile only: no data-lake copy to read* -- instead of being read. It still shows as **?**, and the schema tab names the datasets it affects. |
+| Only the fixable months are retried ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.15` | A month that can never be read -- Profile only, empty files, or files Adobe has deleted (HTTP 404) -- is now cached like any finished month. Only a timeout or 5xx is asked again next run. The log says how many will be. |
+| Batches with a known size first ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.15` | Within a month, batches whose record count Catalog knows are tried before those it doesn't, which are more often empty. |
+
+For more information, read the [README](README.md).
 
 ---
 
