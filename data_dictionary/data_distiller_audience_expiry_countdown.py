@@ -39,8 +39,8 @@ The original brief's GET /core/ais/external-audiences is not a readable list
 endpoint (the AIS service only accepts POST/create there), so /core/ups/audiences
 is the authoritative read source -- the same one the other tools in this repo use.
 
-The XLSX export needs openpyxl; without it a CSV fallback is written instead and
-the run still completes.
+The XLSX export needs openpyxl (pip install -r requirements.txt); without it the
+console summary is still printed.
 
 Credentials come from the shared credential layer (credential_loader): the OS keyring
 vault (Windows Credential Manager) first, falling back to a plaintext
@@ -63,12 +63,14 @@ Usage:
     python data_dictionary/data_distiller_audience_expiry_countdown.py acme --keep-alive-only  # only keep-alive tag
     python data_dictionary/data_distiller_audience_expiry_countdown.py acme --yes        # skip the confirm prompt
 
-Output (to the standard ./output/ folder, which is gitignored):
-    output/dd_audience_countdown_<tenant>_<UTCstamp>.xlsx
+    python data_dictionary/data_distiller_audience_expiry_countdown.py aep-prod --sandbox roi-prod --yes --client=Tesco
+
+Output (to AEP_OUTPUT_DIR, else the repo's gitignored output/ folder):
+    Data Distiller audience expiry - <client>.xlsx   (replaced on each run)
         One row per Data Distiller audience, sorted ascending by daysRemaining,
         with conditional formatting: daysRemaining <=7 red, <=14 amber.
-    output/dd_audience_countdown_<tenant>_<UTCstamp>.csv
-        Only when openpyxl is not installed (fallback, same rows).
+        <client> is --client=, else the credential's client name, else its
+        service name.
 
 Secrets prefer the keyring vault (nothing on disk). Any creds/<service>.json
 fallback files are gitignored -- never commit them; they hold the client_secret.
@@ -192,8 +194,8 @@ def apply_config(conf: dict, service: str) -> None:
 
 # Script identity (shown in the startup banner).
 SCRIPT_NAME    = "data_distiller_audience_expiry_countdown"
-SCRIPT_VERSION = "1.1.0"
-SCRIPT_DATE    = "2026-07-24"
+SCRIPT_VERSION = "1.2.0"
+SCRIPT_DATE    = "2026-10-23"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 # The Real-Time Customer Profile audiences API (`/core/ups/audiences`) lists
@@ -889,7 +891,7 @@ def fetch_all_audiences(sandboxes: list[str]) -> list[dict]:
 # ----------------------------------------------------------------------------
 # Output
 # ----------------------------------------------------------------------------
-# Column order for both the XLSX and the CSV fallback. (key, header, width).
+# Column order for the XLSX. (key, header, width).
 _COLUMNS = [
     ("sandbox",        "Sandbox",           12),
     ("name",           "Name",              42),
@@ -919,30 +921,23 @@ def _sort_key(row: dict):
     return (dr is None, dr if dr is not None else 0)
 
 
-def _timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-
-
 def _safe_stem(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z._-]+", "-", name).strip("-") or "creds"
 
 
-def write_xlsx(rows: list[dict]) -> Path | None:
+def write_xlsx(rows: list[dict], client: str) -> Path | None:
     """Write the sorted audience rows to a single-sheet workbook with the
-    daysRemaining conditional formatting. Returns the path, or None if openpyxl
-    is not installed (the caller then falls back to CSV)."""
+    daysRemaining conditional formatting. One stable name per client, replaced
+    on each run. Returns the path, or None if openpyxl is not installed."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
     except ImportError:
-        logger.warning("openpyxl not installed -- writing a CSV instead "
-                       "(pip install openpyxl for the formatted workbook).")
         return None
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / (f"dd_audience_countdown_{_safe_stem(TENANT)}_"
-                         f"{_timestamp()}.xlsx")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUTPUT_DIR / f"Data Distiller audience expiry - {_safe_stem(client)}.xlsx"
 
     head_font  = Font(bold=True, color="FFFFFF")
     head_fill  = PatternFill("solid", fgColor=_XLSX_HEADER_BG)
@@ -1101,11 +1096,10 @@ def run_for_cred(service: str, flags: dict) -> None:
         logger.info("No matching Data Distiller audiences -- nothing to export.")
         return
 
-    # 7. Write the XLSX (conditional formatting), or a CSV fallback.
-    xlsx_path = write_xlsx(rows)
+    # 7. Write the XLSX (conditional formatting).
+    xlsx_path = write_xlsx(rows, flags.get("client") or credential_loader.client_label(_CFG, service))
     if xlsx_path:
-        logger.info(f"XLSX: {xlsx_path.relative_to(SCRIPT_DIR)} "
-                    f"({len(rows)} audience(s))")
+        logger.info(f"XLSX: {xlsx_path} ({len(rows)} audience(s))")
     else:
         logger.error("openpyxl not installed -- nothing written "
                      "(pip install -r requirements.txt).")
@@ -1118,9 +1112,10 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
         --sandbox NAME     scan only NAME (repeatable) -- skips the sandbox menu
         --keep-alive-only  keep only audiences carrying the keep-alive tag
         --yes / -y         skip the "query tenant?" confirmation (default is no)
+        --client=NAME      the client name in the workbook's file name
     """
     flags: dict = {"all": False, "sandboxes": [], "yes": False,
-                   "keep_alive_only": False}
+                   "keep_alive_only": False, "client": ""}
     names: list[str] = []
     i = 0
     while i < len(argv):
@@ -1137,6 +1132,11 @@ def parse_args(argv: list[str]) -> tuple[dict, list[str]]:
                 i += 1
         elif a.startswith("--sandbox="):
             flags["sandboxes"].append(a.split("=", 1)[1])
+        elif a.startswith("--client="):
+            flags["client"] = a.split("=", 1)[1]
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            sys.exit(0)
         elif a.startswith("-"):
             logger.warning(f"Ignoring unknown flag: {a}")
         else:

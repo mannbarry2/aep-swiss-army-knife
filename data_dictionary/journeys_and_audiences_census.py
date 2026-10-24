@@ -121,8 +121,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from toolkit_internals import credential_loader  # keyring-first credential store, plaintext creds/ fallback
 
 SCRIPT_NAME    = "journeys_and_audiences_census"
-SCRIPT_VERSION = "1.1.0"
-SCRIPT_DATE    = "2026-07-24"
+SCRIPT_VERSION = "1.2.0"
+SCRIPT_DATE    = "2026-10-23"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -267,10 +267,14 @@ def menu(services):
               f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
               f"{ANSI['dim']}{name}{ANSI['reset']}")
     print(bar)
-    raw = input(
-        f"\nPick the token credential by number "
-        f"({ANSI['cyan']}1{ANSI['reset']}), blank to quit: "
-    ).strip()
+    try:
+        raw = input(
+            f"\nPick the token credential by number "
+            f"({ANSI['cyan']}1{ANSI['reset']}), blank to quit: "
+        ).strip()
+    except EOFError:        # no keyboard: Windows reports a NUL stdin as a terminal
+        print()
+        return None
     if not raw:
         return None
     tok = raw.replace(",", " ").split()[0]
@@ -322,10 +326,14 @@ def pick_api_key(services, token_service):
         print(f"  {ANSI['bold']}{i:>2}{ANSI['reset']}  "
               f"{ANSI['yellow']}{name:<20}{ANSI['reset']} "
               f"{ANSI['dim']}use this set's api-key{ANSI['reset']}")
-    raw = input(
-        f"\nPick the AJO-subscribed set by number, paste a key, or Enter to use "
-        f"{ANSI['yellow']}{token_service}{ANSI['reset']}'s own key: "
-    ).strip()
+    try:
+        raw = input(
+            f"\nPick the AJO-subscribed set by number, paste a key, or Enter to use "
+            f"{ANSI['yellow']}{token_service}{ANSI['reset']}'s own key: "
+        ).strip()
+    except EOFError:        # no keyboard: Windows reports a NUL stdin as a terminal
+        print()
+        return None
     if not raw:
         return None
     if raw.isdigit() and 1 <= int(raw) <= len(others):
@@ -1329,6 +1337,8 @@ def parse_args(argv):
             "status": None, "workers": 16, "ids": [],
             "audiences": False, "sandboxes": None, "highlight": ""}
     given_sandbox = False
+    # --creds=x and --creds x both work (the rest of the toolkit uses the = form).
+    argv = [p for a in argv for p in (a.split("=", 1) if a.startswith("--") and "=" in a else [a])]
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -1370,6 +1380,9 @@ def parse_args(argv):
 
 
 def main():
+    if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+        print(__doc__)
+        return
     print_banner()
     print(credential_loader.source_banner())
     opts = parse_args(sys.argv[1:])
@@ -1386,8 +1399,11 @@ def main():
             logger.warning(f"No credential set named {opts['creds']!r} "
                            f"(known: {', '.join(services)})")
             return
-    else:
+    elif sys.stdin.isatty():
         service = menu(services)
+    else:
+        logger.error("No credential given and not interactive. Pass --creds=<name>.")
+        sys.exit(1)
 
     if not service:
         logger.info("Nothing chosen. Exiting.")

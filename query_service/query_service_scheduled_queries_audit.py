@@ -10,11 +10,11 @@ Pick a credential set (from the OS keyring vault, or a plaintext creds/ folder
 where keyring is unavailable) and the auditor will:
   1. Authenticate against IMS (client_credentials).
   2. GET /sandboxes -- every sandbox the credential can see.
-  3. Prompt you to pick which sandbox(es) to audit (one, several, or all)
-     before any schedule calls are made.
+  3. Audit the sandbox(es) named by --sandbox=, or prompt you to pick (one,
+     several, or all) before any schedule calls are made.
   4. Per chosen sandbox, GET /schedules (x-sandbox-name header).
   5. Classify each schedule and flag anomalies, print a table + summary, and
-     write outputs: a flat CSV and a tabbed XLSX workbook -- one worksheet per
+     write one tabbed XLSX workbook -- one worksheet per
      sandbox plus a Summary tab.
 
 The tabbed-workbook layout (one sandbox per tab + a Summary tab) is the
@@ -42,6 +42,9 @@ keys you stored -- run `platform_access_and_audit/credential_keyring_manager_and
 Usage:
     python query_service/query_service_scheduled_queries_audit.py            # interactive credential menu
     python query_service/query_service_scheduled_queries_audit.py prod       # pick creds by service name
+    python query_service/query_service_scheduled_queries_audit.py aep-prod --sandbox=roi-prod      # no prompts
+    python query_service/query_service_scheduled_queries_audit.py aep-prod --sandbox=prod,roi-prod
+    python query_service/query_service_scheduled_queries_audit.py aep-prod --sandbox=all
 """
 
 from __future__ import annotations
@@ -67,8 +70,8 @@ from toolkit_internals import credential_loader  # keyring-backed credential sto
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME = "query_service_scheduled_queries_audit"
-SCRIPT_VERSION = "2.1.0"
-SCRIPT_DATE = "2026-07-24"
+SCRIPT_VERSION = "2.2.0"
+SCRIPT_DATE = "2026-10-23"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -451,11 +454,11 @@ def write_xlsx(per_sandbox, summary, stem: str):
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
     except ImportError:
-        logger.warning("openpyxl not installed -- skipping XLSX "
-                       "(pip install openpyxl). CSV was still written.")
+        logger.warning("openpyxl not installed -- no workbook written "
+                       "(pip install -r requirements.txt).")
         return None
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^0-9A-Za-z._-]+", "-", stem).strip("-") or "creds"
     path = OUTPUT_DIR / f"batch_schedules_v2_{safe}.xlsx"
 
@@ -597,7 +600,22 @@ def print_summary(counts, seg_prod, seg_dev, anomalies):
 # ----------------------------------------------------------------------------
 # Audit
 # ----------------------------------------------------------------------------
-def audit(service: str):
+def sandboxes_named(sandboxes, wanted: str):
+    """--sandbox=a,b or --sandbox=all -> the matching sandbox dicts, by name or title."""
+    if wanted.lower() == "all":
+        return list(sandboxes)
+    chosen = []
+    for tok in (t.strip() for t in wanted.split(",") if t.strip()):
+        sb = next((s for s in sandboxes
+                   if tok.lower() in (s.get("name", "").lower(), (s.get("title") or "").lower())), None)
+        if sb is None:
+            logger.warning(f"No sandbox called {tok!r} is visible to this credential.")
+        elif sb not in chosen:
+            chosen.append(sb)
+    return chosen
+
+
+def audit(service: str, sandbox_arg: str | None = None):
     bar = ANSI["cyan"] + "=" * 72 + ANSI["reset"]
     print()
     print(bar)
@@ -638,7 +656,7 @@ def audit(service: str):
         return
 
     # Pick which sandbox(es) to audit BEFORE making any schedule calls.
-    chosen = pick_sandboxes(result)
+    chosen = sandboxes_named(result, sandbox_arg) if sandbox_arg else pick_sandboxes(result)
     if not chosen:
         logger.info("No sandboxes chosen. Exiting.")
         return
@@ -712,7 +730,12 @@ def audit(service: str):
 # Main
 # ----------------------------------------------------------------------------
 def main():
+    if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+        print(__doc__)
+        return
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    sandbox_arg = next((a.split("=", 1)[1] for a in sys.argv[1:]
+                        if a.startswith("--sandbox=")), None)
     logger.info(credential_loader.source_banner())
 
     services = credential_loader.list_services()
@@ -735,7 +758,7 @@ def main():
         logger.info("Nothing chosen. Exiting.")
         return
 
-    audit(chosen)
+    audit(chosen, sandbox_arg)
 
 
 if __name__ == "__main__":

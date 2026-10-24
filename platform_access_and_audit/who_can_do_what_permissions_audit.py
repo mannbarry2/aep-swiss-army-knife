@@ -143,7 +143,7 @@ def load_cache() -> dict:
 
 
 def save_cache(cache: dict) -> None:
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     CACHE.write_text(json.dumps(dict(sorted(cache.items())), indent=1), encoding="utf-8")
 
 

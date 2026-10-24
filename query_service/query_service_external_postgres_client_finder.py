@@ -13,6 +13,7 @@ error stops cleanly and prints the body):
 
   1. SINGLE LOOKUP   --query=<id>  GET /queries/{id}: client, userId, created,
                      state, elapsedTime, dbName and the first 300 chars of SQL.
+                     Only when --query is given (a query id lives in one sandbox).
   2. SWEEP           GET /queries?orderby=-created&excludeHidden=false
                      &excludeSoftDeleted=false&limit=100, paged via
                      _links.next.href, stopping once `created` is older than
@@ -27,12 +28,12 @@ Names: userId is an IMS id. It is shown as an email where the org user
 directory (or the local cache output/user_directory_cache.json) knows it.
 
 Output: ONE workbook, output/qs_postgres_<sandbox>.xlsx (house rule: no CSV):
-By user, Raw rows, Clients seen, Lookup.
+By user, Raw rows, Clients seen, and Lookup when --query was given.
 
 Usage:
     python query_service/query_service_external_postgres_client_finder.py                                   # prod, 30 days
     python query_service/query_service_external_postgres_client_finder.py --sandbox=prod --days=60
-    python query_service/query_service_external_postgres_client_finder.py --query=a9530b2e-35ef-4b82-99eb-2915abda60b8
+    python query_service/query_service_external_postgres_client_finder.py --query=<query id from the query log>
     python query_service/query_service_external_postgres_client_finder.py --client=postgres                 # the match text
 """
 
@@ -57,13 +58,12 @@ from platform_access_and_audit import who_can_do_what_permissions_audit as pa   
 from toolkit_internals.house_style_excel_writer import Book
 
 SCRIPT_NAME = "query_service_external_postgres_client_finder"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-10-09"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE = "2026-10-23"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or Path(__file__).resolve().parents[1] / "output")
 QS = "https://platform.adobe.io/data/foundation/query"
-DEFAULT_QUERY = "a9530b2e-35ef-4b82-99eb-2915abda60b8"
 logger = dd.logger
 
 
@@ -213,7 +213,7 @@ def main():
     opt = lambda k, default: next((a.split("=", 1)[1] for a in args if a.startswith(k + "=")), default)
     sandbox = opt("--sandbox", "prod")
     days = int(opt("--days", "30"))
-    qid = opt("--query", DEFAULT_QUERY)
+    qid = opt("--query", None)
     match = opt("--client", "postgres").lower()
     if "-h" in args or "--help" in args:
         print(__doc__)
@@ -225,16 +225,17 @@ def main():
     names = pa.load_cache()
 
     try:
-        found = lookup(headers, qid, names)
+        found = lookup(headers, qid, names) if qid else {}
         rows, clients, limit_ok = sweep(headers, days, match)
     except Stop:
         print("\nStopped on an API error (see above). Nothing written.")
-        return
+        sys.exit(1)
 
     # resolve any ids the directory can give us, then re-label
     ids = {r["userId"] for r in rows if r["userId"]} | {found.get("userId") or ""}
     names = pa.resolve_all(token, conf, {i for i in ids if i})
-    found["user"] = who(found.get("userId"), names)
+    if found:
+        found["user"] = who(found.get("userId"), names)
     summary = summarise(rows, names)
 
     print(f"\n=== clients seen in the window ===")
@@ -276,9 +277,10 @@ def main():
                number_formats={9: "#,##0", 12: "#,##0"}, wrap_cols=(13,), row_height=30)
     book.sheet("Clients seen", ["Client", "Queries in window"],
                [[c, n] for c, n in clients.most_common()], widths=[50, 18], number_formats={2: "#,##0"})
-    book.sheet("Lookup", ["Field", "Value"], [[k, str(v)] for k, v in found.items()],
-               widths=[16, 120], wrap_cols=(2,), row_height=30,
-               note=f"GET /queries/{qid} in {sandbox}")
+    if found:
+        book.sheet("Lookup", ["Field", "Value"], [[k, str(v)] for k, v in found.items()],
+                   widths=[16, 120], wrap_cols=(2,), row_height=30,
+                   note=f"GET /queries/{qid} in {sandbox}")
     stem = "postgres" if match == "postgres" else match.replace(" ", "_")
     path = book.save(OUTPUT_DIR / f"qs_{stem}_{sandbox}.xlsx")
 

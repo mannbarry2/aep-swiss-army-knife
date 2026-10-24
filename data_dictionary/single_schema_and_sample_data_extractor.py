@@ -35,6 +35,8 @@ Usage:
     python data_dictionary/single_schema_and_sample_data_extractor.py "acme-beta"        # pick creds by service name
     python data_dictionary/single_schema_and_sample_data_extractor.py "acme-k" --sandbox=prod
     python data_dictionary/single_schema_and_sample_data_extractor.py "acme-k" --sandbox=prod --rows=100
+    python data_dictionary/single_schema_and_sample_data_extractor.py "acme-k" --sandbox=prod --dataset=<dataset name or id>
+        (no prompts; several datasets separated by ';')
 
 Credentials come from the OS keyring (Windows Credential Manager) via
 credential_loader; manage them with platform_access_and_audit/credential_keyring_manager_and_access_probe.py. Service names are the
@@ -64,8 +66,8 @@ from toolkit_internals import credential_loader  # keyring-backed credential sto
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "single_schema_and_sample_data_extractor"
-SCRIPT_VERSION = "1.1.0"
-SCRIPT_DATE    = "2026-07-24"
+SCRIPT_VERSION = "1.2.0"
+SCRIPT_DATE    = "2026-10-23"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -780,15 +782,16 @@ def resolve_sandboxes_arg(arg: str, sandboxes):
 
 
 def select_datasets_by_name(datasets, names):
-    """Datasets whose name exactly matches (case-insensitive) one of `names`.
-    Returns [(dataset, matched_name), ...]. Exact match avoids catching '... -
-    Copy' duplicates of a wanted dataset."""
+    """Datasets whose name -- or dataset id -- exactly matches (case-insensitive)
+    one of `names`. Returns [(dataset, matched_name), ...]. Exact match avoids
+    catching '... - Copy' duplicates of a wanted dataset."""
     wanted = {n.strip().lower(): n for n in names if n.strip()}
     out = []
     for d in datasets:
-        key = (d["name"] or "").strip().lower()
-        if key in wanted:
-            out.append((d, wanted[key]))
+        for key in ((d["name"] or "").strip().lower(), str(d.get("id") or "").lower()):
+            if key in wanted:
+                out.append((d, wanted[key]))
+                break
     return out
 
 
@@ -917,7 +920,7 @@ def write_workbook(infos, client: str, datestr: str, label: str = ""):
                        "(pip install openpyxl).")
         return None
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     safe_client = re.sub(r"[^0-9A-Za-z _-]+", "", client).strip() or "Client"
     suffix = f" - {label}" if label else ""
     path = OUTPUT_DIR / f"Schema Extract - {safe_client}{suffix} - {datestr}.xlsx"
@@ -1112,8 +1115,8 @@ def run_datasets(token, conf, sandboxes, names, rows, client, list_only=False):
                     f"{ANSI['reset']}: "
                     f"{', '.join(d['name'] for d, _ in matches)}")
         if list_only:
-            for d, _ in matches:
-                found_names.add(d["name"].strip().lower())
+            for d, asked in matches:
+                found_names.add(asked.strip().lower())
                 print(f"  {ANSI['green']}FOUND{ANSI['reset']} {d['name']}  "
                       f"{ANSI['dim']}[{sandbox_title}]  schema={d['schema_id']}  "
                       f"id={d['id']}{ANSI['reset']}")
@@ -1125,8 +1128,8 @@ def run_datasets(token, conf, sandboxes, names, rows, client, list_only=False):
                        for r in raws}
         id_to_raw = {r.get("$id"): r for r in raws}
         descriptors = get_all_descriptors(token, conf, sandbox)
-        for d, _ in matches:
-            found_names.add(d["name"].strip().lower())
+        for d, asked in matches:
+            found_names.add(asked.strip().lower())
             sid = d["schema_id"]
             schema_raw = id_to_raw.get(sid) or {}
             schema_title = (id_to_title.get(sid)
@@ -1152,7 +1155,7 @@ def run_datasets(token, conf, sandboxes, names, rows, client, list_only=False):
         return
     if not infos:
         logger.warning("No datasets extracted; nothing to write.")
-        return
+        sys.exit(1)
 
     datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d %H%M%S")
     label = infos[0]["sandbox"] if len({i["sandbox"] for i in infos}) == 1 else ""

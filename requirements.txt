@@ -1,23 +1,29 @@
-# Optional dependencies for tools that produce richer output.
-# The stdlib-only tools need nothing here; install only if you use a tool
-# that lists a dependency below.
+# Everything the toolkit uses. Install once, inside the repo's virtual environment:
 #
+#   python -m venv .venv
+#   .venv\Scripts\activate
 #   pip install -r requirements.txt
 #
-# openpyxl -- tabbed .xlsx workbooks (query_service/query_service_scheduled_queries_audit.py writes one
-#             worksheet per sandbox plus a Summary tab; data_dictionary_v3.py
-#             writes one tab per schema).
+# Then `python check_my_setup.py` says whether anything is missing.
+
+# --- Needed by every tool --------------------------------------------------
+# keyring  -- reads credentials from Windows Credential Manager (no secrets on disk).
+keyring>=24
+# requests -- the credential manager's IMS and probe calls.
+requests>=2.31
+# openpyxl -- every tool's output is an .xlsx workbook.
 openpyxl>=3.1
-# pyarrow  -- only for `data_dictionary_v3.py --data-dict`. Reads the Snappy-Parquet
-#             batch files sampled via Data Access to compute field coverage and
-#             top-5 values. Not needed for the schema/ERD export itself.
+
+# --- Needed for sampled data -------------------------------------------------
+# pyarrow  -- reads the Parquet batch files the Data Dictionary (--data-dict,
+#             --history) and the single-schema extractor sample. Without it you
+#             still get the schemas and fields, just no example values.
 pyarrow>=14
-# tzdata   -- required alongside pyarrow on Windows / any Python without a
-#             system tz database: event Parquet has UTC timestamp columns and
-#             pyarrow's to_pylist() raises ZoneInfoNotFoundError('UTC') without
-#             it. Pure-python, tiny.
+# tzdata   -- pyarrow needs it on Windows: event Parquet has UTC timestamps and
+#             reading them fails with ZoneInfoNotFoundError('UTC') without it.
 tzdata
-# python-docx -- only used to regenerate "Data Dictionary v3 - Overview.docx".
-python-docx>=1.1
-python-pptx      # performance_and_guardrails/platform_guardrails_scoreboard_slide.py (scoreboard deck)
-anthropic        # audience_renamer.py (parked, in development) -- its AI description step
+
+# --- Needed by one tool each -------------------------------------------------
+python-pptx      # performance_and_guardrails/platform_guardrails_scoreboard_slide.py (the scoreboard slide)
+python-docx>=1.1 # regenerating docs/data-dictionary-overview's Word edition
+anthropic        # parked/audience_renamer.py (parked, not for use) -- its AI description step

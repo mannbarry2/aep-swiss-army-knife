@@ -983,7 +983,7 @@ def write_xlsx(results: list[dict], conf: dict, label: str,
                            "run (minutes)", dev_col0, dev_cols, list(dev_cols),
                            "Minutes", "0"), f"A{row}")
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUTPUT_DIR / f"snapshot_history_{label}.xlsx"
     try:
         wb.save(path)

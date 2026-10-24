@@ -692,7 +692,7 @@ def build_workbook(records, failures, sandbox, service, out_path: Path, source_d
     for w, row, ncols in tables:
         if w.max_row > row:
             w.auto_filter.ref = f"A{row}:{get_column_letter(ncols)}{w.max_row}"
-    out_path.parent.mkdir(exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         wb.save(out_path)
     except PermissionError:

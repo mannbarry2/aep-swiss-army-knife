@@ -2,21 +2,25 @@
 """
 ingestion/failed_batch_file_downloader.py
 ================
-Lists recent AEP batches in the configured sandbox, prompts the user for a
-batch ID, and downloads every file in that batch to the current working
-directory. Replaces the earlier auth.py / authandret.py / fetchbatch.py trio.
+Lists the batches that FAILED in the last 7 days in a sandbox, lets you pick
+one (or several, or all), and downloads every file in them to
+failed_batches/ under the output folder, with Adobe's error for each.
+Read-only. VDI-friendly: stdlib only.
 
-VDI-friendly: stdlib only, no pip install required.
-
-At startup it picks a credential set from ./creds/ (the same credential bank
-used by platform_access_and_audit/credential_keyring_manager_and_access_probe.py / performance_and_guardrails/batch_audience_evaluation_timing.py), mints a fresh Adobe
-IMS token, then lists and downloads failed batches.
+Credentials come from the credential loader (Windows Credential Manager first,
+creds/ only where keyring is unavailable); store them with
+platform_access_and_audit/credential_keyring_manager_and_access_probe.py.
 
 Usage:
     python ingestion/failed_batch_file_downloader.py                    # interactive cred menu
     python ingestion/failed_batch_file_downloader.py prod               # pick creds/prod.json by stem
     python ingestion/failed_batch_file_downloader.py prod --sandbox=dev # override sandbox
     python ingestion/failed_batch_file_downloader.py prod <batch_id>    # process a known batch ID
+    python ingestion/failed_batch_file_downloader.py prod --list        # list the failed batches, download nothing
+    python ingestion/failed_batch_file_downloader.py prod --all         # download every failed batch listed
+
+Run without a terminal (scheduled, or piped), it lists and stops unless --all or
+a batch ID says what to download -- it never waits at a prompt.
 """
 
 from __future__ import annotations
@@ -59,8 +63,8 @@ from toolkit_internals import credential_loader  # keyring-first credential stor
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 
 SCRIPT_NAME = "failed_batch_file_downloader"
-SCRIPT_VERSION = "1.1.0"
-SCRIPT_DATE = "2026-07-24"
+SCRIPT_VERSION = "1.2.0"
+SCRIPT_DATE = "2026-10-23"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
@@ -283,7 +287,13 @@ def pick_batches(ids):
         f"{ANSI['cyan']}1,3{ANSI['reset']}, {ANSI['cyan']}all{ANSI['reset']}), "
         f"or paste a batch ID. Blank to quit: "
     )
-    raw = input(prompt).strip()
+    try:
+        raw = input(prompt).strip()
+    except EOFError:        # no keyboard: Windows reports a NUL stdin as a terminal
+        print()
+        logger.info("No answer (not interactive): listed only. Pass --all, or "
+                    "batch ID(s), to download.")
+        return []
     if not raw:
         return []
     if raw.lower() == "all":
@@ -466,7 +476,11 @@ def parse_args(argv):
 
 
 def main():
+    if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+        print(__doc__)
+        return
     sandbox_override, name, cli_ids = parse_args(sys.argv[1:])
+    list_only, take_all = "--list" in sys.argv[1:], "--all" in sys.argv[1:]
     print(credential_loader.source_banner())
 
     services = credential_loader.list_services()
@@ -524,7 +538,15 @@ def main():
     except Exception as e:
         logger.warning(f"Could not list recent batches ({e}). You can still paste a known batch ID below.")
 
-    selected = pick_batches(ids)
+    if list_only:
+        return
+    if take_all:
+        selected = list(ids)
+    elif sys.stdin.isatty():
+        selected = pick_batches(ids)
+    else:
+        logger.info("Not interactive: listed only. Pass --all, or batch ID(s), to download.")
+        return
     if not selected:
         logger.info("Nothing selected. Exiting.")
         return

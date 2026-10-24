@@ -639,7 +639,7 @@ def write_report(sandbox, checks, history, baseline, datestr) -> Path:
     The run is also appended to guardrail_audit_history_<sandbox>.json, which is
     the trend store the deck builder reads -- a cache, not a report."""
     from toolkit_internals.house_style_excel_writer import Book
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cols = [(c["label"], c["values"]) for c in baseline.get("columns", [])]
     prev = history[-1] if history else None
     if prev:
