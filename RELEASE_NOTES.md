@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 24, 2026 · **Latest version:** v3.4.16 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 24, 2026 · **Latest version:** v3.4.17 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,7 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
-| [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.16 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see |
+| [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.17 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
 | [October 16, 2026](#october-16-2026) | v3.4.8 – v3.4.11 | Lookup schemas kept; Dropped Schemas and Dropped Field Index tabs; the run keeps the PC awake |
@@ -33,7 +33,7 @@
 
 ## October 24, 2026
 
-**Release date: October 24, 2026** · v3.4.15 – v3.4.16
+**Release date: October 24, 2026** · v3.4.15 – v3.4.17
 
 New features and updates to existing features in the Data Dictionary:
 
@@ -78,6 +78,7 @@ datasets' data-lake batches read in seconds.
 | Every unreadable month explained ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.16` | After v3.4.15, 126 dataset-months on ROI prod still showed **?**. Each kind was traced: **(1)** data-lake files that really hold no rows -- a 970 MB load into the product lookup left a 4 KB, zero-row file, because the records went to Profile -- now labelled *data-lake files empty*; **(2)** the identity service's `…-INGEST` marker batches, whose file list Data Access answers with DTAC-4043 *DataSetFile not found*, now skipped like Profile-side ones; **(3)** months whose readable batches were hidden: only the newest 10 batches of a month were asked for, and in a busy month those can all be Profile-side or empty. |
 | A month's batches, 100 at a time ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.16` | Catalog is asked for 100 batches per month instead of 10, paging back up to five pages when the first holds nothing readable, and up to four batches are tried when files come back empty (each such read takes about two seconds). A Profile-only month now records how many records Profile received, and the schema tab says so. |
 | Earlier caches re-checked ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.16` | Months cached by earlier versions were judged from 10 batches, so they are not trusted: the first v3.4.16 run reads every month again. |
+| Checked against Adobe a second way ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.17` | An independent check re-asked Adobe about the v3.4.16 ROI prod verdicts a different way -- every batch of each "Profile only" month, other batches of "data-lake files empty" months, Catalog's own oldest batch for each "data since" date. 34 of 36 held. The two that did not were semi-smart coupon months of about 1,480 batches whose three readable batches sat past the fifth page. Each month is now first asked for its batches **biggest first** (Catalog sorts on the record count), which shows the readable ones in one call however many batches the month holds; the page-by-page walk runs only when nothing has records. The coupon dataset now reads unbroken since December 2025. Months cached by v3.4.16 are read again. |
 
 For more information, read the [README](README.md).
 

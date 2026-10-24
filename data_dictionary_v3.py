@@ -87,6 +87,16 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.17 -- Field history checked against Adobe a second way, and corrected.
+An independent check of the v3.4.16 roi-prod run confirmed 34 of 36 verdicts
+(every 'data since' date, every 'data-lake files empty' month sampled, every
+gap) but found two 'Profile only' months wrong: semi-smart coupons, March and
+May 2026, ~1,480 batches each, whose 3 readable batches sat past page 5. Each
+month is now first asked for its batches BIGGEST FIRST
+(orderBy=desc:metrics.outputRecordCount) -- one call shows the readable ones
+however many batches the month holds; the newest-first walk runs only when
+nothing has records. Cache v3: v2 months are re-read.
+
 v3.4.16 -- Field history: every unreadable month explained, and the question
 that matters for audiences answered. The 126 months v3.4.15 left as '?' on
 roi-prod were (a) data-lake files that really hold 0 rows -- Profile-loaded
@@ -295,7 +305,7 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.16"
+SCRIPT_VERSION = "3.4.17"
 SCRIPT_DATE    = "2026-10-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -431,7 +441,9 @@ HISTORY_TRIES = 4
 HISTORY_PROFILE_DAYS = 90
 # 2 (v3.4.16): v1 caches judged a month from its newest 10 batches only, so
 # their 'none' and unreadable verdicts are not trusted -- every month is re-read.
-HISTORY_CACHE_VERSION = 2
+# 3 (v3.4.17): v2 could call a month of 1,000+ batches 'Profile only' when its
+# few readable ones sat past page 5 -- re-read with the biggest-first query.
+HISTORY_CACHE_VERSION = 3
 # A finished month's batches never change, so each one is cached and a later run
 # reads only the current month. Kept beside the repo: a working file, not a
 # deliverable, so never under AEP_OUTPUT_DIR.
@@ -4066,7 +4078,22 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
     a_ms, b_ms = _ms(a), _ms(b)
     used = set(rec["batches"])
     cands, pick = [], []
-    for page in range(HISTORY_PAGES):
+    # Biggest first: Catalog sorts on the record count, so a month of 1,480
+    # batches with 3 readable ones (semi-smart coupons, roi-prod, March 2026)
+    # shows them in one call. Batches without a count -- Profile-side, identity
+    # markers, some JSON loads -- sort last, so when nothing here has records the
+    # month is walked newest first, page by page, as before.
+    try:
+        top = _history_batches(headers, dsid, f"&createdAfter={a_ms}&createdBefore={b_ms}"
+                               f"&orderBy=desc:metrics.outputRecordCount")
+        top = [(bid, x) for bid, x in top if a_ms <= int(x.get("created") or 0) < b_ms]
+        pick = [kv for kv in _typical_batches(top, used)
+                if _batch_record_count(kv[1]) > 0][:HISTORY_TRIES]
+        if pick:
+            cands = top
+    except Exception as e:
+        logger.debug(f"      history: biggest-first list {dsid} {a:%Y-%m-%d} failed ({e})")
+    for page in range(0 if pick else HISTORY_PAGES):
         try:
             got = _history_batches(headers, dsid, f"&createdAfter={a_ms}"
                                    f"&createdBefore={b_ms}&orderBy=desc:created"
