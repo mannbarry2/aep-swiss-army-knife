@@ -21,7 +21,9 @@ error stops cleanly and prints the body):
                      whose client contains "postgres" are kept in code and
                      grouped by userId: count, first / last seen, distinct
                      dbNames, hours of day seen (UTC), one sample SQL. A userId
-                     ending @techacct.adobe.com is flagged TECHNICAL ACCOUNT.
+                     ending @techacct.adobe.com is flagged TECHNICAL ACCOUNT;
+                     a named @AdobeID (voyager_platform_query, ...) is one of
+                     Adobe's own jobs, flagged ADOBE SERVICE -- not a user.
                      Every distinct client value seen is counted too.
 
 Names: userId is an IMS id. It is shown as an email where the org user
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -58,7 +61,7 @@ from platform_access_and_audit import who_can_do_what_permissions_audit as pa   
 from toolkit_internals.house_style_excel_writer import Book
 
 SCRIPT_NAME = "query_service_external_postgres_client_finder"
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.2.0"
 SCRIPT_DATE = "2026-10-23"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -122,6 +125,23 @@ def is_tech(user_id: str) -> bool:
     return (user_id or "").lower().endswith("@techacct.adobe.com")
 
 
+def is_adobe_service(user_id: str) -> bool:
+    """Adobe's own jobs run Query Service through a PostgreSQL client too, under
+    a NAMED id -- voyager_platform_query@AdobeID (AJO journey reporting),
+    dx_ajo_license_usage@AdobeID (AJO licence metering),
+    acp_foundation_statistics@AdobeID (dataset statistics). A person's IMS id
+    is 24 hex characters before @AdobeID."""
+    local, _, domain = (user_id or "").partition("@")
+    return (domain.lower() == "adobeid" and bool(local)
+            and not re.fullmatch(r"[0-9A-Fa-f]{24}", local))
+
+
+def kind(user_id: str) -> str:
+    return ("NO USER ID" if not user_id else
+            "TECHNICAL ACCOUNT" if is_tech(user_id) else
+            "ADOBE SERVICE" if is_adobe_service(user_id) else "")
+
+
 # ----------------------------------------------------------------------------
 def lookup(headers, qid: str, names: dict) -> dict:
     print(f"\n=== TASK 1: GET /queries/{qid} ===")
@@ -138,8 +158,7 @@ def lookup(headers, qid: str, names: dict) -> dict:
               "elapsedTime", "dbName", "sessionType", "rowCount"):
         print(f"  {k:<12} {row[k]}")
     print(f"  {'sql':<12} {sql[:300].replace(chr(10), ' ')}")
-    tech = is_tech(q.get("userId"))
-    print(f"  => {'TECHNICAL ACCOUNT' if tech else 'user id (not a tech account)'}"
+    print(f"  => {kind(q.get('userId')) or 'a person (not a tech account or Adobe service)'}"
           f"{'' if row['user'] != row['userId'] else ' -- not in the user directory / cache'}")
     return row
 
@@ -195,7 +214,7 @@ def summarise(rows: list, names: dict) -> list[dict]:
     for uid, rs in sorted(by.items(), key=lambda x: -len(x[1])):
         hours = Counter(r["created"].hour for r in rs if r["created"])
         out.append({
-            "userId": uid, "user": who(uid, names), "technical": "TECHNICAL ACCOUNT" if is_tech(uid) else "",
+            "userId": uid, "user": who(uid, names), "technical": kind(uid),
             "count": len(rs), "first_seen": min((r["created"] for r in rs if r["created"]), default=None),
             "last_seen": max((r["created"] for r in rs if r["created"]), default=None),
             "days_active": len({r["created"].date() for r in rs if r["created"]}),
@@ -254,9 +273,12 @@ def main():
                 f"Queries whose client contains '{match}', last {days} days: who ran them, how "
                 "often, at what hours (UTC). A user active at the same hour every day is a job. "
                 "userId is an IMS id, shown as a name where the directory or cache knows it; "
-                "@techacct.adobe.com ids are API integrations. Read-only.")
+                "@techacct.adobe.com ids are API integrations; ADOBE SERVICE ids "
+                "(voyager_platform_query@AdobeID ...) are Adobe's own jobs, not users. "
+                "Read-only.")
+    people = [s for s in summary if not s["technical"]]
     book.sheet("By user",
-               ["User", "User id", "Technical", "Queries", "Days active", "First seen (UTC)",
+               ["User", "User id", "Who", "Queries", "Days active", "First seen (UTC)",
                 "Last seen (UTC)", "Peak hour", "Hours seen (UTC)", "dbNames", "States", "Sample SQL"],
                [[s["user"], s["userId"], s["technical"], s["count"], s["days_active"],
                  fmt(s["first_seen"]), fmt(s["last_seen"]), s["peak_hour"], s["hours_utc"],
@@ -266,6 +288,7 @@ def main():
                wrap_cols=(9, 10, 12), row_height=30, tab_colour="C00000",
                facts=[("Sandbox", sandbox), ("Window", f"last {days} days"),
                       ("Queries read", sum(clients.values())), ("Matching rows", len(rows)),
+                      ("People (not Adobe services or tech accounts)", len(people)),
                       ("Page size", "100" if limit_ok else "default (100 was rejected)")])
     book.sheet("Raw rows",
                ["Created (UTC)", "Updated (UTC)", "Query id", "Client", "Client id", "User",
@@ -287,8 +310,10 @@ def main():
     print(f"\n=== summary ===")
     print(f"  {sum(clients.values()):,} queries in the last {days} days in '{sandbox}', "
           f"{len(clients)} distinct client value(s).")
-    print(f"  {len(rows)} came from a client matching '{match}', from {len(summary)} user id(s)"
-          f"{' -- ' + str(sum(1 for s in summary if s['technical'])) + ' technical account(s)' if summary else ''}.")
+    n_svc = sum(1 for s in summary if s["technical"] == "ADOBE SERVICE")
+    n_tech = sum(1 for s in summary if s["technical"] == "TECHNICAL ACCOUNT")
+    print(f"  {len(rows)} came from a client matching '{match}', from {len(summary)} user id(s): "
+          f"{len(people)} person(s), {n_tech} technical account(s), {n_svc} Adobe service(s).")
     print(f"  Workbook: {path}")
 
 
