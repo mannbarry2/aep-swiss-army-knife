@@ -208,4 +208,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Hold Windows awake for the check, as the Data Dictionary does for its run,
+    # and always let go -- an overnight check must not stall on a sleeping PC.
+    dd.keep_awake(True)
+    try:
+        main()
+    finally:
+        dd.keep_awake(False)
