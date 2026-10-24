@@ -45,8 +45,8 @@ New features and updates to existing features in the Data Dictionary:
 
 Audiences are built on Profile, not the data lake, and Profile keeps event data
 only as long as the **Profile retention set on each dataset** -- which is not
-the same everywhere. On ROI prod most event datasets keep 90 days, but
-`tesco_order_event_dataset` keeps **45** and promotion interactions 60, while
+the same everywhere. On ROI prod most event datasets keep 90 days, but the
+order events dataset keeps **45** and promotion interactions 60, while
 their data lake copies go back two years. A "bought in the last 90 days"
 audience on order events can only see 45 of them, however far back the lake goes.
 
@@ -54,7 +54,7 @@ audience on order events can only see 45 of them, however far back the lake goes
 
 | Feature | Description |
 | --- | --- |
-| In Profile now (days) ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square) ![Beta](https://img.shields.io/badge/Beta-6E3FA3?style=flat-square)<br>`v3.4.16` | Two columns beside "Have we got it?" on the Field Index and every schema tab (and the days on the Field History tab): the field's days of unbroken data, capped by the Profile retention of the dataset that carries it, with the reason in words -- *all 90 days Profile keeps*, *Profile keeps only 45 days (tesco_order_event_dataset)*, *24 of the 90 days Profile keeps -- since 30 Sep 2026*. Worked out dataset by dataset, so a backup dataset with a longer retention but one month of data cannot lend its retention to another dataset's long run. |
+| In Profile now (days) ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square) ![Beta](https://img.shields.io/badge/Beta-6E3FA3?style=flat-square)<br>`v3.4.16` | Two columns beside "Have we got it?" on the Field Index and every schema tab (and the days on the Field History tab): the field's days of unbroken data, capped by the Profile retention of the dataset that carries it, with the reason in words -- *all 90 days Profile keeps*, *Profile keeps only 45 days (&lt;the order events dataset&gt;)*, *24 of the 90 days Profile keeps -- since 30 Sep 2026*. Worked out dataset by dataset, so a backup dataset with a longer retention but one month of data cannot lend its retention to another dataset's long run. |
 | Profile retention on the Summary ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.16` | Every Profile-enabled dataset with a Profile retention, how many days Profile keeps and how long the data lake keeps; under 90 days in red. |
 
 ### Field history

@@ -100,7 +100,7 @@ and no longer reported as a read failure. "Empty" now says what was checked.
 v3.4.18 -- Two batches a month, from two directions. Comparing the v3.4.16
 (newest first) and v3.4.17 (biggest first) roi-prod runs month by month: (1)
 on some datasets the biggest batches "of 1 record" hold empty files while a
-newer batch has the rows (tesco_profile_dataset, October 2026 went to '?'), so
+newer batch has the rows (a profile dataset, October 2026 went to '?'), so
 when every biggest batch is empty the month is walked newest first as well;
 (2) one batch per month missed rarely-filled fields in 21 of ~400 months, and
 a miss can look like a break in a field's run, so the biggest batch and one
@@ -4186,7 +4186,7 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
     # 2. Newest first, page by page: the batches a count cannot rank -- those
     # without one (some JSON loads), and the ones it overstates: on roi-prod a
     # batch "of 1 record" can hold an empty file while a newer one has the rows
-    # (tesco_profile_dataset, October 2026). It also finds what Profile
+    # (a profile dataset, October 2026). It also finds what Profile
     # received, and the months with nothing in them. When the biggest batch
     # read, one typical newer batch is read as well and the fields are counted
     # across both: a single batch missed rarely-filled fields in 21 of ~400
