@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 24, 2026 · **Latest version:** v3.4.18 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 24, 2026 · **Latest version:** v3.4.19 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,7 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
-| [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.18 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see |
+| [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.19 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see; no false "empty" coverage |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
 | [October 16, 2026](#october-16-2026) | v3.4.8 – v3.4.11 | Lookup schemas kept; Dropped Schemas and Dropped Field Index tabs; the run keeps the PC awake |
@@ -33,12 +33,13 @@
 
 ## October 24, 2026
 
-**Release date: October 24, 2026** · v3.4.15 – v3.4.18
+**Release date: October 24, 2026** · v3.4.15 – v3.4.19
 
 New features and updates to existing features in the Data Dictionary:
 
 - **Field history:** the cause of its timeouts found and removed, and every month it cannot read now explained (beta).
 - **In Profile now:** how much of each field an audience can actually see, given the Profile retention on its dataset (beta).
+- **Coverage:** a schema whose data went to Profile is no longer called "genuinely not populated".
 
 ### In Profile now
 
@@ -80,6 +81,14 @@ datasets' data-lake batches read in seconds.
 | Earlier caches re-checked ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.16` | Months cached by earlier versions were judged from 10 batches, so they are not trusted: the first v3.4.16 run reads every month again. |
 | Checked against Adobe a second way ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.17` | An independent check re-asked Adobe about the v3.4.16 ROI prod verdicts a different way -- every batch of each "Profile only" month, other batches of "data-lake files empty" months, Catalog's own oldest batch for each "data since" date. 34 of 36 held. The two that did not were semi-smart coupon months of about 1,480 batches whose three readable batches sat past the fifth page. Each month is now first asked for its batches **biggest first** (Catalog sorts on the record count), which shows the readable ones in one call however many batches the month holds; the page-by-page walk runs only when nothing has records. The coupon dataset now reads unbroken since December 2025. Months cached by v3.4.16 are read again. |
 | Two batches a month ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.18` | Comparing the newest-first (v3.4.16) and biggest-first (v3.4.17) runs month by month showed what each misses. On some datasets the biggest batches, counted as one record, hold empty files while a newer batch has the rows, so when every biggest batch is empty the month is walked newest first as well. And one batch a month missed rarely-filled fields in 21 of about 400 months -- a miss that can look like a break in the field's run -- so the biggest batch and one typical newer batch are both read, and the fields counted across the two. |
+
+### Coverage
+
+**Fixes and improvements**
+
+| Fix | Description |
+| --- | --- |
+| No more false "genuinely not populated" ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.19` | Coverage sampled a dataset's newest 20 batches. When those were all Profile-side or empty -- the Marketplace Order Event datasets on ROI prod have thousands of empty data-lake batches -- the schema was reported as EMPTY, "genuinely not populated". Now, when the newest 20 give nothing, the biggest batches of the last 90 days are tried as well, and a schema that still yields nothing is named for what it is: **Profile only** (its datasets load to Profile, with no data-lake copy to sample) or **data-lake files empty** (batches report records, but their files hold none). Both read *coverage unknown, not 0%* in the DATA COMPLETENESS block, and neither is reported as a read failure any more. "Empty" now says what was checked. |
 
 For more information, read the [README](README.md).
 

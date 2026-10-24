@@ -87,6 +87,16 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.19 -- Coverage (--data-dict) no longer calls a Profile-loaded schema
+"genuinely not populated". It read a dataset's newest 20 batches only; when
+those were all Profile-side or empty (Marketplace Order Event on roi-prod, with
+thousands of empty lake batches), it said EMPTY. Now, when the newest 20 give
+nothing, the biggest batches of the last 90 days are tried too (the same
+record-count sort as history), and what stays unread is named: "Profile only"
+(its datasets load to Profile, no data-lake copy) or "data-lake files empty"
+(batches report records, files hold none) -- both coverage unknown, not 0%,
+and no longer reported as a read failure. "Empty" now says what was checked.
+
 v3.4.18 -- Two batches a month, from two directions. Comparing the v3.4.16
 (newest first) and v3.4.17 (biggest first) roi-prod runs month by month: (1)
 on some datasets the biggest batches "of 1 record" hold empty files while a
@@ -315,7 +325,7 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.18"
+SCRIPT_VERSION = "3.4.19"
 SCRIPT_DATE    = "2026-10-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -447,6 +457,9 @@ HISTORY_PAUSE_SECS = 180
 HISTORY_PAGE = 100
 HISTORY_PAGES = 5
 HISTORY_TRIES = 4
+# v3.4.19: coverage also tries the biggest batches of this many recent days when
+# a dataset's newest 20 are all Profile-side or empty.
+COVERAGE_RECENT_DAYS = 90
 # The usual Profile retention for event data: a dataset keeping less is called out.
 HISTORY_PROFILE_DAYS = 90
 # 2 (v3.4.16): v1 caches judged a month from its newest 10 batches only, so
@@ -1401,10 +1414,47 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
     available = failed = empty_reads = 0     # diagnostics: empty vs unreadable
     list_failed = 0     # datasets whose batch LIST never returned (504/timeout):
                         # we learned nothing about them, so 0 rows != empty
+    profile_side = 0    # Profile-side batches seen: data that went to Profile
+    recent_ms = _ms(datetime.now(timezone.utc) - timedelta(days=COVERAGE_RECENT_DAYS))
     t_start = time.perf_counter()
     logger.info(f"    sampling across {len(dsids)} dataset(s), "
                 f"~{per_ds} rows each (target {target}); streaming Parquet "
                 f"through memory...")
+
+    def read_batches(bids, need):
+        """Download from `bids` in turn until `need` rows; returns rows got."""
+        nonlocal total_bytes, total_batches, failed, empty_reads
+        got, batches_seen, consec_fail = 0, 0, 0
+        for bid in bids:
+            if got >= need or batches_seen >= max_batches:
+                break
+            if consec_fail >= 3:
+                logger.info(f"      {ANSI['dim']}3 consecutive failures in this "
+                            f"dataset -- moving on.{ANSI['reset']}")
+                break
+            batches_seen += 1
+            total_batches += 1
+            try:
+                chunk, nbytes = _download_batch_rows(
+                    headers, bid, need - got,
+                    smallest_first=smallest_first, file_timeout=file_timeout)
+            except Exception as e:
+                consec_fail += 1
+                failed += 1
+                logger.warning(f"      batch {bid}: skipped ({e})")
+                continue
+            total_bytes += nbytes
+            if not chunk:
+                consec_fail += 1
+                empty_reads += 1
+                continue
+            consec_fail = 0
+            rows.extend(chunk)
+            got += len(chunk)
+            logger.info(f"      batch {bid} -> {len(chunk)} rows "
+                        f"{ANSI['dim']}(dataset {got}/{need}, "
+                        f"overall {len(rows)}/{target}){ANSI['reset']}")
+        return got
     for di, dsid in enumerate(dsids, 1):
         if len(rows) >= target:
             break
@@ -1460,52 +1510,54 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         # partitions and still-loading batches), RICHEST first -- one big batch
         # fills the per-dataset quota in a single download instead of churning
         # through dozens of tiny 1-row batches.
-        succ_items = [(bid, b) for bid, b in batches.items()
-                      if isinstance(b, dict) and b.get("status") == "success"
-                      and _batch_record_count(b) != 0
-                      and _lake_readable(bid, b)]
-        succ_items.sort(key=lambda kv: _batch_record_count(kv[1]), reverse=True)
-        succ = [bid for bid, _ in succ_items]
+        succ = _readable_richest(batches)
+        profile_side += sum(1 for b in batches.values()
+                            if isinstance(b, dict) and _is_profile_side_batch(b))
         available += len(succ)
         logger.info(f"    dataset {di}/{len(dsids)} {dsid}: "
                     f"{len(succ)} non-empty success batch(es) available, "
                     f"want {need} rows")
-        got, batches_seen, consec_fail = 0, 0, 0
-        for bid in succ:
-            if got >= need or batches_seen >= max_batches:
-                break
-            if consec_fail >= 3:
-                logger.info(f"      {ANSI['dim']}3 consecutive failures in this "
-                            f"dataset -- moving on.{ANSI['reset']}")
-                break
-            batches_seen += 1
-            total_batches += 1
+        got = read_batches(succ, need)
+        if not got and not smallest_first:
+            # v3.4.19: the newest 20 can all be Profile-side or empty while the
+            # dataset holds records -- the biggest batches of the last 90 days,
+            # ranked by Catalog on the record count, find them in one call.
             try:
-                chunk, nbytes = _download_batch_rows(
-                    headers, bid, need - got,
-                    smallest_first=smallest_first, file_timeout=file_timeout)
+                more = _get_json_retry(
+                    f"{CATALOG_BATCHES_URL}?dataSet={dsid}&status=success"
+                    f"&createdAfter={recent_ms}&orderBy=desc:metrics.outputRecordCount"
+                    f"&limit=20", headers, 60, attempts=2,
+                    label=f"batch list {dsid[:24]} (biggest, {COVERAGE_RECENT_DAYS} days)")
             except Exception as e:
-                consec_fail += 1
-                failed += 1
-                logger.warning(f"      batch {bid}: skipped ({e})")
-                continue
-            total_bytes += nbytes
-            if not chunk:
-                consec_fail += 1
-                empty_reads += 1
-                continue
-            consec_fail = 0
-            rows.extend(chunk)
-            got += len(chunk)
-            logger.info(f"      batch {bid} -> {len(chunk)} rows "
-                        f"{ANSI['dim']}(dataset {got}/{need}, "
-                        f"overall {len(rows)}/{target}){ANSI['reset']}")
+                logger.info(f"      {ANSI['dim']}biggest-batches list failed "
+                            f"({type(e).__name__}){ANSI['reset']}")
+                more = {}
+            if isinstance(more, dict):
+                profile_side += sum(1 for b in more.values()
+                                    if isinstance(b, dict) and _is_profile_side_batch(b))
+                extra = [bid for bid in _readable_richest(more) if bid not in succ]
+                if extra:
+                    available += len(extra)
+                    logger.info(f"      {len(extra)} more from the biggest batches of the "
+                                f"last {COVERAGE_RECENT_DAYS} days")
+                    read_batches(extra, need - got)
     logger.info(f"    sampled {len(rows)} rows from {total_batches} batch(es), "
                 f"{total_bytes/1024/1024:.1f} MB streamed, "
                 f"{time.perf_counter() - t_start:.1f}s elapsed.")
     return rows[:target], {"available": available, "failed": failed,
                            "empty_reads": empty_reads,
-                           "list_failed": list_failed}
+                           "list_failed": list_failed,
+                           "profile_side": profile_side}
+
+
+def _readable_richest(batches):
+    """Batch ids from a Catalog /batches answer that Data Access can read and
+    that carry records (or might: no count), richest first."""
+    items = [(bid, b) for bid, b in batches.items()
+             if isinstance(b, dict) and b.get("status") == "success"
+             and _batch_record_count(b) != 0 and _lake_readable(bid, b)]
+    items.sort(key=lambda kv: _batch_record_count(kv[1]), reverse=True)
+    return [bid for bid, _ in items]
 
 
 def _extract_values(row, path):
@@ -2176,7 +2228,9 @@ def _coverage_status(k):
         ok          sampled fine
         partial     sampled, but some batches failed -- coverage understated
         unreadable  data EXISTS but couldn't be read (504 / 403) -- MISSING
-        empty       genuinely no ingested records
+        profile_only  loaded to Profile with no data-lake copy -- unknown, not 0%
+        lake_empty  batches report records, but their lake files hold none
+        empty       no records in the newest batches or the recent biggest ones
         not_sampled out of --data-dict scope, or no dataset to sample
     """
     if k.get("datadict"):
@@ -2197,8 +2251,16 @@ def _coverage_status(k):
         return ("unreadable", "MISSING -- data exists but could not be read "
                 "(gateway timeout, or the credential is denied the dataset's "
                 "labelled fields -- see the run log); coverage is unknown, not 0%")
+    if reason == "profile_only":
+        return ("profile_only", "Profile only -- its datasets load to Profile with no "
+                "data-lake copy to sample; coverage unknown, not 0%")
+    if reason == "lake_empty":
+        return ("lake_empty", "data-lake files empty -- batches report records but "
+                "their files hold none (the data went to Profile); coverage unknown, "
+                "not 0%")
     if reason == "empty":
-        return ("empty", "empty -- no records ingested into this schema")
+        return ("empty", f"empty -- no records in its newest batches or the biggest "
+                f"of the last {COVERAGE_RECENT_DAYS} days")
     return ("not_sampled", "not sampled (out of scope or no dataset)")
 
 
@@ -3914,12 +3976,27 @@ def add_data_dictionary(token, conf, results, dd_scope, dd_rows,
                                        f"(gateway/timeout). NOT confirmed empty -- "
                                        f"contents unknown, coverage MISSING.")
                         k["dd_empty_reason"] = "unreadable"
+                    elif sstats["available"] == 0 and sstats.get("profile_side"):
+                        logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
+                                       f"-- 0 records in the data lake: its "
+                                       f"dataset(s) load to Profile only "
+                                       f"({sstats['profile_side']} Profile-side "
+                                       f"batch(es) seen). Coverage unknown, not 0%.")
+                        k["dd_empty_reason"] = "profile_only"
                     elif sstats["available"] == 0:
                         logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
-                                       f"-- 0 records: EMPTY (no batch in any of "
-                                       f"its {len(dsids)} dataset(s) carries "
-                                       f"records). Genuinely not populated.")
+                                       f"-- 0 records: EMPTY (no batch in its "
+                                       f"{len(dsids)} dataset(s)' newest 20 or the "
+                                       f"biggest of the last {COVERAGE_RECENT_DAYS} "
+                                       f"days carries records).")
                         k["dd_empty_reason"] = "empty"
+                    elif not sstats["failed"]:
+                        logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
+                                       f"-- 0 records: {sstats['available']} batch(es) "
+                                       f"report records but every file read was "
+                                       f"empty ({sstats['empty_reads']}). Coverage "
+                                       f"unknown, not 0%.")
+                        k["dd_empty_reason"] = "lake_empty"
                     else:
                         logger.warning(f"  data dict [{i}/{n_scope}]: {k['title']} "
                                        f"-- 0 records but {sstats['available']} "
