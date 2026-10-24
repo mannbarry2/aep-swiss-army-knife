@@ -87,6 +87,19 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.16 -- Field history: every unreadable month explained, and the question
+that matters for audiences answered. The 126 months v3.4.15 left as '?' on
+roi-prod were (a) data-lake files that really hold 0 rows -- Profile-loaded
+datasets leave a schema-only file in the lake -- now labelled "data-lake files
+empty"; (b) the identity service's '-INGEST' marker batches (DTAC-4043 on the
+file list), now skipped like Profile-side ones; (c) months whose readable
+batches were hidden behind a busy month's newest 10 -- the month is now asked
+for 100 at a time, paging back up to 5 pages, and up to 4 batches are tried.
+A Profile-only month records how many records Profile received. NEW: "In
+Profile now (days)" per field -- days of unbroken data, capped by the Profile
+retention set on its datasets (on roi-prod: 90 days on most event datasets,
+45 on orders, 60 on promotion interactions), with the reason in words.
+
 v3.4.15 -- The cause of the history pass's 504s found and removed. Every one of
 the 328 file lists that 504'd on the 2026-10-23 roi-prod run (5 h 15 min) was
 the PROFILE-SIDE half of a batch ingestion: an old-style 24-hex batch whose
@@ -282,7 +295,7 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.15"
+SCRIPT_VERSION = "3.4.16"
 SCRIPT_DATE    = "2026-10-24"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -407,7 +420,18 @@ HISTORY_LISTING = {"max_entries": 1, "meta_timeout": 90, "meta_attempts": 2,
 # history worker pauses this long instead of piling up unreadable months.
 HISTORY_TRIP_FAILS = 12
 HISTORY_PAUSE_SECS = 180
-HISTORY_CACHE_VERSION = 1
+# v3.4.16: a month's batches are asked for 100 at a time (10 hid the readable
+# ones: a busy month's newest 10 can all be Profile-side or empty), paging back
+# up to 5 pages when the first holds nothing readable, and up to 4 batches are
+# tried when files come back empty (each such read takes about 2 s).
+HISTORY_PAGE = 100
+HISTORY_PAGES = 5
+HISTORY_TRIES = 4
+# The usual Profile retention for event data: a dataset keeping less is called out.
+HISTORY_PROFILE_DAYS = 90
+# 2 (v3.4.16): v1 caches judged a month from its newest 10 batches only, so
+# their 'none' and unreadable verdicts are not trusted -- every month is re-read.
+HISTORY_CACHE_VERSION = 2
 # A finished month's batches never change, so each one is cached and a later run
 # reads only the current month. Kept beside the repo: a working file, not a
 # deliverable, so never under AEP_OUTPUT_DIR.
@@ -1198,6 +1222,16 @@ def _is_profile_side_batch(b):
                                          "outputRecordCount")))
 
 
+def _lake_readable(bid, b):
+    """Could Data Access serve this batch's files? Not for three kinds Catalog
+    lists as ordinary success batches: Adobe's consolidation batches (DTAC-4000),
+    the Profile-side half of an ingestion (hangs to a 504), and the identity
+    service's '<id>-...-INGEST' markers (createdClient acp_core_identity_data),
+    whose file list is DTAC-4043 "DataSetFile not found in Catalog"."""
+    return not (_is_consolidation_batch(b) or _is_profile_side_batch(b)
+                or str(bid).endswith("-INGEST"))
+
+
 def _read_parquet_rows(raw_bytes, limit):
     """Parse only up to `limit` rows (row-group streaming) so a million-row
     file isn't fully materialised into memory just to sample a handful."""
@@ -1406,8 +1440,7 @@ def sample_schema_rows(token, conf, sandbox, dsids, target, max_batches=12,
         succ_items = [(bid, b) for bid, b in batches.items()
                       if isinstance(b, dict) and b.get("status") == "success"
                       and _batch_record_count(b) != 0
-                      and not _is_consolidation_batch(b)
-                      and not _is_profile_side_batch(b)]
+                      and _lake_readable(bid, b)]
         succ_items.sort(key=lambda kv: _batch_record_count(kv[1]), reverse=True)
         succ = [bid for bid, _ in succ_items]
         available += len(succ)
@@ -2750,19 +2783,23 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     hist_labels = next((k["history_labels"] for res in results for k in res["kept"]
                         if k.get("history_labels")), [])
     hist_cols = (["Have we got it? (months, BETA)", "History detail (BETA)",
+                  "In Profile now (days, BETA)", "Profile detail (BETA)",
                   f"History {hist_labels[0]} > {hist_labels[-1]} (BETA)"]
                  if hist_labels else [])
+    hist_widths = [13, 46, 12, 46, len(hist_labels) + 4]
     spark_font = Font(name="Consolas")
 
     def put_history(ws, row, col, h):
-        """Write one field's three history cells from column `col`."""
+        """Write one field's five history cells from column `col`."""
         if not h:
             return
         c = ws.cell(row, col, h["months"])
         c.number_format = HISTORY_MONTHS_FMT
         c.alignment = center
         ws.cell(row, col + 1, h["detail"])
-        ws.cell(row, col + 2, h["spark"]).font = spark_font
+        ws.cell(row, col + 2, h.get("profile_days")).alignment = center
+        ws.cell(row, col + 3, h.get("profile_detail"))
+        ws.cell(row, col + 4, h["spark"]).font = spark_font
 
     def style_header(ws, ncols, row=1):
         for c in range(1, ncols + 1):
@@ -2882,6 +2919,27 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 f"perf and temp datasets are left out.").font = Font(
                     italic=True, color="6E3FA3")
         r += 1
+        # What an audience can look back over: Profile keeps event data only as
+        # long as each dataset's Profile retention.
+        keeps = sorted((d["profile_ttl_days"], res["title"], d.get("table") or d.get("name"),
+                        _ttl_words(d.get("lake_ttl")))
+                       for res in results for d in res.get("datasets") or []
+                       if str(d.get("profile") or "").startswith("Profile")
+                       and d.get("profile_ttl_days"))
+        if keeps:
+            r += 1
+            ws.cell(r, 1, f"PROFILE RETENTION -- an audience can look back only as far "
+                    f"as Profile keeps a dataset's events (red: under "
+                    f"{HISTORY_PROFILE_DAYS} days). Profile-enabled datasets not "
+                    f"listed keep their data until it is replaced.").font = Font(
+                        bold=True, color="6E3FA3")
+            r += 1
+            for days, sb, name, lake in keeps:
+                ws.cell(r, 1, f"{name}{f'  ({sb})' if len(results) > 1 else ''}:  "
+                        f"Profile keeps {days} days  (data lake: {lake})").font = Font(
+                            color="C00000" if days < HISTORY_PROFILE_DAYS else "444444",
+                            bold=days < HISTORY_PROFILE_DAYS)
+                r += 1
 
     # ---- Data completeness: what's MISSING ----------------------------------
     # On a --data-dict run, list every schema whose coverage is not trustworthy
@@ -3033,6 +3091,16 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "are left out. Months go by LOAD date: data backfilled later counts "
          "from when it was loaded, and the schema tab says when a sample showed "
          "a backfill."),
+        ("'In Profile now' is what an audience can see (BETA)",
+         "Field Index / schema tabs / Field History",
+         "Audiences are built on Profile, not the data lake, and Profile keeps "
+         "event data only as long as the Profile retention set on its dataset "
+         "(often 90 days, sometimes less). So: the field's days of unbroken "
+         "data, capped at that retention. 'Profile keeps only 45 days' means a "
+         "longer look-back cannot work from Profile, however far back the lake "
+         "goes. Datasets with no Profile expiry keep everything. Some datasets "
+         "load to Profile only, with no data-lake copy to check; their months "
+         "show ? and the schema tab says how many records Profile received."),
         ("MISSING is not the same as 0%",
          "Summary",
          "0% means we looked and the field was empty. MISSING means we could "
@@ -3185,7 +3253,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         put_history(fi, ridx, 12, h)
         ridx += 1
     autofit(fi, [52, 18, 28, 40, 50, 20, 38, 34, 24, 11, 60]
-            + ([13, 46, len(hist_labels) + 4] if any_hist else []))
+            + (hist_widths if any_hist else []))
 
     # ---- Field History (BETA): the heartbeat as numbers, month by month -----
     if any_hist:
@@ -3203,14 +3271,14 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                     "left out), by the month the data was LOADED.")
         fh["A3"].font = Font(italic=True, color="666666")
         hr = 5
-        fh_cols = (["Field (dot notation)", "Schema", "Tab"] + hist_cols[:2]
+        fh_cols = (["Field (dot notation)", "Schema", "Tab"] + hist_cols[:3]
                    + [_mon(lab) for lab in hist_labels])
         for c, nm in enumerate(fh_cols, 1):
             fh.cell(hr, c, nm)
         style_header(fh, len(fh_cols), row=hr)
         fh.freeze_panes = fh.cell(hr + 1, 2)
         none_fill = PatternFill("solid", fgColor="F2F2F2")
-        first_m = 6
+        first_m = 7
         ridx = hr + 1
         for (fpath, _t, _f, _ft, _d, _i, sch, _tn, tab, _c, _top, h) in index_rows:
             if not h:
@@ -3222,6 +3290,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             mc.number_format = HISTORY_MONTHS_FMT
             mc.alignment = center
             fh.cell(ridx, 5, h["detail"])
+            fh.cell(ridx, 6, h.get("profile_days")).alignment = center
             for i, v in enumerate(h["cells"]):
                 cell = fh.cell(ridx, first_m + i, v)
                 cell.alignment = center
@@ -3235,7 +3304,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             f"{get_column_letter(first_m)}{hr + 1}:{last_col}{max(ridx - 1, hr + 1)}",
             ColorScaleRule(start_type="num", start_value=0, start_color="FFFFFF",
                            end_type="num", end_value=100, end_color="63BE7B"))
-        autofit(fh, [52, 38, 24, 13, 46] + [9] * len(hist_labels))
+        autofit(fh, [52, 38, 24, 13, 46, 12] + [9] * len(hist_labels))
 
     # ---- Schemas index tab (one row per kept schema) ------------------------
     sh = wb.create_sheet("Schemas")
@@ -3602,7 +3671,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             ridx += 1
         autofit(sheet, [50, 20, 28, 40, 50, 9, 22, 42]
                 + ([11, 70] if dd else [])
-                + ([13, 46, len(hist_labels) + 4] if hist else []))
+                + (hist_widths if hist else []))
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship
@@ -3899,7 +3968,7 @@ def _history_months(n, now=None):
     return out[::-1]
 
 
-def _history_batches(headers, dsid, extra, limits=(10, 3, 1)):
+def _history_batches(headers, dsid, extra, limits=(HISTORY_PAGE, 10, 3, 1)):
     """Success batches of a dataset matching `extra` (a Catalog filter and sort
     suffix), as [(batchId, meta)]. The page size steps down on a timeout, as in
     sample_schema_rows: Catalog answers a small page where a large one 504s."""
@@ -3923,8 +3992,7 @@ def _typical_batches(cands, used):
     median size. A month's odd batch (a handful of records of some other kind)
     is what fakes a gap."""
     pool = [(bid, b) for bid, b in cands if bid not in used
-            and _batch_record_count(b) != 0 and not _is_consolidation_batch(b)
-            and not _is_profile_side_batch(b)]
+            and _batch_record_count(b) != 0 and _lake_readable(bid, b)]
     med = _median([n for n in (_batch_record_count(b) for _, b in pool) if n > 0])
 
     def key(kv):
@@ -3996,23 +4064,38 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
     if rec is None:
         rec = {"state": "none", "rows": 0, "fields": {}, "ts": None, "batches": []}
     a_ms, b_ms = _ms(a), _ms(b)
-    try:
-        cands = _history_batches(headers, dsid, f"&createdAfter={a_ms}"
-                                 f"&createdBefore={b_ms}&orderBy=desc:created")
-    except Exception as e:
-        logger.debug(f"      history: batch list {dsid} {a:%Y-%m-%d} failed ({e})")
-        if whole_month:
-            rec["state"], rec["why"] = "unsure", f"Catalog batch list: {_why(e)}"
-            rec["retry"] = True
-        return rec
-    cands = [(bid, x) for bid, x in cands
-             if a_ms <= int(x.get("created") or 0) < b_ms]
+    used = set(rec["batches"])
+    cands, pick = [], []
+    for page in range(HISTORY_PAGES):
+        try:
+            got = _history_batches(headers, dsid, f"&createdAfter={a_ms}"
+                                   f"&createdBefore={b_ms}&orderBy=desc:created"
+                                   f"&start={page * HISTORY_PAGE}")
+        except Exception as e:
+            logger.debug(f"      history: batch list {dsid} {a:%Y-%m-%d} failed ({e})")
+            if not cands:
+                if whole_month:
+                    rec["state"], rec["why"] = "unsure", f"Catalog batch list: {_why(e)}"
+                    rec["retry"] = True
+                return rec
+            break
+        cands += [(bid, x) for bid, x in got
+                  if a_ms <= int(x.get("created") or 0) < b_ms]
+        pick = _typical_batches(cands, used)[:HISTORY_TRIES]
+        if pick or len(got) < HISTORY_PAGE:
+            break
+    if whole_month:
+        # What Profile received this month, whether or not the lake can show it.
+        rec["profile_records"] = sum(int((x.get("metrics") or {}).get("recordsWritten") or 0)
+                                     for _, x in cands if _is_profile_side_batch(x))
     if whole_month and all(_batch_record_count(x) == 0 for _, x in cands):
         return rec          # no batches, or only empty ones: 'none'
-    pick = _typical_batches(cands, set(rec["batches"]))[:2]
-    if whole_month and not pick and any(_is_profile_side_batch(x) for _, x in cands):
-        rec["state"], rec["why"] = "unsure", "Profile only: no data-lake copy to read"
-        return rec
+    if whole_month and not pick:
+        if any(_is_profile_side_batch(x) for _, x in cands):
+            rec["state"], rec["why"] = "unsure", "Profile only: no data-lake copy to read"
+        elif any(_is_consolidation_batch(x) for _, x in cands):
+            rec["state"], rec["why"] = "unsure", "consolidated by Adobe: Data Access cannot read it"
+        return rec          # otherwise only empty / identity batches: 'none'
     for bid, _ in pick:
         rec["batches"].append(bid)
         try:
@@ -4030,8 +4113,10 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
             logger.debug(f"      history: batch {bid} unreadable ({rec['why']})")
             continue
         if not n:
+            rec["why"] = rec.get("why") or "data-lake files empty"
             continue
         rec["rows"] += n
+        rec.pop("why", None)
         for p, c in counts.items():
             rec["fields"][p] = rec["fields"].get(p, 0) + c
         if ts and (rec["ts"] is None or ts < rec["ts"]):
@@ -4227,11 +4312,75 @@ def _history_verdict(cells, months, firsts, cutoff, now, first_months=()):
     return round(max(0.0, (now - start).days / 30.44), 1), why
 
 
-def schema_history(k, recs, dsets, months, now):
-    """Per field of kept schema `k`, from its datasets' month records `recs`
-    (parallel to `dsets`): {path: {"months", "detail", "spark", "cells"}}.
-    A month counts for a field if ANY of the schema's datasets carried it."""
-    labels = [m[0] for m in months]
+def _ttl_words(iso):
+    """'P2Y' -> '2 years', 'P13M' -> '13 months', None -> 'no expiry'."""
+    m = re.fullmatch(r"P(\d+)([YMWD])", str(iso or ""))
+    if not m:
+        return iso or "no expiry"
+    n, unit = int(m.group(1)), {"Y": "year", "M": "month", "W": "week", "D": "day"}[m.group(2)]
+    return f"{n} {unit}{'s' if n != 1 else ''}"
+
+
+def _profile_now(months, detail, carriers):
+    """(days, plain-English detail): how much of a field Profile holds now --
+    its days of unbroken data up to now, capped by the Profile retention set on
+    the datasets that carry it (adobe_unifiedProfile.rowExpiration: on roi-prod
+    90 days on most event datasets, 45 on orders). (None, why) when it can't be
+    said."""
+    prof = [d for d in carriers if str(d.get("profile") or "").startswith("Profile")]
+    if not prof:
+        return None, "not in Profile -- its dataset is not enabled for Profile"
+    if months is None:
+        return None, detail
+    days = round(months * 30.44)
+    ttls = [d.get("profile_ttl_days") for d in prof]
+    if not months:
+        return 0, detail
+    if any(t is None for t in ttls):
+        return days, f"no Profile expiry on its dataset -- {detail}"
+    keep = max(ttls)
+    if days >= keep - 1:
+        if keep < HISTORY_PROFILE_DAYS:
+            short = ", ".join(sorted({d.get("table") or d.get("name") for d in prof
+                                      if d.get("profile_ttl_days") == keep}))
+            return keep, (f"Profile keeps only {keep} days ({short}); "
+                          f"the data goes back further")
+        return keep, f"all {keep} days Profile keeps"
+    return days, f"{days} of the {keep} days Profile keeps -- {detail}"
+
+
+def _field_cells(path, recs, labels):
+    """[(state, coverage%)] per month for one field across the month records
+    `recs`: a month counts if ANY of them carried the field."""
+    cells = []
+    for lab in labels:
+        covs, unsure = [], False
+        for r in recs:
+            m = r["months"].get(lab) or {}
+            if m.get("state") == "sampled" and m.get("rows"):
+                covs.append(100 * m["fields"].get(path, 0) / m["rows"])
+            elif m.get("state") == "unsure":
+                unsure = True
+        if any(c > 0 for c in covs):
+            cells.append(("data", max(covs)))
+        elif unsure:
+            cells.append(("unsure", None))
+        elif covs:
+            cells.append(("empty", 0))
+        else:
+            cells.append(("none", None))
+    # A rarely-filled field can simply be missed by a sample: a one-month
+    # hole between two months that have it is called unsure, not a break.
+    if max((c for s, c in cells if s == "data"), default=0) < HISTORY_SPARSE:
+        for i in range(1, len(cells) - 1):
+            if (cells[i][0] == "empty" and cells[i - 1][0] == "data"
+                    and cells[i + 1][0] == "data"):
+                cells[i] = ("unsure", None)
+    return cells
+
+
+def _verdict_args(recs, dsets, now):
+    """(firsts, first_months, cutoff) for _history_verdict over these datasets."""
     firsts = [datetime.strptime(r["first"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
               for r in recs if r.get("first")]
     first_months = {r["first_month"] for r in recs
@@ -4239,36 +4388,58 @@ def schema_history(k, recs, dsets, months, now):
     ttls = [d.get("lake_ttl_days") for d in dsets]
     # Only when EVERY dataset expires data has the oldest of it truly gone.
     cutoff = now - timedelta(days=max(ttls)) if ttls and all(ttls) else None
+    return firsts, first_months, cutoff
+
+
+def _schema_profile_now(path, recs, dsets, months, labels, now):
+    """'In Profile now' for one field of a schema: dataset by dataset over its
+    PROFILE-ENABLED datasets only (a lake-only dataset's data is not in
+    Profile), each one's own unbroken run capped by its own Profile retention,
+    and the best of them. Unknown rather than a confident 0 when one of those
+    datasets loads to Profile only, so the lake cannot show what it holds."""
+    best, hidden = None, []
+    for r, d in zip(recs, dsets):
+        if not str(d.get("profile") or "").startswith("Profile"):
+            continue
+        po = [m for m in r["months"].values()
+              if str(m.get("why") or "").startswith("Profile only")]
+        if po:
+            hidden.append((d.get("table") or d.get("name"),
+                           sum(m.get("profile_records") or 0 for m in po)))
+        fd, fmd, cd = _verdict_args([r], [d], now)
+        nd, det = _history_verdict(_field_cells(path, [r], labels), months,
+                                   fd, cd, now, fmd)
+        p = _profile_now(nd, det, [d])
+        if best is None or (-1 if p[0] is None else p[0]) > (-1 if best[0] is None else best[0]):
+            best = p
+    if best is None:
+        return None, "not in Profile -- no dataset of this schema is enabled for Profile"
+    if not best[0] and hidden:
+        name, n = hidden[0]
+        return None, (f"unknown -- {name} loads to Profile only ({n:,} records "
+                      f"written), which the data lake cannot show")
+    return best
+
+
+def schema_history(k, recs, dsets, months, now):
+    """Per field of kept schema `k`, from its datasets' month records `recs`
+    (parallel to `dsets`): {path: {"months", "detail", "profile_days",
+    "profile_detail", "spark", "cells"}}. A month counts for a field if ANY of
+    the schema's datasets carried it. 'In Profile now' goes dataset by dataset
+    -- each one's own unbroken run, capped by its own Profile retention -- and
+    takes the best: a 90-day backup dataset with one month of data must not
+    lend its retention to a 45-day dataset's long run."""
+    labels = [m[0] for m in months]
+    firsts, first_months, cutoff = _verdict_args(recs, dsets, now)
     out = {}
     for f in k["fields"]:
         path = f[0]
-        cells = []
-        for lab in labels:
-            covs, unsure = [], False
-            for r in recs:
-                m = r["months"].get(lab) or {}
-                if m.get("state") == "sampled" and m.get("rows"):
-                    covs.append(100 * m["fields"].get(path, 0) / m["rows"])
-                elif m.get("state") == "unsure":
-                    unsure = True
-            if any(c > 0 for c in covs):
-                cells.append(("data", max(covs)))
-            elif unsure:
-                cells.append(("unsure", None))
-            elif covs:
-                cells.append(("empty", 0))
-            else:
-                cells.append(("none", None))
-        # A rarely-filled field can simply be missed by a sample: a one-month
-        # hole between two months that have it is called unsure, not a break.
-        if max((c for s, c in cells if s == "data"), default=0) < HISTORY_SPARSE:
-            for i in range(1, len(cells) - 1):
-                if (cells[i][0] == "empty" and cells[i - 1][0] == "data"
-                        and cells[i + 1][0] == "data"):
-                    cells[i] = ("unsure", None)
+        cells = _field_cells(path, recs, labels)
         n, detail = _history_verdict(cells, months, firsts, cutoff, now, first_months)
+        p_days, p_detail = _schema_profile_now(path, recs, dsets, months, labels, now)
         out[path] = {
             "months": n, "detail": detail,
+            "profile_days": p_days, "profile_detail": p_detail,
             "spark": "".join(_spark(s, c) for s, c in cells),
             "cells": [max(1, round(c)) if s == "data" else
                       0 if s == "empty" else "?" if s == "unsure" else None
@@ -4385,12 +4556,20 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
             locked = [d.get("table") or d.get("name") for r, d in got if r.get("locked")]
             if locked:
                 notes.append(f"Data Access refuses {', '.join(locked)} (HTTP 403)")
-            prof = sorted({d.get("table") or d.get("name") for r, d in got
-                           if any(str(m.get("why") or "").startswith("Profile only")
-                                  for m in r["months"].values())})
-            if prof:
-                notes.append(f"{', '.join(prof)}: some months were loaded to Profile "
-                             f"only, with no data-lake copy to check (shown as ?)")
+            for r, d in got:
+                po = [m for m in r["months"].values()
+                      if str(m.get("why") or "").startswith("Profile only")]
+                empty = sum(1 for m in r["months"].values()
+                            if m.get("why") == "data-lake files empty")
+                name = d.get("table") or d.get("name")
+                if po:
+                    written = sum(m.get("profile_records") or 0 for m in po)
+                    notes.append(f"{name}: {len(po)} month(s) loaded to Profile only "
+                                 f"({written:,} records written to Profile), with no "
+                                 f"data-lake copy to check (shown as ?)")
+                if empty:
+                    notes.append(f"{name}: {empty} month(s) whose data-lake files hold "
+                                 f"no rows (shown as ?)")
             if notes:
                 k["history_note"] = "; ".join(notes)
             k["history"] = schema_history(k, [r for r, _ in got],

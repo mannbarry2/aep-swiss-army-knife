@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 24, 2026 · **Latest version:** v3.4.15 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 24, 2026 · **Latest version:** v3.4.16 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,7 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
-| [October 24, 2026](#october-24-2026) | v3.4.15 | The cause of field history's timeouts found: Profile-only batches, now skipped |
+| [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.16 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
 | [October 16, 2026](#october-16-2026) | v3.4.8 – v3.4.11 | Lookup schemas kept; Dropped Schemas and Dropped Field Index tabs; the run keeps the PC awake |
@@ -33,11 +33,28 @@
 
 ## October 24, 2026
 
-**Release date: October 24, 2026** · v3.4.15
+**Release date: October 24, 2026** · v3.4.15 – v3.4.16
 
 New features and updates to existing features in the Data Dictionary:
 
-- **Field history:** the cause of its timeouts found and removed (beta).
+- **Field history:** the cause of its timeouts found and removed, and every month it cannot read now explained (beta).
+- **In Profile now:** how much of each field an audience can actually see, given the Profile retention on its dataset (beta).
+
+### In Profile now
+
+Audiences are built on Profile, not the data lake, and Profile keeps event data
+only as long as the **Profile retention set on each dataset** -- which is not
+the same everywhere. On ROI prod most event datasets keep 90 days, but
+`tesco_order_event_dataset` keeps **45** and promotion interactions 60, while
+their data lake copies go back two years. A "bought in the last 90 days"
+audience on order events can only see 45 of them, however far back the lake goes.
+
+**New features**
+
+| Feature | Description |
+| --- | --- |
+| In Profile now (days) ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square) ![Beta](https://img.shields.io/badge/Beta-6E3FA3?style=flat-square)<br>`v3.4.16` | Two columns beside "Have we got it?" on the Field Index and every schema tab (and the days on the Field History tab): the field's days of unbroken data, capped by the Profile retention of the dataset that carries it, with the reason in words -- *all 90 days Profile keeps*, *Profile keeps only 45 days (tesco_order_event_dataset)*, *24 of the 90 days Profile keeps -- since 30 Sep 2026*. Worked out dataset by dataset, so a backup dataset with a longer retention but one month of data cannot lend its retention to another dataset's long run. |
+| Profile retention on the Summary ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.16` | Every Profile-enabled dataset with a Profile retention, how many days Profile keeps and how long the data lake keeps; under 90 days in red. |
 
 ### Field history
 
@@ -58,6 +75,9 @@ datasets' data-lake batches read in seconds.
 | "Profile only" months ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.15` | A month that holds nothing but Profile-side batches is marked at once -- *Profile only: no data-lake copy to read* -- instead of being read. It still shows as **?**, and the schema tab names the datasets it affects. |
 | Only the fixable months are retried ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.15` | A month that can never be read -- Profile only, empty files, or files Adobe has deleted (HTTP 404) -- is now cached like any finished month. Only a timeout or 5xx is asked again next run. The log says how many will be. |
 | Batches with a known size first ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.15` | Within a month, batches whose record count Catalog knows are tried before those it doesn't, which are more often empty. |
+| Every unreadable month explained ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.16` | After v3.4.15, 126 dataset-months on ROI prod still showed **?**. Each kind was traced: **(1)** data-lake files that really hold no rows -- a 970 MB load into the product lookup left a 4 KB, zero-row file, because the records went to Profile -- now labelled *data-lake files empty*; **(2)** the identity service's `…-INGEST` marker batches, whose file list Data Access answers with DTAC-4043 *DataSetFile not found*, now skipped like Profile-side ones; **(3)** months whose readable batches were hidden: only the newest 10 batches of a month were asked for, and in a busy month those can all be Profile-side or empty. |
+| A month's batches, 100 at a time ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.16` | Catalog is asked for 100 batches per month instead of 10, paging back up to five pages when the first holds nothing readable, and up to four batches are tried when files come back empty (each such read takes about two seconds). A Profile-only month now records how many records Profile received, and the schema tab says so. |
+| Earlier caches re-checked ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.16` | Months cached by earlier versions were judged from 10 batches, so they are not trusted: the first v3.4.16 run reads every month again. |
 
 For more information, read the [README](README.md).
 
