@@ -910,8 +910,8 @@ python data_dictionary_v3.py "acme k" --sandbox=prod --history=order --history-m
 
 ### Check by hand (SQL)
 
-The last column of the Field Index and every schema tab, **Check by hand
-(SQL)**, holds one read-only Query Service statement for that field, on one line,
+The last column of the Field Index and every schema tab, **SQL to check it**
+(under the band *Check it yourself*), holds one read-only Query Service statement for that field, on one line,
 ready to copy into the Query Service editor and run (v3.4.21). It reads the data
 itself, not through the dictionary's batch sampling, so it is the way to confirm
 or question any coverage or history figure:
@@ -928,3 +928,18 @@ or question any coverage or history figure:
 Each statement opens with a `/* Data Dictionary: … */` comment, so whoever reads
 the Query Service log can see what it was. On a very large event table, shorten
 the window (the `timestamp >=` date) if Query Service times out.
+
+### How the workbook is laid out
+
+It goes to people who do not work in AEP, so a finishing pass tidies every tab
+before it is saved (v3.4.22): column widths fitted to what is in them, header
+rows tall enough for their words, descriptions wrapped, long notes wrapped
+rather than running off the screen, and thousands separators. On the Field
+Index and every schema tab, a coloured band above the header names each group
+of columns (*The field*, *In the data now*, *How far back it goes (beta)*,
+*Check it yourself*). Colour is used only where it means something:
+coverage runs red to green, months and Profile days shade deeper the more
+there are, audiences carry their RED / AMBER / GREEN. Ids, raw rule text and
+other technical columns are folded away behind a **+** above the column
+letters. A schema's name in a **Tab** column is a link to its tab, and each
+schema tab links back to the list.

@@ -297,7 +297,8 @@ def score_audience(aud: dict, tree, base_populations: dict | None = None,
             if biggest >= lim:
                 pop_pts = p
         score += pts + pop_pts
-        text = f"depends on {len(deps)} audience(s) (+{pts})"
+        text = (f"depends on {len(deps)} audience{'' if len(deps) == 1 else 's'} "
+                f"(+{pts})")
         if pop_pts:
             text += (f"; largest base '{biggest_name}' = {_fmt_pop(biggest)} "
                      f"profiles, all of them scanned (+{pop_pts})")

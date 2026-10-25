@@ -87,6 +87,25 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.22 -- Presentation, for readers who do not work in AEP. A finishing pass
+(_polish_workbook) runs over every tab before saving: column widths fitted to
+the content, header rows tall enough for their words, prose wrapped and its
+rows grown to fit, long notes merged and wrapped instead of running off the
+screen, thousands separators, en dashes and arrows for the ASCII '--' and
+'->', technical columns (ids, raw PQL, cron) folded away behind a +, colour
+scales on coverage, months and Profile days, and the Tab columns made links
+(each schema tab links back). Bands above the Field Index and schema-tab
+headers name each group of columns; '(BETA)' moves from every history header
+into its band. Fixed: every tab title after the Summary ended with the last
+schema's coverage status ('Field Index - empty -- no records...') -- a loop
+reused the title's variable; How to Use rows were 30 points high and cut
+most explanations off; the Summary froze its first 13 rows. Custom classes
+show their names, not a 48-character hash; the Adobe placeholder
+"Description for furnished object" shows blank; Y/N reads Yes/No; the
+Audiences tab says 'ROI Prod' like every other tab, its rules lose the
+renderer's '[PARTIAL: x]' and '<x: see raw>' markers, and its long notes
+move to How to Use.
+
 v3.4.21 -- Check by hand (SQL). The last column of the Field Index and every
 schema tab holds one read-only Query Service statement for the field, on one
 line so it pastes cleanly out of Excel, labelled /* Data Dictionary: ... */:
@@ -347,7 +366,7 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.21"
+SCRIPT_VERSION = "3.4.22"
 SCRIPT_DATE    = "2026-10-25"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -369,6 +388,7 @@ IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 PLATFORM = "https://platform.adobe.io"
 SANDBOX_LIST_URL = f"{PLATFORM}/data/foundation/sandbox-management/sandboxes"
 SCHEMAS_URL = f"{PLATFORM}/data/foundation/schemaregistry/tenant/schemas"
+CLASSES_URL = f"{PLATFORM}/data/foundation/schemaregistry/tenant/classes"
 DESCRIPTORS_URL = f"{PLATFORM}/data/foundation/schemaregistry/tenant/descriptors"
 DATASETS_URL = f"{PLATFORM}/data/foundation/catalog/dataSets"
 CATALOG_BATCHES_URL = f"{PLATFORM}/data/foundation/catalog/batches"
@@ -512,6 +532,7 @@ DEFAULT_SCOPES = (
 
 # Schema Registry media types.
 XED_LIST = "application/vnd.adobe.xed+json"            # full(ish) resource list
+XED_ID = "application/vnd.adobe.xed-id+json"           # ids and titles only
 XED_FULL = "application/vnd.adobe.xed-full+json; version=1"  # allOf resolved
 # Descriptors come back grouped by @type, each value a list of full objects.
 DESCRIPTOR_ACCEPT = "application/vnd.adobe.xdm+json"
@@ -607,6 +628,8 @@ KNOWN_CLASSES = {
     "https://ns.adobe.com/xdm/data/time-series": "XDM Time-series",
     "https://ns.adobe.com/xdm/classes/segment-definition": "Segment definition",
 }
+# Descriptions the Adobe UI writes when nobody does; shown as blank (lower case).
+PLACEHOLDER_TEXTS = {"description for furnished object"}
 
 # ----------------------------------------------------------------------------
 # ANSI / logging - matches the house style (aep_credentials.py et al.)
@@ -1047,7 +1070,10 @@ def _plain_text(v) -> str:
     locale maps pick English, anything else is stringified. Newlines collapse
     so a description never breaks an Excel row."""
     s = _localized(v) if v is not None else ""
-    return " ".join(str(s).split()) if s else ""
+    s = " ".join(str(s).split()) if s else ""
+    # The text the Adobe UI fills in when nobody writes a description (15 of
+    # the 31 described prod schemas, 2026-10-25): says nothing, so shown blank.
+    return "" if s.lower() in PLACEHOLDER_TEXTS else s
 
 
 def flatten_fields(node, prefix="", depth=0, tprefix=""):
@@ -1693,13 +1719,36 @@ def build_data_dict(rows, fields, top_n=10):
 # ----------------------------------------------------------------------------
 # Schema metadata helpers
 # ----------------------------------------------------------------------------
-def class_name(class_id: str) -> str:
+def class_name(class_id: str, titles=None) -> str:
+    """A class as a reader knows it: Adobe's own names, then the sandbox's
+    custom class titles (`titles`, from get_class_titles) -- a custom class id
+    ends in a 48-character hash, which used to be shown title-cased."""
     if not class_id:
         return "?"
     if class_id in KNOWN_CLASSES:
         return KNOWN_CLASSES[class_id]
+    if titles and titles.get(class_id):
+        return titles[class_id]
     tail = class_id.rstrip("/").rsplit("/", 1)[-1]
     return tail.replace("-", " ").replace("_", " ").title()
+
+
+def get_class_titles(token, conf, sandbox) -> dict:
+    """{class $id: title} for the sandbox's custom classes, paging through GET
+    /tenant/classes. Names only, so a failure costs nothing but the names."""
+    out, url = {}, f"{CLASSES_URL}?limit=300"
+    headers = aep_headers(token, conf, sandbox, accept=XED_ID)
+    try:
+        while url:
+            data = json.loads(http(url, headers=headers)[0])
+            for r in (data.get("results") if isinstance(data, dict) else data) or []:
+                if isinstance(r, dict) and r.get("$id") and r.get("title"):
+                    out[r["$id"]] = _plain_text(r["title"])
+            url = _next_url(data)
+    except Exception as e:
+        logger.warning(f"  {sandbox}: custom class names unreadable ({e}) -- "
+                       f"classes are shown by id.")
+    return out
 
 
 def fmt_epoch_ms(ms) -> str:
@@ -1939,6 +1988,7 @@ def collect_sandbox(token, conf, sb):
     raws = get_all_schemas(token, conf, name)
     ds_counts, ds_all = get_all_datasets(token, conf, name)
     identities, relationships, labels = get_all_descriptors(token, conf, name)
+    class_titles = get_class_titles(token, conf, name)
 
     # id -> title, for resolving relationship destinations to readable names.
     id_to_title = {r.get("$id"): (r.get("title") or r.get("$id")) for r in raws}
@@ -1997,7 +2047,7 @@ def collect_sandbox(token, conf, sb):
     for raw in sorted(raws, key=lambda r: (r.get("title") or "").lower()):
         sid = raw.get("$id") or ""
         stitle = raw.get("title") or raw.get("meta:altId") or sid or "?"
-        cls = class_name(raw.get("meta:class") or "")
+        cls = class_name(raw.get("meta:class") or "", class_titles)
         n_ds = ds_counts.get(sid, 0)
         lmod = last_modified(raw)
 
@@ -2078,7 +2128,7 @@ def collect_sandbox(token, conf, sb):
             # alternateDisplayInfo description only where the field has none.
             desc = desc or (_plain_text(lab["description"]) if lab else "")
             field_rows.append((path, dtype, friendly, fpath, desc,
-                               "Y" if req else "", id_disp, rel_disp))
+                               "Yes" if req else "", id_disp, rel_disp))
 
         stats["kept"] += 1
         stats["fields"] += len(field_rows)
@@ -2203,7 +2253,7 @@ SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Description", "Class", "Kind",
                       "In Profile",
                       "Datasets", "Data lake GB", "Data lake rows",
                       "Data lake TTL (days)", "Profile GB", "Profile TTL (days)",
-                      "SQL table name(s)", "Fields", "Identities",
+                      "SQL table names", "Fields", "Identities",
                       "Relationships", "Friendly-labelled fields", "Last Modified",
                       "Schema $id"]
 
@@ -2214,6 +2264,219 @@ SCHEMA_FIELD_COLUMNS = ["Field (dot notation)", "Data Type", "Friendly Name",
                         "Friendly Path", "Description", "Required", "Identity",
                         "Relationship -> target"]
 _HEADER_BG = "1F4E78"
+LINK_COLOUR = "0563C1"
+
+# ---- Presentation (v3.4.22) -------------------------------------------------
+# The workbook goes to people who do not work in AEP, so the finishing pass in
+# _polish_workbook runs over EVERY tab before saving: widths from the content,
+# header rows tall enough for their words, prose wrapped, numbers with
+# thousands separators, en dashes for the ASCII '--', technical columns folded
+# away, colour where it carries meaning and nowhere else.
+#
+# Bands above a table's header: what each run of columns is for.
+# (text, fill, font colour)
+BAND_FIELD = ("THE FIELD", "D9E1F2", "1F4E78")
+BAND_DATA = ("IN THE DATA NOW (a sample of records)", "E2EFDA", "375623")
+BAND_HISTORY = ("HOW FAR BACK IT GOES (beta)", "E4DFEC", "6E3FA3")
+BAND_SQL = ("CHECK IT YOURSELF", "FBE5D6", "C55A11")
+# Columns for the technically minded: kept, but folded away -- the + above the
+# column letters opens them.
+TECH_COLUMNS = {"Schema $id", "Dataset ID", "Dataset id", "Audience id",
+                "PQL (raw pql/json)", "PQL length", "PQL truncated in sheet",
+                "PQL format", "Unresolved tag ids", "System tags",
+                "Merge policy id", "Snapshot batch id", "Last evaluation job id",
+                "Schedule cron"}
+# Prose columns: wrapped at their width, and the row grows to fit.
+WRAP_COLUMNS = {"Description", "Why", "Why this score"}
+# Colour scales, the deeper the more: header -> [(value, colour), ...].
+SCALE_COLUMNS = {
+    "Coverage %": [(0, "F8CBAD"), (50, "FFE699"), (100, "A9D08E")],
+    "Have we got it? (months)": [(0, "FFFFFF"), (24, "A9D08E")],
+    "In Profile now (days)": [(0, "FFFFFF"), (90, "C9B8E8")],
+}
+# Widest a column is fitted to (Excel character widths); prose wraps narrower;
+# the first column -- the field path, the audience's sandbox... -- is the key
+# and is shown whole. A column grows (up to HEAD_MAX) so its header fits on
+# HEAD_LINES lines: one narrow column with a long name made the whole header
+# row four lines tall.
+FIT_MAX, FIT_MAX_WRAP, FIT_MAX_FIRST = 50, 50, 72
+HEAD_LINES, HEAD_MAX = 2, 24
+# A note row taller than this is cut short -- long explanations belong on How
+# to Use, not above a table where they stay frozen on screen.
+NOTE_MAX_LINES = 6
+
+
+def _display_len(v) -> int:
+    """How many characters `v` takes on screen once formatted."""
+    if isinstance(v, bool):
+        return 5
+    if isinstance(v, int):
+        return len(f"{v:,}")
+    if isinstance(v, float):
+        return len(f"{v:,.2f}")
+    if isinstance(v, datetime):
+        return 16
+    return max((len(x) for x in str(v).split("\n")), default=0)
+
+
+def _wrapped_lines(text, width: float) -> int:
+    """Lines `text` needs when Excel word-wraps it at `width` characters."""
+    lines = 0
+    for para in str(text).split("\n"):
+        lines += 1
+        cur = 0
+        for w in para.split():
+            if cur and cur + 1 + len(w) > width:
+                lines += 1
+                cur = len(w)
+            else:
+                cur += (1 if cur else 0) + len(w)
+    return max(lines, 1)
+
+
+def _tidy_text(s: str) -> str:
+    """Typographic dashes and arrows for the ASCII stand-ins in the prose. SQL
+    and JSON stay exactly as written: they are meant to be copied."""
+    if s.lstrip().startswith(("/*", "{", "[{", "SELECT", "select")):
+        return s
+    return s.replace(" -- ", " – ").replace(" -> ", " → ")
+
+
+def _pql_for_people(text):
+    """A rendered rule without the renderer's own markers: the '[PARTIAL: x]'
+    prefix goes (the 'PQL rendered' column says partial) and each '<x: see
+    raw>' becomes [...]. A rule that is nothing but such a part says so."""
+    if not isinstance(text, str):
+        return text
+    t = re.sub(r"^\[PARTIAL: [^\]]*\]\s*", "", text)
+    t = re.sub(r"<[^<>]*: see raw>", "[…]", t)
+    if t.strip() == "[…]":
+        return "(too complex to show as text – the full rule is in the folded-away raw column)"
+    return t
+
+
+def _sheet_link(cell, sheet: str):
+    """Make `cell` a link to the top of tab `sheet`, inside the workbook."""
+    from openpyxl.styles import Font
+    from openpyxl.worksheet.hyperlink import Hyperlink
+    cell.hyperlink = Hyperlink(ref=cell.coordinate,
+                               location="'" + sheet.replace("'", "''") + "'!A1")
+    cell.font = Font(color=LINK_COLOUR, underline="single")
+
+
+def _header_row(ws):
+    """The row a sheet's table header is on: the one style_header recorded,
+    else the top of the sheet's filter, else None (a sheet of prose)."""
+    t = getattr(ws, "_dd_table", "unset")
+    if t != "unset":
+        return t[0] if t else None
+    m = re.match(r"[A-Z]+(\d+):", ws.auto_filter.ref or "")
+    return int(m.group(1)) if m else None
+
+
+def _band(ws, row, start, end, band):
+    """One band over columns start..end on `row`: the name of a group."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    text, fill, colour = band
+    c = ws.cell(row, start, text)
+    c.font = Font(bold=True, color=colour, size=9)
+    c.alignment = Alignment(horizontal="left", vertical="center")
+    for col in range(start, end + 1):
+        ws.cell(row, col).fill = PatternFill("solid", fgColor=fill)
+    if end > start:
+        ws.merge_cells(start_row=row, start_column=start, end_row=row, end_column=end)
+
+
+def _polish_workbook(wb):
+    """The finishing pass over every tab (see 'Presentation' above)."""
+    from openpyxl.formatting.rule import ColorScaleRule
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+    for ws in wb.worksheets:
+        hr = _header_row(ws)
+        last = ws.max_row
+        for row in ws.iter_rows():
+            for c in row:
+                if isinstance(c.value, str) and (" -- " in c.value or " -> " in c.value):
+                    c.value = _tidy_text(c.value)
+        if hr:
+            widths, any_wrap = {}, False
+            for col in range(1, ws.max_column + 1):
+                letter = get_column_letter(col)
+                head = str(ws.cell(hr, col).value or "")
+                vals = [v for (v,) in ws.iter_rows(min_row=hr + 1, max_row=min(last, hr + 2000),
+                                                   min_col=col, max_col=col, values_only=True)
+                        if v not in (None, "")]
+                first = ws.cell(hr + 1, col)
+                fixed = first.font is not None and first.font.name == "Consolas"
+                wrap = head in WRAP_COLUMNS or any(isinstance(v, str) and "\n" in v
+                                                   for v in vals[:300])
+                word = max((len(w) for w in head.split()), default=4) + 3
+                if not fixed:
+                    lens = sorted(_display_len(v) for v in vals)
+                    p90 = lens[int(len(lens) * 0.9)] if lens else 0
+                    cap = (FIT_MAX_WRAP if wrap else FIT_MAX_FIRST if col == 1
+                           else FIT_MAX)
+                    width = max(word, 8, min(p90 + 2, cap))
+                    while (width < HEAD_MAX
+                           and _wrapped_lines(head, width * 0.9 - 1) > HEAD_LINES):
+                        width += 1
+                    ws.column_dimensions[letter].width = width
+                widths[col] = ws.column_dimensions[letter].width or 9
+                if head in TECH_COLUMNS:
+                    ws.column_dimensions.group(letter, hidden=True)
+                if head in SCALE_COLUMNS and last > hr:
+                    pts = SCALE_COLUMNS[head]
+                    kw = {"start_type": "num", "start_value": pts[0][0],
+                          "start_color": pts[0][1], "end_type": "num",
+                          "end_value": pts[-1][0], "end_color": pts[-1][1]}
+                    if len(pts) == 3:
+                        kw.update(mid_type="num", mid_value=pts[1][0], mid_color=pts[1][1])
+                    ws.conditional_formatting.add(f"{letter}{hr + 1}:{letter}{last}",
+                                                  ColorScaleRule(**kw))
+                any_wrap = any_wrap or wrap
+                for r in range(hr + 1, last + 1):
+                    c = ws.cell(r, col)
+                    v = c.value
+                    if v is None:
+                        continue
+                    if isinstance(v, int) and not isinstance(v, bool) and abs(v) >= 1000 \
+                            and c.number_format == "General":
+                        c.number_format = "#,##0"
+                    if wrap:
+                        c.alignment = Alignment(wrap_text=True, vertical="top",
+                                                horizontal=c.alignment.horizontal)
+                    if head == "Tab" and isinstance(v, str) and v in wb.sheetnames:
+                        _sheet_link(c, v)
+            if any_wrap:     # a tall row reads from the top, every cell alike
+                for row in ws.iter_rows(min_row=hr + 1, max_row=last):
+                    for c in row:
+                        if c.value is not None and not c.alignment.wrap_text:
+                            c.alignment = Alignment(vertical="top",
+                                                    horizontal=c.alignment.horizontal)
+            # A bold header wraps at about 0.9 of the column's width.
+            ws.row_dimensions[hr].height = 15 * min(4, max(
+                _wrapped_lines(ws.cell(hr, col).value or "", widths[col] * 0.9 - 1)
+                for col in widths)) + 6
+        # Long notes above a table (or anywhere on a sheet of prose): merged
+        # across the first columns and wrapped, so nothing runs off the screen.
+        merged = {r for rng in ws.merged_cells.ranges
+                  for r in range(rng.min_row, rng.max_row + 1)}
+        for r in range(1, (hr or last + 1)):
+            v = ws.cell(r, 1).value
+            if (not isinstance(v, str) or len(v) <= 100 or r in merged
+                    or any(ws.cell(r, c).value not in (None, "")
+                           for c in range(2, ws.max_column + 1))):
+                continue
+            span, total = 1, ws.column_dimensions["A"].width or 9
+            while total < 140 and span < max(ws.max_column, 1):
+                span += 1
+                total += ws.column_dimensions[get_column_letter(span)].width or 9
+            if span > 1:
+                ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=span)
+            ws.cell(r, 1).alignment = Alignment(wrap_text=True, vertical="top")
+            ws.row_dimensions[r].height = 15 * min(NOTE_MAX_LINES,
+                                                   _wrapped_lines(v, total * 1.05)) + 3
 
 
 def _safe_sheet_name(name: str, used: set) -> str:
@@ -2238,6 +2501,11 @@ def _sheet_label(title: str) -> str:
     if t.lower().endswith(" schema"):
         t = t[:-7]
     return t.strip() or (title or "").strip() or "schema"
+
+
+def _plural(n, one: str, many: str | None = None) -> str:
+    """'1 dataset', '3 datasets' -- never 'dataset(s)'."""
+    return f"{n:,} {one if n == 1 else (many or one + 's')}"
 
 
 def _sql_table_names(k) -> str:
@@ -2349,7 +2617,7 @@ def _coverage_status(k):
 CONFIDENTIAL = "STRICTLY CONFIDENTIAL"
 FIELD_INDEX_COLUMNS = ["Field (dot notation)", "Data Type", "Friendly Name",
                        "Friendly Path", "Description", "Identity", "Schema",
-                       "SQL table name(s)", "Tab", "Coverage %",
+                       "SQL table names", "Tab", "Coverage %",
                        "Top values (count)"]
 
 
@@ -2936,7 +3204,9 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     # `client` is filled only when the credential record carries an explicit
     # client name; otherwise we identify the workbook by sandbox rather than by
     # whichever key happened to read it.
-    label = client or where
+    # Sandboxes by their display name ('ROI Prod'), as on every tab.
+    titles = [str(res.get("title") or res.get("name") or "") for res in results]
+    label = client or (", ".join(titles) if 0 < len(titles) <= 2 else where)
 
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor=_HEADER_BG)
@@ -2949,9 +3219,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     any_hist = any(k.get("history") for res in results for k in res["kept"])
     hist_labels = next((k["history_labels"] for res in results for k in res["kept"]
                         if k.get("history_labels")), [])
-    hist_cols = (["Have we got it? (months, BETA)", "History detail (BETA)",
-                  "In Profile now (days, BETA)", "Profile detail (BETA)",
-                  f"History {hist_labels[0]} > {hist_labels[-1]} (BETA)"]
+    # Plain names: the band above them says the group is a beta (v3.4.22).
+    hist_cols = (["Have we got it? (months)", "History detail",
+                  "In Profile now (days)", "Profile detail",
+                  f"Month by month, {_mon(hist_labels[0])} → {_mon(hist_labels[-1])}"]
                  if hist_labels else [])
     hist_widths = [13, 46, 12, 46, len(hist_labels) + 4]
     spark_font = Font(name="Consolas")
@@ -2962,7 +3233,8 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                   if r.get("correct")
                   and str(r.get("table_name") or "").startswith("profile_snapshot_export")}
     sql_since = f"{(hist_labels or [_history_months(HISTORY_MONTHS)[0][0]])[0]}-01"
-    sql_col, sql_width = "Check by hand (SQL, BETA)", 60
+    sql_col, sql_width = "SQL to check it (paste into Query Service)", 60
+    sql_font = Font(name="Consolas", size=9, color="595959")
 
     def put_history(ws, row, col, h):
         """Write one field's five history cells from column `col`."""
@@ -3021,7 +3293,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     ws = wb.active
     ws.title = "Summary"
     confidential(ws)
-    ws["A2"] = f"Data Dictionary v{SCRIPT_VERSION}  -  {label}"
+    ws["A2"] = f"Data Dictionary v{SCRIPT_VERSION} – {label}"
     ws["A2"].font = title_font
     prov = script_provenance()
     ws["A3"] = provenance_line(prov)
@@ -3068,6 +3340,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     for c, nm in enumerate(hdr, 1):
         ws.cell(r, c, nm)
     style_header(ws, len(hdr), row=r)
+    # The Summary is read top to bottom: freezing its first 13 rows filled a
+    # laptop screen, and a one-row table needs no filter.
+    ws.freeze_panes = None
+    ws._dd_table = None
     r += 1
     for res in results:
         s = res["stats"]
@@ -3081,7 +3357,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         r += 1
     autofit(ws, [24, 6, 13, 7, 19, 15, 13, 15, 13, 12, 14, 12])
     ws.cell(r, 1, "Every dropped schema -- why it was left out, and its SQL "
-            "table name(s) -- is on the hidden 'Dropped Schemas' tab, and "
+            "table names -- is on the hidden 'Dropped Schemas' tab, and "
             "every one of their fields on the hidden 'Dropped Field Index' "
             "(right-click any tab > Unhide).").font = Font(italic=True,
                                                           color="666666")
@@ -3133,13 +3409,15 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         r += 1
         listed = 0
         for res, k, nm in tabbed:
-            code, label = _coverage_status(k)
+            # Not `label`: that names the workbook in every tab title below,
+            # and this loop used to leave the last schema's status in it.
+            code, status = _coverage_status(k)
             if code == "ok":
                 continue
             ws.cell(r, 1, k["title"])
             ws.cell(r, 2, nm)
             ws.cell(r, 3, res["title"])
-            cell = ws.cell(r, 4, label)
+            cell = ws.cell(r, 4, status)
             if code in ("unreadable", "partial"):
                 cell.font = Font(color="C00000", bold=True)
             r += 1
@@ -3276,7 +3554,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "goes. Datasets with no Profile expiry keep everything. Some datasets "
          "load to Profile only, with no data-lake copy to check; their months "
          "show ? and the schema tab says how many records Profile received."),
-        ("Check any field yourself (SQL, BETA)",
+        ("Check any field yourself (SQL)",
          "Field Index / schema tabs, last column",
          "One read-only Query Service statement per field, on one line: copy "
          "the cell, paste it into the Query Service editor, run it. An event "
@@ -3296,9 +3574,9 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         ("Some rules are only PARTLY shown",
          "Audiences",
          "Rules marked 'partial' contain an event-sequence or time-window "
-         "clause that is shown as <...>. What IS displayed is correct, but "
-         "there is more to the rule -- the raw column holds the full "
-         "definition."),
+         "clause, shown as […]. What IS displayed is correct, but there is "
+         "more to the rule: the full definition is in the folded-away 'PQL "
+         "(raw pql/json)' column (click the + above the column letters)."),
         ("Long rules are cut off in the sheet",
          "Audiences",
          "Excel cannot hold more than 32,767 characters in a cell. A rule "
@@ -3319,6 +3597,12 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "base audience. 'Why this score' spells out the points. The fix for "
          "a RED is usually to shorten the lookback, or move the sum / count "
          "upstream into a computed attribute and test that instead."),
+        ("How the complexity score is worked out",
+         "Audiences",
+         f"{audience_complexity.formula_text()} RED is "
+         f"{audience_complexity.RAG_RED} or more, AMBER "
+         f"{audience_complexity.RAG_AMBER} or more, otherwise GREEN. The "
+         "weights are a first cut: argue with them."),
         ("Not every audience has a rule",
          "Audiences",
          "Only Origin=AEPSegments audiences are rule-based. Uploads, Data "
@@ -3342,6 +3626,14 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "all tabs",
          "Click any header arrow to filter. The header row stays put as you "
          "scroll."),
+        ("Some columns are folded away",
+         "all tabs",
+         "Ids and other technical columns are tucked out of sight. A small + "
+         "above the column letters opens them; - closes them again."),
+        ("Blue underlined names are links",
+         "Field Index / Schemas",
+         "Click a name in the Tab column to jump to that schema's tab. Every "
+         "schema tab has '← All schemas' at the top to come back."),
         ("PII is obfuscated",
          "sample values",
          "In the TOP-10 sample values, email addresses and identifier / contact "
@@ -3374,7 +3666,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             b.font = Font(color="1F4E78")
         for cell in (a, b, c_):
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-        hu.row_dimensions[rr].height = 30 if right else 18
+        # Tall enough for every word: a fixed 30 points cut most of them off.
+        hu.row_dimensions[rr].height = (15 * max(
+            _wrapped_lines(left, 34 * 0.9), _wrapped_lines(mid, 18),
+            _wrapped_lines(_tidy_text(right), 86 * 1.05)) + 4) if right else 18
         rr += 1
     autofit(hu, [34, 18, 86])
     hu._dd_table = None          # prose, not a table -- no filter dropdowns
@@ -3395,7 +3690,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     # ---- Master Field Index (every field across all schemas, for lookup) ----
     fi = wb.create_sheet("Field Index")
     confidential(fi)
-    fi["A2"] = f"Field Index  -  {label}"
+    fi["A2"] = f"Field Index – {label}"
     fi["A2"].font = title_font
     fi["A3"] = ("Every field across all schemas. Look up an exact dot-notation "
                 "path (Ctrl-F); the Tab column says which sheet it lives on. "
@@ -3439,10 +3734,16 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             cc.number_format = '0"%"'
         fi.cell(ridx, 11, top)
         put_history(fi, ridx, 12, h)
-        fi.cell(ridx, len(fi_cols), sql)
+        fi.cell(ridx, len(fi_cols), sql).font = sql_font
         ridx += 1
     autofit(fi, [52, 18, 28, 40, 50, 20, 38, 34, 24, 11, 60]
             + (hist_widths if any_hist else []) + [sql_width])
+    # What each run of columns is for, on the row above the header.
+    _band(fi, hr - 1, 1, 9, BAND_FIELD)
+    _band(fi, hr - 1, 10, 11, BAND_DATA)
+    if any_hist:
+        _band(fi, hr - 1, 12, 11 + len(hist_cols), BAND_HISTORY)
+    _band(fi, hr - 1, len(fi_cols), len(fi_cols), BAND_SQL)
 
     # ---- Field History (BETA): the heartbeat as numbers, month by month -----
     if any_hist:
@@ -3450,7 +3751,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         fh = wb.create_sheet("Field History")
         fh.sheet_properties.tabColor = "6E3FA3"
         confidential(fh)
-        fh["A2"] = f"Field History (BETA)  -  {label}"
+        fh["A2"] = f"Field History (BETA) – {label}"
         fh["A2"].font = title_font
         fh["A3"] = ("How far back each field's data goes. Each month column is "
                     "the % of sampled records carrying the field: blank = no "
@@ -3507,7 +3808,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     for res, k, name in tabbed:
         row = [name, res["title"], k["title"], k.get("description", ""),
                k["class"], k.get("kind"),
-               "Y" if k.get("profile_enabled") else "N", k["datasets"],
+               "Yes" if k.get("profile_enabled") else "No", k["datasets"],
                k.get("lake_gb"), k.get("lake_rows"), k.get("lake_ttl_days"),
                k.get("profile_gb"), k.get("profile_ttl_days"),
                _sql_table_names(k), k["n_fields"], k["n_identities"],
@@ -3528,7 +3829,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     # FROM -- distinct from the friendly dataset name shown in the UI.
     dt = wb.create_sheet("Datasets")
     confidential(dt)
-    dt["A2"] = f"Datasets / SQL table names  -  {label}"
+    dt["A2"] = f"Datasets / SQL table names – {label}"
     dt["A2"].font = title_font
     dt["A3"] = ("Every dataset and its AEP Query Service table name. SQL uses the "
                 "SYSTEM table name, not the friendly name: SELECT ... FROM "
@@ -3588,7 +3889,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     dr = wb.create_sheet("Dropped Schemas")
     dr.sheet_state = "hidden"
     confidential(dr)
-    dr["A2"] = f"Dropped schemas  -  {label}"
+    dr["A2"] = f"Dropped schemas – {label}"
     dr["A2"].font = title_font
     dr["A3"] = ("Every schema the filters left out of this workbook, and why. "
                 "Rows with datasets come first: those hold data, so if a table "
@@ -3597,7 +3898,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 "(Filtering).")
     dr["A3"].font = Font(italic=True, color="666666")
     DROPPED_COLUMNS = ["Sandbox", "Schema", "Drop reason", "Why",
-                       "Datasets", "SQL table name(s)", "Fields", "Class",
+                       "Datasets", "SQL table names", "Fields", "Class",
                        "Behaviour", "Last Modified", "Schema $id"]
     hr = 5
     for c, nm in enumerate(DROPPED_COLUMNS, 1):
@@ -3627,7 +3928,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     dfi = wb.create_sheet("Dropped Field Index")
     dfi.sheet_state = "hidden"
     confidential(dfi)
-    dfi["A2"] = f"Dropped Field Index  -  {label}"
+    dfi["A2"] = f"Dropped Field Index – {label}"
     dfi["A2"].font = title_font
     dfi["A3"] = ("Every field of every schema left out of this workbook (see "
                  "Dropped Schemas for why). An inventory only: dot-notation "
@@ -3637,7 +3938,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     dfi["A3"].font = Font(italic=True, color="666666")
     DROPPED_FIELD_COLUMNS = ["Field (dot notation)", "Data Type",
                              "Friendly Name", "Schema", "Drop reason",
-                             "Datasets", "SQL table name(s)", "Sandbox"]
+                             "Datasets", "SQL table names", "Sandbox"]
     hr = 5
     for c, nm in enumerate(DROPPED_FIELD_COLUMNS, 1):
         dfi.cell(hr, c, nm)
@@ -3669,28 +3970,14 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     if aud_rows or aud_incomplete:
         at = wb.create_sheet("Audiences")
         confidential(at)
-        at["A2"] = f"Audiences / segments  -  {label}"
+        at["A2"] = f"Audiences / segments – {label}"
         at["A2"].font = title_font
-        note = ("Every audience in the sandbox, with its tags, who created and "
-                "last changed it, and its segmentation rule. PQL is rendered "
-                "from Adobe's syntax tree: rows marked 'partial' contain an "
-                "event-sequence or time-window clause shown as <...> -- the raw "
-                "column holds the complete definition. Only Origin=AEPSegments "
-                "audiences have a rule at all. Excel cuts a cell at 32,767 "
-                "characters: a rule longer than that is marked 'yes' under "
-                "'PQL truncated in sheet' and ends with "
-                f"'{PQL_TRUNCATED_MARK}' -- the full text of EVERY rule is in "
-                "the pql/audiences_pql_<sandbox>_<date>.jsonl file in the folder "
-                "next to this workbook. 'PQL format' is json (Adobe's syntax tree) or "
-                "pql-text (complete, but not JSON). COMPLEXITY (beta): a 0-100 "
-                "score of how much work the audience costs the nightly batch "
-                "run, read off its definition -- event scans and how far back "
-                "they look, joins to other classes (products via gtin), "
-                "aggregations (sum / count / 'occurs N times'), the size of "
-                "the base audience it depends on, sequences, condition count. "
-                f"RED >= {audience_complexity.RAG_RED}, AMBER >= "
-                f"{audience_complexity.RAG_AMBER}, else GREEN. 'Why this score' "
-                "shows the points. Weights are a first cut: argue with them.")
+        # Two short lines: everything above the header stays frozen on screen,
+        # so the long explanations live on How to Use (v3.4.22).
+        note = ("Every audience in the sandbox: its tags, who made and last "
+                "changed it, its rule in plain-ish text, and a 0-100 complexity "
+                "score of what it costs the nightly run (RED / AMBER / GREEN; "
+                "'Why this score' gives the points).")
         if aud_incomplete:
             note += (f"  WARNING: the listing was INCOMPLETE for "
                      f"{', '.join(aud_incomplete)} -- those counts understate "
@@ -3698,13 +3985,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         at["A3"] = note
         at["A3"].font = Font(italic=True,
                              color="C00000" if aud_incomplete else "666666")
-        # The complexity formula, in full, right above the columns it feeds --
-        # generated from the weights in audience_complexity.py.
-        at["A4"] = audience_complexity.formula_text()
-        at["A4"].font = Font(bold=True, color="1F4E78")
-        at["A4"].alignment = Alignment(wrap_text=True, vertical="top")
-        at.merge_cells("A4:T4")
-        at.row_dimensions[4].height = 92
+        at["A4"] = ("How the score is worked out, partly shown rules, and where "
+                    "the full text of a very long rule is: see the How to Use tab.")
+        at["A4"].font = Font(italic=True, color="1F4E78")
+        sb_title = {res["name"]: res["title"] for res in results}
         AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Description",
                             "Audience id",
                             "Evaluation", "Lifecycle", "Tags", "Tag count",
@@ -3731,6 +4015,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                           key=lambda r: (0 if r[6] else 1, 0 if r[11] else 1,
                                          str(r[1]).lower())):
             for c, val in enumerate(row, 1):
+                if c == 1:           # 'ROI Prod', as on every other tab
+                    val = sb_title.get(val, val)
+                elif c == 12:
+                    val = _pql_for_people(val)
                 cell = at.cell(rr, c, val)
                 if c == 16 and val == "yes":
                     cell.font = Font(bold=True, color="C00000")
@@ -3758,13 +4046,13 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         snap_rows, snap_unreadable, snap_sandboxes = snapshots
         snapshot_tables.add_sheets(
             wb, snap_rows, snap_unreadable, snap_sandboxes,
-            title=f"Snapshot tables  -  {label}",
+            title=f"Snapshot tables – {label}",
             scope="each sandbox in this workbook")
 
     # ---- Overlap tabs: which route profiles arrived by, and what a cut saves -
     # Folded in from overlap_report.py, which owns the layout.
     if overlaps:
-        book = Book(f"Data Dictionary v{SCRIPT_VERSION}  -  {label}", wb=wb)
+        book = Book(f"Data Dictionary v{SCRIPT_VERSION} – {label}", wb=wb)
         for sb_name, ov in overlaps.items():
             suffix = sb_name if len(overlaps) > 1 else ""
             overlap_report.add_sheets(book, ov["rows"], ov["report_dt"], sb_name,
@@ -3784,32 +4072,34 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         dd = k.get("datadict")
         sheet["A2"] = k["title"]
         sheet["A2"].font = title_font
-        a3 = (f'{k["class"]}   |   {k["datasets"]} dataset(s)   |   '
-              f'{k["n_fields"]} fields   |   {k["n_identities"]} identity'
-              f'   |   {k["n_relationships"]} relationship'
-              f'   |   modified {k["last_mod"]}   |   sandbox: {res["title"]}')
+        a3 = "  ·  ".join([
+            k["class"], _plural(k["datasets"], "dataset"),
+            _plural(k["n_fields"], "field"), _plural(k["n_identities"], "identity",
+                                                      "identities"),
+            _plural(k["n_relationships"], "relationship"),
+            f'changed {k["last_mod"]}', res["title"]])
         if dd:
-            a3 += f'   |   data dictionary: sampled {k.get("dd_rows", 0)} records'
+            a3 += f'  ·  coverage from {k.get("dd_rows", 0):,} sampled records'
             if k.get("dd_source"):
-                a3 += f'   |   source: {k["dd_source"]}'
+                a3 += f' ({k["dd_source"]})'
         hist = k.get("history")
         if hist or k.get("history_note"):
             srcs, skipped = k.get("history_sources") or [], k.get("history_skipped") or []
-            a3 += (f'   |   history (BETA): {len(srcs)} dataset(s)'
+            a3 += (f'  ·  history (beta) from {_plural(len(srcs), "dataset")}'
                    + (f', {len(skipped)} test/temp left out' if skipped else ''))
             if k.get("history_backfill"):
                 a3 += (f' -- backfill seen: events dated back to '
                        f'{k["history_backfill"]} were loaded later, and history '
                        f'goes by load month')
             if k.get("history_note"):
-                a3 += f'   |   /!\\ HISTORY {k["history_note"]}'
+                a3 += f'  ·  ⚠ history: {k["history_note"]}'
         # Loud flag when coverage is missing/partial so this tab is never read as
         # gospel: data exists but couldn't be sampled, or only some batches read.
         a3_color = "666666"
         if any_dd:
-            code, label = _coverage_status(k)
+            code, status = _coverage_status(k)
             if code != "ok":
-                a3 += f'   |   /!\\ COVERAGE {label}'
+                a3 += f'  ·  ⚠ coverage: {status}'
                 if code in ("unreadable", "partial"):
                     a3_color = "C00000"
         sheet["A3"] = a3
@@ -3820,13 +4110,14 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         # every tab.
         sheet["A4"] = k.get("description") or ""
         sheet["A4"].font = Font(italic=True, color="444444")
-        sheet["A5"] = k["id"]
-        sheet["A5"].font = Font(italic=True, color="999999", size=9)
+        # The way back; the schema's id is on the Schemas tab.
+        sheet["A5"] = "← All schemas"
+        _sheet_link(sheet["A5"], "Schemas")
         # SQL table (system) name(s) for this schema's dataset(s) -- the FROM
         # target(s), right next to the field list so a query can be formed here.
         tnames = _sql_table_names(k)
         if tnames:
-            sheet["A6"] = f"SQL table name(s):  {tnames}"
+            sheet["A6"] = f"SQL table {'names' if ',' in tnames else 'name'}:  {tnames}"
             sheet["A6"].font = Font(italic=True, bold=True, color="C55A11")
 
         cols = list(SCHEMA_FIELD_COLUMNS)
@@ -3859,11 +4150,18 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 sheet.cell(ridx, 10, info.get("top"))
             if hist:
                 put_history(sheet, ridx, hist_at, hist.get(fpath))
-            sheet.cell(ridx, len(cols), _sql_check(k, fpath, dtype, snap, sql_since))
+            sheet.cell(ridx, len(cols),
+                       _sql_check(k, fpath, dtype, snap, sql_since)).font = sql_font
             ridx += 1
         autofit(sheet, [50, 20, 28, 40, 50, 9, 22, 42]
                 + ([11, 70] if dd else [])
                 + (hist_widths if hist else []) + [sql_width])
+        # Bands over the right-hand groups; row 6 starts with the table names.
+        if dd:
+            _band(sheet, hr - 1, 9, 10, BAND_DATA)
+        if hist:
+            _band(sheet, hr - 1, hist_at, hist_at + len(hist_cols) - 1, BAND_HISTORY)
+        _band(sheet, hr - 1, len(cols), len(cols), BAND_SQL)
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship
@@ -3876,6 +4174,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         if sheet.max_row > hrow:
             sheet.auto_filter.ref = (f"A{hrow}:"
                                      f"{get_column_letter(ncols)}{sheet.max_row}")
+    _polish_workbook(wb)
 
     archived = _archive_previous(OUTPUT_DIR, safe_client)
     if archived:
@@ -4819,12 +5118,12 @@ def add_field_history(token, conf, results, scope, n_months=HISTORY_MONTHS):
                 name = d.get("table") or d.get("name")
                 if po:
                     written = sum(m.get("profile_records") or 0 for m in po)
-                    notes.append(f"{name}: {len(po)} month(s) loaded to Profile only "
-                                 f"({written:,} records written to Profile), with no "
-                                 f"data-lake copy to check (shown as ?)")
+                    notes.append(f"{name}: {_plural(len(po), 'month')} loaded to Profile "
+                                 f"only ({written:,} records written to Profile), with "
+                                 f"no data-lake copy to check (shown as ?)")
                 if empty:
-                    notes.append(f"{name}: {empty} month(s) whose data-lake files hold "
-                                 f"no rows (shown as ?)")
+                    notes.append(f"{name}: {_plural(empty, 'month')} whose data-lake "
+                                 f"files hold no rows (shown as ?)")
             if notes:
                 k["history_note"] = "; ".join(notes)
             k["history"] = schema_history(k, [r for r, _ in got],

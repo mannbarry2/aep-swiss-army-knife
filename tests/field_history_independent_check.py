@@ -164,12 +164,16 @@ def main():
     wb = load_workbook(wb_path, read_only=True)
     rows = list(wb["Field Index"].iter_rows(min_row=5, values_only=True))
     ix = {h: i for i, h in enumerate(rows[0])}
-    full = [r for r in rows[1:] if str(r[ix["Profile detail (BETA)"]] or "").startswith("all ")]
+    # v3.4.22 dropped '(BETA)' from the column names; older workbooks have it.
+    pdet = ix.get("Profile detail", ix.get("Profile detail (BETA)"))
+    pdays = ix.get("In Profile now (days)", ix.get("In Profile now (days, BETA)"))
+    full = [r for r in rows[1:] if str(r[pdet] or "").startswith("all ")]
     now = datetime.now(timezone.utc)
     for r in random.sample(full, min(limit or 10, len(full))):
-        path, days = r[0], int(r[ix["In Profile now (days, BETA)"]] or 0)
+        path, days = r[0], int(r[pdays] or 0)
         labs = sorted({f"{now - timedelta(days=d):%Y-%m}" for d in range(0, days + 1, 5)})
-        tables = [t.strip() for t in str(r[ix["SQL table name(s)"]] or "").split(",")]
+        tables = [t.strip() for t in str(r[ix.get("SQL table names", ix.get("SQL table name(s)"))]
+                                         or "").split(",")]
         proof = None
         for d in (by_table[t] for t in tables if t in by_table):
             if not (str(d.get("profile") or "").startswith("Profile")

@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 25, 2026 · **Latest version:** v3.4.21 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 25, 2026 · **Latest version:** v3.4.22 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,7 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
-| [October 25, 2026](#october-25-2026) | v3.4.20 – v3.4.21 | Field history reads a month's biggest batch first, as it was meant to; SQL to check any field by hand |
+| [October 25, 2026](#october-25-2026) | v3.4.20 – v3.4.22 | Field history reads a month's biggest batch first, as it was meant to; SQL to check any field by hand; a workbook tidied for readers outside AEP |
 | [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.19 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see; no false "empty" coverage |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
@@ -34,12 +34,31 @@
 
 ## October 25, 2026
 
-**Release date: October 25, 2026** · v3.4.20 – v3.4.21
+**Release date: October 25, 2026** · v3.4.20 – v3.4.22
 
 New features and updates to existing features in the Data Dictionary:
 
 - **Field history:** a month is read from its biggest batch first, as the notes for v3.4.17 said it was (beta).
 - **Check by hand:** every field carries a Query Service statement, ready to paste, that shows the operator the data for themselves.
+- **Workbook:** tidied for readers who do not work in AEP -- widths, row heights, wording and colour.
+
+### Workbook
+
+The dictionary goes to people outside the AEP team, and finding your way
+round it took a training video. This release is about reading it.
+
+**Fixes and improvements**
+
+| Fix | Description |
+| --- | --- |
+| Tidied on every tab ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.22` | A finishing pass runs over every tab before the workbook is saved: column widths fitted to their content, header rows tall enough for their words, descriptions wrapped with their rows grown to fit, long notes wrapped instead of running off the screen, thousands separators, and proper dashes and arrows for the old `--` and `->`. |
+| Column groups ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.22` | On the Field Index and every schema tab, a coloured band above the header names each group of columns: *The field*, *In the data now*, *How far back it goes (beta)*, *Check it yourself*. "(BETA)" is said once, in its band, instead of on every column. |
+| Colour that means something ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.22` | Coverage % runs from red through yellow to green; months of history and days in Profile shade deeper the more there are. |
+| Technical columns folded away ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.22` | Ids, the raw rule text and other columns only an engineer needs are tucked behind a **+** above the column letters, one click from view. |
+| Links between tabs ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.22` | A schema's name in a Tab column jumps to its tab; every schema tab has *← All schemas* at the top. |
+| Tab titles ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.22` | Every tab title after the Summary ended with one schema's coverage status (*Field Index – empty -- no records…*). |
+| How to Use cut short ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.22` | Its rows were a fixed 30 points high, which cut most explanations off after two lines. Each row is now as tall as its text. |
+| Plainer words ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.22` | Custom classes show their names, not a 48-character code; Adobe's placeholder *Description for furnished object* shows blank; Yes / No for Y / N; "3 datasets", not "3 dataset(s)"; the Audiences tab names sandboxes as every other tab does, and its rules drop the `[PARTIAL: …]` and `<…: see raw>` markers for […]. The Summary no longer freezes its first 13 rows, and the Audiences tab's long notes move to How to Use. |
 
 ### Check by hand
 
