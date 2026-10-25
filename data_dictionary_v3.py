@@ -87,6 +87,18 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.20 -- Field history reads a month's biggest batch, as it says it does.
+The first full prod run (2026-10-24) called 150 dataset-months "data-lake files
+empty"; the independent check found rows in 4 of the 60 it re-read. The
+"biggest first" step took the month's 100 biggest batches and then read the
+four nearest their MEDIAN size -- on roi-prod that is close to the biggest; on
+prod, where a profile dataset's month holds ~2,400 batches, it was a few
+hundred records: small loads whose lake files are empty, while the daily load
+of 34.5 million records at the top of the list was never tried. Now the
+biggest are read biggest first. Cache v5: a v4 cache keeps its months except
+the "data-lake files empty" ones, which are read again -- the only verdict the
+order could change.
+
 v3.4.19 -- Coverage (--data-dict) no longer calls a Profile-loaded schema
 "genuinely not populated". It read a dataset's newest 20 batches only; when
 those were all Profile-side or empty (Marketplace Order Event on roi-prod, with
@@ -325,8 +337,8 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.19"
-SCRIPT_DATE    = "2026-10-24"
+SCRIPT_VERSION = "3.4.20"
+SCRIPT_DATE    = "2026-10-25"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -467,7 +479,9 @@ HISTORY_PROFILE_DAYS = 90
 # 3 (v3.4.17): v2 could call a month of 1,000+ batches 'Profile only' when its
 # few readable ones sat past page 5 -- re-read with the biggest-first query.
 # 4 (v3.4.18): months are read from two batches, not one -- re-read.
-HISTORY_CACHE_VERSION = 4
+# 5 (v3.4.20): v4 read the 'biggest' batches nearest their median size, so its
+# "data-lake files empty" months are read again; its other months stand.
+HISTORY_CACHE_VERSION = 5
 # A finished month's batches never change, so each one is cached and a later run
 # reads only the current month. Kept beside the repo: a working file, not a
 # deliverable, so never under AEP_OUTPUT_DIR.
@@ -4173,15 +4187,19 @@ def _history_sample(headers, dsid, a, b, paths, rec=None, whole_month=True):
 
     # 1. Biggest first: Catalog sorts on the record count, so a month of 1,480
     # batches with 3 readable ones (semi-smart coupons, roi-prod, March 2026)
-    # shows them in one call.
+    # shows them in one call. Read in THAT order, not the typical order: on
+    # prod a profile dataset's month has ~2,400 batches, the median of the
+    # biggest 100 is a few hundred records with empty lake files, and the daily
+    # load at the top is the one with rows (v3.4.20).
     try:
         top = in_window(_history_batches(headers, dsid,
                                          win + "&orderBy=desc:metrics.outputRecordCount"))
     except Exception as e:
         logger.debug(f"      history: biggest-first list {dsid} {a:%Y-%m-%d} failed ({e})")
         top = []
-    big = [kv for kv in _typical_batches(top, set(rec["batches"]))
-           if _batch_record_count(kv[1]) > 0][:HISTORY_TRIES]
+    big = sorted((kv for kv in _typical_batches(top, set(rec["batches"]))
+                  if _batch_record_count(kv[1]) > 0),
+                 key=lambda kv: -_batch_record_count(kv[1]))[:HISTORY_TRIES]
     got_big = bool(big) and _history_read_into(rec, headers, big, paths)
     # 2. Newest first, page by page: the batches a count cannot rank -- those
     # without one (some JSON loads), and the ones it overstates: on roi-prod a
@@ -4373,9 +4391,13 @@ def _history_cache_load(sandbox: str, dsid: str) -> dict:
         d = json.loads(_history_cache_file(sandbox, dsid).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    if d.get("v") != HISTORY_CACHE_VERSION or d.get("rows") != HISTORY_ROWS:
+    if d.get("v") not in (4, HISTORY_CACHE_VERSION) or d.get("rows") != HISTORY_ROWS:
         return {}
-    return d.get("months") or {}
+    months = d.get("months") or {}
+    if d["v"] == 4:
+        months = {lab: r for lab, r in months.items()
+                  if r.get("why") != "data-lake files empty"}
+    return months
 
 
 def _history_cache_save(sandbox: str, dsid: str, months: dict, current: str):

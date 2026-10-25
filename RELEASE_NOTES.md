@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 24, 2026 · **Latest version:** v3.4.19 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 25, 2026 · **Latest version:** v3.4.20 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,6 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
+| [October 25, 2026](#october-25-2026) | v3.4.20 | Field history reads a month's biggest batch first, as it was meant to |
 | [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.19 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see; no false "empty" coverage |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
@@ -28,6 +29,36 @@
 | [August 14, 2026](#august-14-2026) | v3.4.0 – v3.4.1 | Complete Profile coverage; credential name gone from the workbook |
 | [August 13, 2026](#august-13-2026) | v3.3.0 | Audiences tab; provenance line; How to Use tab |
 | [Earlier releases](#earlier-releases) | v3.0.0 – v3.2.0 | The baseline; Profile coverage; SQL table names |
+
+---
+
+## October 25, 2026
+
+**Release date: October 25, 2026** · v3.4.20
+
+New features and updates to existing features in the Data Dictionary:
+
+- **Field history:** a month is read from its biggest batch first, as the notes for v3.4.17 said it was (beta).
+
+### Field history
+
+The first full run on UK prod called 150 dataset-months *data-lake files
+empty*. The independent check re-read 60 of them and found rows in 4. The
+"biggest first" step asked Catalog for a month's 100 biggest batches -- and then
+read the four nearest their **median** size. On ROI prod that is close to the
+biggest. On UK prod a profile dataset's month holds about 2,400 batches, and
+the median of its biggest 100 is a few hundred records: small loads whose
+data-lake files are empty, while the daily load of 34.5 million records at the
+top of the list was never tried.
+
+**Fixes and improvements**
+
+| Fix | Description |
+| --- | --- |
+| Biggest batch first ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.20` | The biggest batches of a month are now read biggest first. The typical newer batch read beside it is unchanged. |
+| Only the doubtful months re-read ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.20` | The order could change only a *data-lake files empty* verdict, so a cache written by v3.4.18 – v3.4.19 keeps every other month and reads just those again: minutes, not the hours of a cold run. |
+
+For more information, read the [README](README.md).
 
 ---
 

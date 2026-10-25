@@ -98,4 +98,17 @@ import json  # noqa: E402
 kept = sorted(json.loads(saved["t"])["months"])
 check(f"cache keeps Profile-only + sampled, not the 504 or current month -> {kept}",
       kept == ["2026-01", "2026-03"])
+
+# v3.4.20: a v4 cache stands except its "data-lake files empty" months; older ones go.
+import tempfile  # noqa: E402
+tmp = Path(tempfile.mkdtemp()) / "ds.json"
+dd._history_cache_file = lambda sb, ds: tmp
+v4_months = dict(months, **{"2026-04": {"state": "unsure", "why": "data-lake files empty",
+                                        "batches": ["e"]}})
+for v, want in [(4, ["2026-01", "2026-02", "2026-03", "2026-10"]),
+                (dd.HISTORY_CACHE_VERSION, sorted(v4_months)), (3, [])]:
+    tmp.write_text(json.dumps({"v": v, "rows": dd.HISTORY_ROWS, "months": v4_months}),
+                   encoding="utf-8")
+    got = sorted(dd._history_cache_load("prod", "ds"))
+    check(f"cache v{v} loads {got}", got == want)
 print(f"\n{sum(results)}/{len(results)} passed")

@@ -108,6 +108,14 @@ rec = run([[("big", LAKE5), ("new", JSONQ)]],
 check("biggest + one newer batch: fields counted across both",
       reads == ["big", "new"] and rec["rows"] == 9 and set(rec["fields"]) == {"a.b", "c.d"},
       f"reads={reads} rows={rec['rows']} fields={rec['fields']}")
+# The prod profile dataset, June 2025 (v3.4.20): one daily load of 34.5M records
+# among ~2,400 small loads whose lake files are empty. The median of the biggest
+# 100 is a few hundred -- the daily load must be read first, not last.
+DAILY = {"created": mid, "metrics": {"outputRecordCount": 34_508_208, "inputFileCount": 39}}
+SMALL = {"created": mid, "metrics": {"outputRecordCount": 350, "inputFileCount": 1}}
+rec = run([[("daily", DAILY)] + full(SMALL, 99, "s")], lambda bid: 5 if bid == "daily" else 0)
+check("one huge daily load among 99 small empty ones -> the daily load is read first",
+      rec["state"] == "sampled" and reads[0] == "daily", f"reads={reads[:5]} state={rec['state']}")
 
 # 'In Profile now'
 ev90 = {"table": "returns", "profile": "Profile-enabled", "profile_ttl_days": 90}
