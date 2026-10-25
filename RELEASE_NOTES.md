@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 25, 2026 · **Latest version:** v3.4.20 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 25, 2026 · **Latest version:** v3.4.21 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,7 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
-| [October 25, 2026](#october-25-2026) | v3.4.20 | Field history reads a month's biggest batch first, as it was meant to |
+| [October 25, 2026](#october-25-2026) | v3.4.20 – v3.4.21 | Field history reads a month's biggest batch first, as it was meant to; SQL to check any field by hand |
 | [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.19 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see; no false "empty" coverage |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
 | [October 22, 2026](#october-22-2026) | v3.4.12 – v3.4.13 | "Have we got it?" field history (beta); top 10 values with PII starred |
@@ -34,11 +34,24 @@
 
 ## October 25, 2026
 
-**Release date: October 25, 2026** · v3.4.20
+**Release date: October 25, 2026** · v3.4.20 – v3.4.21
 
 New features and updates to existing features in the Data Dictionary:
 
 - **Field history:** a month is read from its biggest batch first, as the notes for v3.4.17 said it was (beta).
+- **Check by hand:** every field carries a Query Service statement, ready to paste, that shows the operator the data for themselves.
+
+### Check by hand
+
+The dictionary's coverage and history come from sampling batches. Whoever runs
+it sometimes needs to see the data directly -- to confirm a surprising figure,
+or to answer a question the sample cannot.
+
+**New features**
+
+| Feature | Description |
+| --- | --- |
+| Check by hand (SQL) ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.21` | The last column of the Field Index and every schema tab: one read-only Query Service statement for the field, on one line so it pastes cleanly out of Excel. For an **event** field it counts records, records carrying the field and the % filled per event month in each of the schema's tables; for a **Profile record** field, the same across the default merge policy's Profile snapshot table -- what an audience sees now; for a **lookup** or other record data, across each table's records in the data lake. Arrays are searched with `exists()`, so `products[].gtin` means "some product has a GTIN". Each statement is labelled `/* Data Dictionary: … */` for the Query Service log. |
 
 ### Field history
 

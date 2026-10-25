@@ -907,3 +907,24 @@ sandbox is long — hours on a big one — and later runs read the current month
 python data_dictionary_v3.py "acme k" --sandbox=prod --data-dict --history
 python data_dictionary_v3.py "acme k" --sandbox=prod --history=order --history-months=36
 ```
+
+### Check by hand (SQL)
+
+The last column of the Field Index and every schema tab, **Check by hand
+(SQL)**, holds one read-only Query Service statement for that field, on one line,
+ready to copy into the Query Service editor and run (v3.4.21). It reads the data
+itself, not through the dictionary's batch sampling, so it is the way to confirm
+or question any coverage or history figure:
+
+- **event fields** — records, records carrying the field, and the % filled,
+  per *event* month (`timestamp`) in each of the schema's dataset tables, from
+  the start of the history window;
+- **Profile record fields** (a Profile-enabled XDM Individual Profile schema) —
+  the same three numbers across the default merge policy's Profile snapshot
+  table: what an audience sees now;
+- **anything else** (lookups, record data not in Profile) — the three numbers
+  across all of each table's records in the data lake; a record has no date.
+
+Each statement opens with a `/* Data Dictionary: … */` comment, so whoever reads
+the Query Service log can see what it was. On a very large event table, shorten
+the window (the `timestamp >=` date) if Query Service times out.

@@ -87,6 +87,16 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.21 -- Check by hand (SQL). The last column of the Field Index and every
+schema tab holds one read-only Query Service statement for the field, on one
+line so it pastes cleanly out of Excel, labelled /* Data Dictionary: ... */:
+for an event field, records and records carrying it per event month in each
+of the schema's tables; for a Profile record field, the same across the
+default merge policy's Profile snapshot table (what an audience sees now); for
+anything else, across each table's records in the lake (a record has no date).
+It reads the data itself, not through the batch sampling, so the operator can
+confirm or question any coverage or history figure.
+
 v3.4.20 -- Field history reads a month's biggest batch, as it says it does.
 The first full prod run (2026-10-24) called 150 dataset-months "data-lake files
 empty"; the independent check found rows in 4 of the 60 it re-read. The
@@ -337,7 +347,7 @@ from house_xlsx import Book
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.20"
+SCRIPT_VERSION = "3.4.21"
 SCRIPT_DATE    = "2026-10-25"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -2236,6 +2246,64 @@ def _sql_table_names(k) -> str:
     return ", ".join(sys_nm for _, sys_nm, _ in (k.get("tables") or []) if sys_nm)
 
 
+def _sql_has_value(path: str, dtype: str) -> str:
+    """Query Service (Spark SQL) condition: the record holds a value at `path`.
+    '[]' marks an array, as in the dictionary's paths, and an array of objects
+    is searched with exists(): a.b[].c reads 'some b has a c'."""
+    def walk(expr, segs, depth):
+        for i, seg in enumerate(segs):
+            name = seg[:-2] if seg.endswith("[]") else seg
+            expr = f"{expr}.{name}" if expr else name
+            if seg.endswith("[]"):
+                if i == len(segs) - 1:
+                    return f"size({expr}) > 0"
+                v = f"x{depth + 1}"
+                return f"exists({expr}, {v} -> {walk(v, segs[i + 1:], depth + 1)})"
+        return (f"size({expr}) > 0" if dtype == "map" or str(dtype).startswith("array")
+                else f"{expr} IS NOT NULL")
+    return walk("", path.split("."), 0)
+
+
+def _sql_check(k, path: str, dtype: str, snapshot_table, since: str):
+    """'Check by hand (SQL)' (v3.4.21): one read-only Query Service statement
+    the operator can paste to see the field for themselves, on ONE line -- a
+    cell copied out of Excel with line breaks arrives wrapped in quotes.
+      event          records, and records carrying the field, per event month
+                     in each of the schema's tables, from `since`
+      Profile record the same across the default merge policy's Profile
+                     snapshot table: what an audience sees now
+      anything else  the same across each table's records in the data lake --
+                     a record has no date
+    None when the schema has no table to ask."""
+    tables = [t for _, t, _ in (k.get("tables") or []) if t]
+    has = f"SUM(CASE WHEN {_sql_has_value(path, dtype)} THEN 1 ELSE 0 END)"
+    pct = "ROUND(100.0 * with_field / records, 1) AS pct"
+
+    def tag(what):
+        return (f"/* Data Dictionary: {path} -- {what} (read-only) -- "
+                f"{SCRIPT_NAME}.py v{SCRIPT_VERSION} */ ")
+    if k.get("kind") == KIND_LABEL["event"] and tables:
+        union = " UNION ALL ".join(
+            f"SELECT '{t}' AS dataset, date_format(timestamp, 'yyyy-MM') AS month, "
+            f"COUNT(1) AS records, {has} AS with_field FROM {t} "
+            f"WHERE timestamp >= '{since}' GROUP BY 1, 2" for t in tables)
+        return (tag("by event month in the data lake")
+                + f"SELECT dataset, month, records, with_field, {pct} FROM ({union}) t "
+                  f"ORDER BY dataset, month")
+    if k.get("kind") == KIND_LABEL["profile"] and k.get("profile_enabled") and snapshot_table:
+        return (tag("in Profile now, default merge policy snapshot")
+                + f"SELECT records, with_field, {pct} FROM (SELECT COUNT(1) AS records, "
+                  f"{has} AS with_field FROM {snapshot_table}) t")
+    if tables:
+        union = " UNION ALL ".join(
+            f"SELECT '{t}' AS dataset, COUNT(1) AS records, {has} AS with_field FROM {t}"
+            for t in tables)
+        return (tag("records in the data lake, all dates")
+                + f"SELECT dataset, records, with_field, {pct} FROM ({union}) t "
+                  f"ORDER BY dataset")
+    return None
+
+
 def _coverage_status(k):
     """(code, label) describing whether --data-dict coverage is trustworthy for a
     kept schema. So a partial/missing dictionary is never mistaken for gospel:
@@ -2887,6 +2955,14 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                  if hist_labels else [])
     hist_widths = [13, 46, 12, 46, len(hist_labels) + 4]
     spark_font = Font(name="Consolas")
+    # Check by hand (v3.4.21): the last column of the Field Index and every
+    # schema tab. A Profile record field is asked of the default merge policy's
+    # snapshot table; an event field from the start of the history window.
+    snap_table = {r["sandbox"]: r["table_name"] for r in (snapshots[0] if snapshots else [])
+                  if r.get("correct")
+                  and str(r.get("table_name") or "").startswith("profile_snapshot_export")}
+    sql_since = f"{(hist_labels or [_history_months(HISTORY_MONTHS)[0][0]])[0]}-01"
+    sql_col, sql_width = "Check by hand (SQL, BETA)", 60
 
     def put_history(ws, row, col, h):
         """Write one field's five history cells from column `col`."""
@@ -3200,6 +3276,17 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "goes. Datasets with no Profile expiry keep everything. Some datasets "
          "load to Profile only, with no data-lake copy to check; their months "
          "show ? and the schema tab says how many records Profile received."),
+        ("Check any field yourself (SQL, BETA)",
+         "Field Index / schema tabs, last column",
+         "One read-only Query Service statement per field, on one line: copy "
+         "the cell, paste it into the Query Service editor, run it. An event "
+         "field shows records and the % carrying the field per event month in "
+         "each dataset; a Profile record field shows the same across the "
+         "default merge policy's Profile snapshot -- what an audience sees "
+         "now; a lookup shows the same across all its records. It reads the "
+         "data directly, so it settles any doubt about a coverage or history "
+         "figure. On a very large event table, shorten the window (the "
+         "timestamp date) if Query Service times out."),
         ("MISSING is not the same as 0%",
          "Summary",
          "0% means we looked and the field was empty. MISSING means we could "
@@ -3317,7 +3404,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 "> Unhide).")
     fi["A3"].font = Font(italic=True, color="666666")
     hr = 5
-    fi_cols = FIELD_INDEX_COLUMNS + (hist_cols if any_hist else [])
+    fi_cols = FIELD_INDEX_COLUMNS + (hist_cols if any_hist else []) + [sql_col]
     for c, nm in enumerate(fi_cols, 1):
         fi.cell(hr, c, nm)
     style_header(fi, len(fi_cols), row=hr)
@@ -3326,15 +3413,17 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         dd = k.get("datadict") or {}
         hist = k.get("history") or {}
         tnames = _sql_table_names(k)
+        snap = snap_table.get(res.get("name"))
         for (fpath, dtype, friendly, fpath_t, desc, req, ident, rel) in k["fields"]:
             info = dd.get(fpath, {})
             index_rows.append((fpath, dtype, friendly, fpath_t, desc, ident,
                                k["title"], tnames, name, info.get("coverage"),
-                               info.get("top"), hist.get(fpath)))
+                               info.get("top"), hist.get(fpath),
+                               _sql_check(k, fpath, dtype, snap, sql_since)))
     index_rows.sort(key=lambda x: (x[0].lower(), x[6].lower()))
     ridx = hr + 1
     for (fpath, dtype, friendly, fpath_t, desc, ident, sch, tnames, tab, cov,
-         top, h) in index_rows:
+         top, h, sql) in index_rows:
         fi.cell(ridx, 1, fpath)
         fi.cell(ridx, 2, dtype)
         fi.cell(ridx, 3, friendly)
@@ -3350,9 +3439,10 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             cc.number_format = '0"%"'
         fi.cell(ridx, 11, top)
         put_history(fi, ridx, 12, h)
+        fi.cell(ridx, len(fi_cols), sql)
         ridx += 1
     autofit(fi, [52, 18, 28, 40, 50, 20, 38, 34, 24, 11, 60]
-            + (hist_widths if any_hist else []))
+            + (hist_widths if any_hist else []) + [sql_width])
 
     # ---- Field History (BETA): the heartbeat as numbers, month by month -----
     if any_hist:
@@ -3379,7 +3469,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         none_fill = PatternFill("solid", fgColor="F2F2F2")
         first_m = 7
         ridx = hr + 1
-        for (fpath, _t, _f, _ft, _d, _i, sch, _tn, tab, _c, _top, h) in index_rows:
+        for (fpath, _t, _f, _ft, _d, _i, sch, _tn, tab, _c, _top, h, _sql) in index_rows:
             if not h:
                 continue
             fh.cell(ridx, 1, fpath)
@@ -3745,6 +3835,8 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         hist_at = len(cols) + 1
         if hist:
             cols += hist_cols
+        cols += [sql_col]
+        snap = snap_table.get(res.get("name"))
         hr = 7
         for c, nm in enumerate(cols, 1):
             sheet.cell(hr, c, nm)
@@ -3767,10 +3859,11 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 sheet.cell(ridx, 10, info.get("top"))
             if hist:
                 put_history(sheet, ridx, hist_at, hist.get(fpath))
+            sheet.cell(ridx, len(cols), _sql_check(k, fpath, dtype, snap, sql_since))
             ridx += 1
         autofit(sheet, [50, 20, 28, 40, 50, 9, 22, 42]
                 + ([11, 70] if dd else [])
-                + (hist_widths if hist else []))
+                + (hist_widths if hist else []) + [sql_width])
 
     # ---- Filters on every table, in one sweep -------------------------------
     # Done here rather than per sheet so a tab added later can't quietly ship
