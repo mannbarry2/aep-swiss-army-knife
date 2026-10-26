@@ -73,6 +73,12 @@ check("...and not a field it reads", rr.fields_read(mem) == [], rr.fields_read(m
 refs, ids = rr.text_refs('inSegment("aaa") and xEvent.commerce.order.priceTotal > 5 and person.gender = "f"')
 check("PQL text: inSegment ids and dotted names",
       ids == ["aaa"] and ("event", "commerce.order.priceTotal") in refs and ("profile", "person.gender") in refs, (refs, ids))
+both = {"nodeType": "fnApply", "fnName": "and", "params": [
+    sel, chain, {"nodeType": "fnApply", "fnName": "equals", "params": [look("_tescostores", "tescoIdentities", "userId"), lit("1")]}]}
+prof, evt = rr.fields_read_by_root(both)
+check("profile and event fields kept apart",
+      prof == ["_tescostores.lcmDataGroup.lcmData[].campaignCode", "_tescostores.tescoIdentities.userId"]
+      and evt == ["_experience.customerJourneyManagement.messageExecution.journeyVersionID"], (prof, evt))
 check("fields_read: sorted dot paths, from a tree or from text",
       rr.fields_read(sel) == ["_tescostores.lcmDataGroup.lcmData[].campaignCode"]
       and rr.fields_read(text="person.gender = 'f'") == ["person.gender"])

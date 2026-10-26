@@ -153,7 +153,21 @@ def fields_read(tree=None, text: str = "") -> list[str]:
     """The dotted paths a rule reads, sorted. segmentMembership is an audience,
     not a field (membership_ids() has it); an array or object is left out when
     a field inside it is read (exists(productListItems, x -> x.SKU ...))."""
+    profile, event = fields_read_by_root(tree, text)
+    return sorted(set(profile) | set(event))
+
+
+def fields_read_by_root(tree=None, text: str = "") -> tuple[list[str], list[str]]:
+    """(profile fields, event fields) a rule reads, each sorted. The same path
+    can be both a profile field and an event field (identities, eventType...),
+    so where it was read from decides which schemas it links to."""
     refs = field_refs(tree) if tree is not None else text_refs(text)[0]
-    paths = {p for _, p in refs if p.split(".")[0] != "segmentMembership"}
-    return sorted(p for p in paths
-                  if not any(q.startswith(p + ".") or q.startswith(p + "[].") for q in paths))
+    out = {"profile": set(), "event": set()}
+    for root, p in refs:
+        if p.split(".")[0] != "segmentMembership":
+            out[root].add(p)
+
+    def leaves(paths):
+        return sorted(p for p in paths
+                      if not any(q.startswith(p + ".") or q.startswith(p + "[].") for q in paths))
+    return leaves(out["profile"]), leaves(out["event"])

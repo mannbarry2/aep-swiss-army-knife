@@ -970,9 +970,10 @@ The workbook holds both ends of the lineage the schemas and fields sit between
   *In use* (a live journey or destination, or another audience built on it),
   *Not live* (only in journeys that are not running or dataflows switched off),
   or *Nothing found using it*, which marks a candidate to unpublish. The
-  journeys and destinations are named beside it. The tab also has *Fields it
-  reads* (named as on the Field Index) and the ids of the audiences each one
-  builds on and that build on it. "Nothing found" is never claimed when the
+  journeys and destinations are named beside it. The tab also has *Profile
+  fields it reads* and *Event fields it reads* (named as on the Field Index;
+  kept apart because the same name can be both) and the ids of the audiences
+  each one builds on and that build on it. "Nothing found" is never claimed when the
   journeys or dataflows could not be fully read, and it is not proof: calls
   from other systems and Data Distiller queries are not seen.
 
@@ -982,6 +983,12 @@ The logic lives in two libraries the dictionary imports:
 use it too) and
 [`data_dictionary/audience_rule_reader.py`](data_dictionary/audience_rule_reader.py)
 (the fields and audiences a rule reads).
+
+The workbook and the Explorer share one colour scheme,
+[`data_dictionary/dictionary_colours.py`](data_dictionary/dictionary_colours.py):
+purple / blue / green by class, the traffic lights, the coverage scale. Categorical
+columns (Live now, Status, Kind, In Profile, Lifecycle, Evaluation, How it comes
+in, Destination) are pills: a light fill with bold text of the same hue.
 
 ### Explorer (prototype): the workbook as a web page
 

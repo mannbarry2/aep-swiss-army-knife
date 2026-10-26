@@ -94,7 +94,7 @@ SQL jobs), Journeys (every AJO journey version and the audiences it reads) and
 Destinations (every destination dataflow and the audiences it sends). The
 Datasets tab gains 'Fed by'; the Audiences tab gains 'Where it goes' (In use /
 Not live / Nothing found using it -- so an unused audience can be unpublished),
-the journeys and destinations behind it, 'Fields it reads' and the ids of the
+the journeys and destinations behind it, the profile and event fields it reads and the ids of the
 audiences it builds on and that build on it. The journey half of the journey
 census, left behind when its audience half was folded in (v3.2, 13 Aug), is now
 here; extract_audiences() is shared, not copied
@@ -377,6 +377,7 @@ import overlap_report          # dataset overlap -> Overlap cut-list / full repo
 from house_xlsx import Book
 from data_dictionary import audience_rule_reader      # which fields / audiences a rule reads
 from data_dictionary import lineage_sources_journeys_and_destinations as lineage  # sources in, journeys + destinations out
+from data_dictionary import dictionary_colours as colours   # one colour scheme with the Explorer
 
 # ----------------------------------------------------------------------------
 # Constants
@@ -429,14 +430,9 @@ PROFILE_UNION = "https://ns.adobe.com/xdm/context/profile__union"
 #           none is. Only dark-purple schemas are in the merged union, so only
 #           they sample coverage from the Profile Snapshot Export.
 EVENT_CLASS = "https://ns.adobe.com/xdm/context/experienceevent"
-TAB_COLOURS = {
-    ("profile", True):  "7030A0",   # dark purple
-    ("profile", False): "C9B8E8",   # light purple
-    ("event",   True):  "0070C0",   # dark blue
-    ("event",   False): "9DC3E6",   # light blue
-    ("other",   True):  "548235",   # dark green
-    ("other",   False): "C5E0B4",   # light green
-}
+# Purple / blue / green by class, dark when in Profile (dictionary_colours.KIND).
+TAB_COLOURS = {(k, in_profile): colours.KIND[k][0 if in_profile else 1]
+               for k in colours.KIND for in_profile in (True, False)}
 TAB_COLOUR_KEY = [
     (("profile", True),  "Profile-class schema whose data IS in Unified Profile "
                          "(at least one dataset enabled for Profile). Its fields "
@@ -2279,7 +2275,7 @@ SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Description", "Class", "Kind",
 SCHEMA_FIELD_COLUMNS = ["Field (dot notation)", "Data Type", "Friendly Name",
                         "Friendly Path", "Description", "Required", "Identity",
                         "Relationship -> target"]
-_HEADER_BG = "1F4E78"
+_HEADER_BG = colours.HEADER
 LINK_COLOUR = "0563C1"
 
 # ---- Presentation (v3.4.22) -------------------------------------------------
@@ -2291,10 +2287,10 @@ LINK_COLOUR = "0563C1"
 #
 # Bands above a table's header: what each run of columns is for.
 # (text, fill, font colour)
-BAND_FIELD = ("THE FIELD", "D9E1F2", "1F4E78")
-BAND_DATA = ("IN THE DATA NOW (a sample of records)", "E2EFDA", "375623")
-BAND_HISTORY = ("HOW FAR BACK IT GOES (beta)", "E4DFEC", "6E3FA3")
-BAND_SQL = ("CHECK IT YOURSELF", "FBE5D6", "C55A11")
+BAND_FIELD = ("THE FIELD", *colours.BANDS["field"])
+BAND_DATA = ("IN THE DATA NOW (a sample of records)", *colours.BANDS["data"])
+BAND_HISTORY = ("HOW FAR BACK IT GOES (beta)", *colours.BANDS["history"])
+BAND_SQL = ("CHECK IT YOURSELF", *colours.BANDS["sql"])
 # Columns for the technically minded: kept, but folded away -- the + above the
 # column letters opens them.
 TECH_COLUMNS = {"Schema $id", "Dataset ID", "Dataset id", "Audience id",
@@ -2307,9 +2303,9 @@ TECH_COLUMNS = {"Schema $id", "Dataset ID", "Dataset id", "Audience id",
 WRAP_COLUMNS = {"Description", "Why", "Why this score"}
 # Colour scales, the deeper the more: header -> [(value, colour), ...].
 SCALE_COLUMNS = {
-    "Coverage %": [(0, "F8CBAD"), (50, "FFE699"), (100, "A9D08E")],
-    "Have we got it? (months)": [(0, "FFFFFF"), (24, "A9D08E")],
-    "In Profile now (days)": [(0, "FFFFFF"), (90, "C9B8E8")],
+    "Coverage %": colours.COVERAGE_SCALE,
+    "Have we got it? (months)": colours.MONTHS_SCALE,
+    "In Profile now (days)": colours.DAYS_SCALE,
 }
 # Widest a column is fitted to (Excel character widths); prose wraps narrower;
 # the first column -- the field path, the audience's sandbox... -- is the key
@@ -2407,8 +2403,9 @@ def _band(ws, row, start, end, band):
 def _polish_workbook(wb):
     """The finishing pass over every tab (see 'Presentation' above)."""
     from openpyxl.formatting.rule import ColorScaleRule
-    from openpyxl.styles import Alignment, Font
+    from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
+    pill_fill, pill_font = {}, {}
     for ws in wb.worksheets:
         hr = _header_row(ws)
         last = ws.max_row
@@ -2465,6 +2462,16 @@ def _polish_workbook(wb):
                                                 horizontal=c.alignment.horizontal)
                     if head == "Tab" and isinstance(v, str) and v in wb.sheetnames:
                         _sheet_link(c, v)
+                    # A categorical value is a pill: light fill, bold text of the
+                    # same hue -- the Explorer draws the same (dictionary_colours).
+                    pill = colours.pill_for(head, v)
+                    if pill:
+                        if pill not in pill_fill:
+                            pill_fill[pill] = PatternFill("solid", fgColor=pill[0])
+                            pill_font[pill] = Font(bold=True, color=pill[1])
+                        c.fill, c.font = pill_fill[pill], pill_font[pill]
+                        c.alignment = Alignment(horizontal="center", vertical=c.alignment.vertical,
+                                                wrap_text=c.alignment.wrap_text)
             if any_wrap:     # a tall row reads from the top, every cell alike
                 for row in ws.iter_rows(min_row=hr + 1, max_row=last):
                     for c in row:
@@ -2984,7 +2991,8 @@ AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Description", "Audience id",
                     "Conditions", "Longest value list",
                     "Merge policies", "Used by (audiences)",
                     # lineage (v3.4.23)
-                    "Fields it reads", "Builds on (audience ids)", "Used by (audience ids)",
+                    "Profile fields it reads", "Event fields it reads",
+                    "Builds on (audience ids)", "Used by (audience ids)",
                     "Where it goes", "Live journeys", "Journeys not running", "Destinations"]
 AUD_BUILDS = AUDIENCE_COLUMNS.index("Builds on (audience ids)")
 AUD_USED_BY = AUDIENCE_COLUMNS.index("Used by (audience ids)")
@@ -2993,7 +3001,7 @@ AUD_USED_BY = AUDIENCE_COLUMNS.index("Used by (audience ids)")
 AUDIENCE_SHOWN = ["Sandbox", "Audience name", "Description", "Lifecycle", "Where it goes",
                   "Live journeys", "Journeys not running", "Destinations", "Evaluation",
                   "Tags", "Tag count", "Origin", "Created by", "Last modified by",
-                  "PQL (readable)", "Fields it reads"]
+                  "PQL (readable)", "Profile fields it reads", "Event fields it reads"]
 AUDIENCE_SHOWN += [c for c in AUDIENCE_COLUMNS if c not in AUDIENCE_SHOWN]
 
 
@@ -3056,14 +3064,14 @@ def attach_audiences(token, conf, res, caches):
         # builds on -- Adobe's own dependency list plus inSegment() and
         # segmentMembership[...][id] in the rule.
         if tree is not None:
-            reads = audience_rule_reader.fields_read(tree)
+            reads = audience_rule_reader.fields_read_by_root(tree)
             builds = (audience_complexity.analyse_tree(tree)["insegment"]
                       + audience_rule_reader.membership_ids(tree))
         elif pql_raw:
-            reads = audience_rule_reader.fields_read(text=pql_raw)
+            reads = audience_rule_reader.fields_read_by_root(text=pql_raw)
             builds = audience_rule_reader.text_refs(pql_raw)[1]
         else:
-            reads, builds = [], []
+            reads, builds = ([], []), []
         builds = [b for b in dict.fromkeys([str(d) for d in a.get("dependencies") or []] + builds)
                   if b != a.get("id")]
         dependents[a.get("id") or ""] = {str(d.get("id") if isinstance(d, dict) else d)
@@ -3099,7 +3107,8 @@ def attach_audiences(token, conf, res, caches):
             cf["largest_base_name"], cf["largest_base"], cf["sequence_steps"],
             cf["conditions"], cf["max_list"], cf["merge_policies"],
             cf["dependents"],
-            "; ".join(reads), ", ".join(builds), "",     # used-by ids: below
+            "; ".join(reads[0]), "; ".join(reads[1]),    # profile, event fields
+            ", ".join(builds), "",                       # used-by ids: below
         ])
     # Built on by: every audience whose rule builds on this one, and Adobe's own list.
     for row in rows:
@@ -3311,7 +3320,7 @@ def lineage_tabs(wb, results, label, confidential, style_header, autofit, title_
         return
     errors = [f"{res['title']}: {e}" for res in results for e in res.get("lineage_errors") or []]
 
-    def tab(name, title, note, cols, rows, widths, live_col=None):
+    def tab(name, title, note, cols, rows, widths):
         ws = wb.create_sheet(name)
         confidential(ws)
         ws["A2"] = f"{title} – {label}"
@@ -3324,9 +3333,7 @@ def lineage_tabs(wb, results, label, confidential, style_header, autofit, title_
         style_header(ws, len(cols), row=hr)
         for r, row in enumerate(rows, hr + 1):
             for c, val in enumerate(row, 1):
-                cell = ws.cell(r, c, val)
-                if c == live_col:
-                    cell.font = Font(bold=True, color="2E7D32") if val == "Yes" else Font(color="808080")
+                ws.cell(r, c, val)
         autofit(ws, widths)
         ws.freeze_panes = ws.cell(hr + 1, 1).coordinate
         if rows:
@@ -3366,7 +3373,7 @@ def lineage_tabs(wb, results, label, confidential, style_header, autofit, title_
         "per dataset in 'Fed by'.",
         ["Sandbox", "How it comes in", "Dataflow", "Live now", "Into dataset", "Into Profile",
          "From", "Last run (UTC)", "Last run", "Created by", "Flow id"],
-        src_rows, [16, 30, 50, 9, 50, 11, 60, 17, 11, 32, 38], live_col=4)
+        src_rows, [16, 30, 50, 9, 50, 11, 60, 17, 11, 32, 38])
     tab("Journeys", "Journeys: where audiences go (1)",
         "Every Adobe Journey Optimizer journey, one row per version, and the audiences it reads "
         "(Read Audience) or starts from (Audience Qualification). Live now = Deployed, or Closed "
@@ -3374,14 +3381,14 @@ def lineage_tabs(wb, results, label, confidential, style_header, autofit, title_
         "send nothing. The Audiences tab sums these up per audience in 'Where it goes'.",
         ["Sandbox", "Journey", "Version", "Status", "Live now", "Audiences it reads", "How",
          "Last changed", "Changed by", "Audience ids", "Journey id"],
-        jrn_rows, [16, 52, 8, 12, 9, 60, 24, 17, 28, 40, 38], live_col=5)
+        jrn_rows, [16, 52, 8, 12, 9, 60, 24, 17, 28, 40, 38])
     tab("Destinations", "Destinations: where audiences go (2)",
         "Every destination dataflow that sends audiences out of AEP (an advertising platform, a "
         "file drop, an HTTP endpoint...), and the audiences it sends. Live now = the dataflow is "
         "switched on.",
         ["Sandbox", "Destination", "Dataflow", "Live now", "Audiences it sends", "Audiences",
          "Audience ids", "Flow id"],
-        dst_rows, [16, 34, 40, 9, 70, 10, 40, 38], live_col=4)
+        dst_rows, [16, 34, 40, 9, 70, 10, 40, 38])
 
 
 def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None):
@@ -3708,8 +3715,11 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         ("...see who is being targeted, and how",
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
-         "the rule behind it in readable form. 'Fields it reads' lists the "
-         "fields the rule tests, as they are named on the Field Index."),
+         "the rule behind it in readable form. 'Profile fields it reads' and "
+         "'Event fields it reads' list the fields the rule tests, as they are "
+         "named on the Field Index -- split because the same name (a customer "
+         "id, eventType) can be both, and where it was read from decides which "
+         "schemas the audience depends on."),
         ("...see where an audience goes, or find ones nothing uses",
          "Audiences ('Where it goes') / Journeys / Destinations",
          "'Where it goes' says, per audience: In use (a live journey, a live "
@@ -4100,11 +4110,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             dt.cell(rr, 5, d.get("description", ""))
             dt.cell(rr, 6, d.get("table"))
             dt.cell(rr, 7, lineage.fed_by(feeds.get(d.get("id"), [])))
-            pcell = dt.cell(rr, 8, d.get("profile"))
-            if (d.get("profile") or "").startswith("snapshot"):
-                pcell.font = Font(bold=True, color="7030A0")
-            elif d.get("profile"):
-                pcell.font = Font(color="2E7D32")
+            dt.cell(rr, 8, d.get("profile"))
             for c, key, fmt in ((9, "lake_gb", "#,##0.00"),
                                 (10, "lake_rows", "#,##0"),
                                 (11, "lake_ttl_days", "#,##0"),
@@ -4248,13 +4254,13 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                     cell.font = Font(bold=True, color="C00000")
                 # Complexity score + RAG cells carry the traffic light.
                 if name in ("Complexity score (0-100)", "Complexity RAG") and row[rag_at]:
-                    bg, fg = snapshot_tables.RAG_COLOURS[row[rag_at]]
+                    bg, fg = colours.RAG[row[rag_at]]
                     cell.fill = PatternFill("solid", fgColor=bg)
                     cell.font = Font(bold=True, color=fg)
                 if name == "Where it goes":
                     grade = next((g for start, g in use_rag if str(val).startswith(start)), None)
                     if grade:
-                        bg, fg = snapshot_tables.RAG_COLOURS[grade]
+                        bg, fg = colours.RAG[grade]
                         cell.fill = PatternFill("solid", fgColor=bg)
                         cell.font = Font(bold=True, color=fg)
                 if name == "Why this score":
@@ -4264,7 +4270,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             rr += 1
         widths = dict(zip(AUDIENCE_COLUMNS, [
             16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 11, 12, 10, 22, 12, 12, 12,
-            90, 10, 12, 10, 10, 20, 12, 40, 14, 10, 11, 12, 10, 12, 60, 40, 40, 36, 50, 50, 50]))
+            90, 10, 12, 10, 10, 20, 12, 40, 14, 10, 11, 12, 10, 12, 60, 60, 40, 40, 36, 50, 50, 50]))
         autofit(at, [widths[c] for c in AUDIENCE_SHOWN])
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"

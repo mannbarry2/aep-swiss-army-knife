@@ -39,6 +39,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+from data_dictionary import dictionary_colours as colours  # noqa: E402  -- the workbook's colours
 
 SCRIPT_NAME = "data_dictionary_explorer_html_builder"
 SCRIPT_VERSION = "0.2.0"
@@ -228,7 +229,10 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
         aid = r.get("Audience id")
         side = pql.get(aid, {})
         raw = side.get("raw_pql") or r.get("PQL (raw pql/json)") or ""
-        reads = _split(r.get("Fields it reads"), ";")
+        prof, evt = _split(r.get("Profile fields it reads"), ";"), _split(r.get("Event fields it reads"), ";")
+        if not prof and not evt:            # one column, kind not recorded: either
+            prof = evt = _split(r.get("Fields it reads"), ";")
+        reads = list(dict.fromkeys(prof + evt))
         a_ix[aid] = len(audiences)
         audiences.append({
             "id": aid, "name": r.get("Audience name"), "desc": r.get("Description"),
@@ -242,6 +246,7 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
             "base": r.get("Largest base audience"), "basen": _num(r.get("Largest base (profiles)")),
             "where": r.get("Where it goes"),
             "f": sorted({f_ix[p] for p in reads if p in f_ix}), "miss": [p for p in reads if p not in f_ix],
+            "fp": sorted({f_ix[p] for p in prof if p in f_ix}), "fe": sorted({f_ix[p] for p in evt if p in f_ix}),
             "depids": _split(r.get("Builds on (audience ids)"), ","),
             "usedids": _split(r.get("Used by (audience ids)"), ","), "j": [], "x": []})
     for a in audiences:
@@ -289,12 +294,28 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
             "journeys": journeys, "destinations": destinations, "sources": sources}
 
 
+def palette_css() -> str:
+    """CSS variables for the workbook's colour scheme (dictionary_colours), the
+    same in light and dark: a pill looks the same as its cell in the workbook."""
+    v = {"--header": colours.HEADER, "--link": colours.LINK}
+    v.update({f"--k-{k}": colours.KIND[k][0] for k in colours.KIND})
+    v.update({"--k-aud": colours.PILL["audience"][1], "--k-jrn": colours.PILL["journey"][1],
+              "--k-dst": colours.PILL["destination"][1], "--k-src": colours.PILL["source"][1],
+              "--k-ds": colours.PILL["neutral"][1]})
+    for name, (bg, fg) in {**colours.PILL, **{k.lower(): c for k, c in colours.RAG.items()}}.items():
+        v[f"--p-{name}-bg"], v[f"--p-{name}"] = bg, fg
+    return " ".join(f"{k}:#{c};" for k, c in v.items())
+
+
 def render_html(model: dict) -> str:
+    model["meta"]["palette"] = {"coverage": colours.COVERAGE_SCALE,
+                                "live": sorted(colours.LIVE_JOURNEY), "trying": sorted(colours.TRYING)}
     data = json.dumps(model, ensure_ascii=False, separators=(",", ":"), default=str)
     data = data.replace("</", "<\\/")
     label = model["meta"]["label"] or "Data Dictionary"
     return (PAGE.replace("{{TITLE}}", html.escape(f"Data Dictionary Explorer – {label}"))
                 .replace("{{AUTHOR}}", html.escape(SCRIPT_AUTHOR))
+                .replace("/*{{PALETTE}}*/", palette_css())
                 .replace("/*{{DATA}}*/", data))
 
 
@@ -341,22 +362,19 @@ PAGE = r"""<!doctype html>
 <style>
 :root{
   --bg:#f5f6f8; --panel:#ffffff; --ink:#1c2230; --muted:#5d6678; --faint:#8a93a3; --line:#e2e5eb;
-  --accent:#2457c5; --accent-weak:#e9effc; --focus:#ffd257;
+  --accent:#0563C1; --accent-weak:#e9effc; --focus:#ffd257;
   --k-profile:#7a4cc2; --k-event:#2a72c8; --k-other:#21857a; --k-aud:#c4572a; --k-ds:#5d6678;
   --k-jrn:#0e7c86; --k-dst:#a23b72; --k-src:#8a6a12;
-  --red:#c0392b; --red-bg:#fbe9e7; --amber:#b9770e; --amber-bg:#fdf3e1; --green:#23854a; --green-bg:#e6f4ea;
   --m-none:#eceef2; --m-unk:#d5d9e0; --m-zero:#f6d4c8; --m-hi:#2e9a57;
-  --edge:#b8c0cc; --edge-hot:#2457c5; --code-bg:#f2f4f7;
+  --edge:#b8c0cc; --edge-hot:#1F4E78; --code-bg:#f2f4f7;
   --mono:Consolas,"Cascadia Mono",ui-monospace,monospace;
   --sans:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;
+  /*{{PALETTE}}*/
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     --bg:#14171d; --panel:#1c2028; --ink:#e6e9ef; --muted:#a5adbb; --faint:#7d8696; --line:#2e3440;
     --accent:#7aa2ff; --accent-weak:#22304d; --focus:#8a6d1f;
-    --k-profile:#b08cf0; --k-event:#6fa8f0; --k-other:#4cc2b2; --k-aud:#f08a5d; --k-ds:#a5adbb;
-    --k-jrn:#4fc3cc; --k-dst:#e07bb0; --k-src:#d9b44a;
-    --red:#ff7b6b; --red-bg:#3a2020; --amber:#f0b44c; --amber-bg:#3a2f18; --green:#5fd08a; --green-bg:#173323;
     --m-none:#262b35; --m-unk:#3a404c; --m-zero:#5a3328; --m-hi:#4cc27a;
     --edge:#465063; --edge-hot:#7aa2ff; --code-bg:#232833;
   }
@@ -364,9 +382,6 @@ PAGE = r"""<!doctype html>
 :root[data-theme="dark"]{
     --bg:#14171d; --panel:#1c2028; --ink:#e6e9ef; --muted:#a5adbb; --faint:#7d8696; --line:#2e3440;
     --accent:#7aa2ff; --accent-weak:#22304d; --focus:#8a6d1f;
-    --k-profile:#b08cf0; --k-event:#6fa8f0; --k-other:#4cc2b2; --k-aud:#f08a5d; --k-ds:#a5adbb;
-    --k-jrn:#4fc3cc; --k-dst:#e07bb0; --k-src:#d9b44a;
-    --red:#ff7b6b; --red-bg:#3a2020; --amber:#f0b44c; --amber-bg:#3a2f18; --green:#5fd08a; --green-bg:#173323;
     --m-none:#262b35; --m-unk:#3a404c; --m-zero:#5a3328; --m-hi:#4cc27a;
     --edge:#465063; --edge-hot:#7aa2ff; --code-bg:#232833;
 }
@@ -375,10 +390,10 @@ html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--san
 a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
 code,.mono{font-family:var(--mono);font-size:13px}
 .conf{background:#7d1a1a;color:#fff;font-size:11px;letter-spacing:.12em;text-align:center;padding:2px 0;font-weight:600}
-header.top{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--line)}
+header.top{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:4px solid var(--header)}
 .bar{max-width:1280px;margin:0 auto;padding:10px 20px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .brand{font-weight:700;white-space:nowrap;color:var(--ink)} .brand small{display:block;font-weight:400;color:var(--muted);font-size:12px}
-.proto{font-size:11px;background:var(--amber-bg);color:var(--amber);border-radius:10px;padding:1px 8px;margin-left:6px;font-weight:600;vertical-align:middle}
+.proto{font-size:11px;background:var(--p-amber-bg);color:var(--p-amber);border-radius:10px;padding:1px 8px;margin-left:6px;font-weight:600;vertical-align:middle}
 .searchwrap{position:relative;flex:1;min-width:240px;max-width:560px}
 .searchwrap input{width:100%;font:inherit;padding:8px 12px 8px 34px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
 .searchwrap input:focus{outline:2px solid var(--accent);border-color:transparent}
@@ -400,12 +415,11 @@ h1{font-size:26px;margin:4px 0 6px;line-height:1.25} h2{font-size:18px;margin:30
 .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px 18px;margin:12px 0 4px}
 .facts div{font-size:13px;color:var(--muted)} .facts b{display:block;color:var(--ink);font-size:15px;font-weight:600;word-break:break-word}
 .badge{display:inline-block;font-size:12px;font-weight:600;border-radius:10px;padding:1px 9px;margin-right:4px;vertical-align:middle;white-space:nowrap}
-.b-profile{background:color-mix(in srgb,var(--k-profile) 16%,transparent);color:var(--k-profile)}
-.b-event{background:color-mix(in srgb,var(--k-event) 16%,transparent);color:var(--k-event)}
-.b-other{background:color-mix(in srgb,var(--k-other) 16%,transparent);color:var(--k-other)}
-.b-aud{background:color-mix(in srgb,var(--k-aud) 16%,transparent);color:var(--k-aud)}
-.b-in{background:var(--green-bg);color:var(--green)} .b-out{background:var(--m-none);color:var(--muted)}
-.RED{background:var(--red-bg);color:var(--red)} .AMBER{background:var(--amber-bg);color:var(--amber)} .GREEN{background:var(--green-bg);color:var(--green)}
+.badge{font-weight:700}
+.b-profile{background:var(--p-profile-bg);color:var(--p-profile)} .b-event{background:var(--p-event-bg);color:var(--p-event)}
+.b-other{background:var(--p-other-bg);color:var(--p-other)} .b-aud{background:var(--p-audience-bg);color:var(--p-audience)}
+.b-in{background:var(--p-green-bg);color:var(--p-green)} .b-out{background:var(--p-grey-bg);color:var(--p-grey)}
+.RED{background:var(--p-red-bg);color:var(--p-red)} .AMBER{background:var(--p-amber-bg);color:var(--p-amber)} .GREEN{background:var(--p-green-bg);color:var(--p-green)} .GREY{background:var(--p-grey-bg);color:var(--p-grey)}
 .say{font-size:16px;margin:10px 0;max-width:900px} .say b{font-weight:600}
 .big{font-size:28px;font-weight:700;line-height:1} .big small{font-size:14px;font-weight:400;color:var(--muted)}
 .copyrow{display:flex;gap:8px;align-items:flex-start}
@@ -414,8 +428,8 @@ pre.code{flex:1;min-width:0;overflow-wrap:anywhere;margin:0;background:var(--cod
 button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:5px 10px;cursor:pointer} button:hover{border-color:var(--accent);color:var(--accent)}
 details summary{cursor:pointer;color:var(--accent);font-size:14px;margin:6px 0}
 table.t{width:100%;border-collapse:collapse;font-size:14px;background:var(--panel)}
-table.t th{position:sticky;top:0;background:var(--panel);text-align:left;font-size:12px;color:var(--muted);font-weight:600;border-bottom:2px solid var(--line);padding:7px 8px;cursor:pointer;white-space:nowrap;user-select:none}
-table.t th.num,table.t td.num{text-align:right} table.t th:hover{color:var(--accent)} table.t th .arr{opacity:.6}
+table.t th{position:sticky;top:0;background:var(--header);text-align:left;font-size:12px;color:#fff;font-weight:600;border-bottom:2px solid var(--header);padding:7px 8px;cursor:pointer;white-space:nowrap;user-select:none}
+table.t th.num,table.t td.num{text-align:right} table.t th:hover{color:#FFE699} table.t th .arr{opacity:.8}
 table.t td{border-bottom:1px solid var(--line);padding:7px 8px;vertical-align:top}
 table.t tr:hover td{background:color-mix(in srgb,var(--accent-weak) 45%,transparent)}
 table.t td .sub{color:var(--muted);font-size:12px;word-break:break-all}
@@ -443,11 +457,11 @@ table.t td .sub{color:var(--muted);font-size:12px;word-break:break-all}
 .node .s{display:block;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .vals{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px} .vals span{font-size:12px;background:var(--code-bg);border:1px solid var(--line);border-radius:5px;padding:1px 7px;font-family:var(--mono)} .vals b{font-family:var(--sans);font-weight:400;color:var(--muted);margin-left:5px}
 .node.k-jrn{border-left-color:var(--k-jrn)} .node.k-dst{border-left-color:var(--k-dst)} .node.k-src{border-left-color:var(--k-src)}
-.b-jrn{background:color-mix(in srgb,var(--k-jrn) 16%,transparent);color:var(--k-jrn)} .b-dst{background:color-mix(in srgb,var(--k-dst) 16%,transparent);color:var(--k-dst)} .b-src{background:color-mix(in srgb,var(--k-src) 16%,transparent);color:var(--k-src)}
+.b-jrn{background:var(--p-journey-bg);color:var(--p-journey)} .b-dst{background:var(--p-destination-bg);color:var(--p-destination)} .b-src{background:var(--p-source-bg);color:var(--p-source)} .b-neutral{background:var(--p-neutral-bg);color:var(--p-neutral)}
 .node.k-profile{border-left-color:var(--k-profile)} .node.k-event{border-left-color:var(--k-event)} .node.k-other{border-left-color:var(--k-other)} .node.k-aud{border-left-color:var(--k-aud)}
 .node.focus{border:2px solid var(--accent);border-left-width:5px;background:var(--accent-weak);font-weight:600}
 .node .r{position:absolute;right:6px;top:5px;width:8px;height:8px;border-radius:50%}
-.node .r.RED{background:var(--red)} .node .r.AMBER{background:var(--amber)} .node .r.GREEN{background:var(--green)}
+.node .r.RED{background:var(--p-red)} .node .r.AMBER{background:#C9A100} .node .r.GREEN{background:#2E9A57}
 .node.dim{opacity:.55}
 .col .more{display:block;font-size:12px;padding:2px 4px}
 .col .empty{font-size:12px;color:var(--faint);border:1px dashed var(--line);border-radius:7px;padding:8px 9px}
@@ -456,7 +470,7 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
 .hint{font-size:12px;color:var(--faint);margin-top:4px}
 .term{border-bottom:1px dotted var(--faint);cursor:help}
 .foot{color:var(--faint);font-size:12px;margin-top:40px;border-top:1px solid var(--line);padding-top:12px}
-.warn{background:var(--amber-bg);color:var(--ink);border-radius:8px;padding:10px 14px;font-size:14px;margin:10px 0}
+.warn{background:var(--p-amber-bg);color:var(--ink);border-radius:8px;padding:10px 14px;font-size:14px;margin:10px 0}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:14px} .kv dt{color:var(--muted)} .kv dd{margin:0}
 .hero{padding:10px 0 6px} .hero .searchbig{max-width:720px;margin-top:12px}
 .hero .searchbig input{font-size:18px;padding:13px 16px 13px 42px;border-radius:10px}
@@ -480,7 +494,7 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
   <nav class="main" id="nav">
     <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/help">How to read this</a>
   </nav>
-  <button id="theme" title="Light, dark, or follow this computer">Theme: auto</button>
+  <button id="theme" title="Theme: auto (click for light, dark, auto)">◐</button>
 </div></header>
 <main id="app"></main>
 <script type="application/json" id="dd-data">/*{{DATA}}*/</script>
@@ -629,9 +643,26 @@ document.addEventListener("click", ev => {
   const fallback = () => { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); done(); };
   if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
 });
+// The workbook's colour scale (Coverage %): red, through yellow, to green.
+function scaleColour(scale, v) {
+  const pts = scale.slice().sort((a, b) => a[0] - b[0]);
+  if (v <= pts[0][0]) return "#" + pts[0][1];
+  for (let k = 1; k < pts.length; k++) {
+    const [v0, c0] = pts[k - 1], [v1, c1] = pts[k];
+    if (v <= v1) {
+      const f = v1 === v0 ? 1 : (v - v0) / (v1 - v0);
+      return "#" + [0, 2, 4].map(i => Math.round(parseInt(c0.substr(i, 2), 16) + f * (parseInt(c1.substr(i, 2), 16) - parseInt(c0.substr(i, 2), 16))).toString(16).padStart(2, "0")).join("");
+    }
+  }
+  return "#" + pts[pts.length - 1][1];
+}
+const covColour = v => scaleColour(M.palette.coverage, v);
+const statusPill = s => { const x = String(s || "").toLowerCase(); return `<span class="badge ${M.palette.live.includes(x) ? "GREEN" : M.palette.trying.includes(x) ? "AMBER" : "GREY"}">${h(s || "–")}</span>`; };
+const lifePill = s => s ? `<span class="badge ${/^published$/i.test(s) ? "GREEN" : "GREY"}">${h(s)}</span>` : "–";
+const evalPill = s => s ? `<span class="badge b-neutral">${h(s)}</span>` : "–";
 function covBar(c) {
   const n = num(c);
-  return n === null ? '<span class="sub">–</span>' : `<span class="covbar"><i style="width:${Math.max(0, Math.min(100, n))}%"></i></span>${fmt(n, 0)}%`;
+  return n === null ? '<span class="sub">–</span>' : `<span class="covbar"><i style="width:${Math.max(4, Math.min(100, n))}%;background:${covColour(n)}"></i></span>${fmt(n, 0)}%`;
 }
 function strip(hist) {
   if (!hist || !hist.length) return '<span class="sub">no history read</span>';
@@ -640,13 +671,11 @@ function strip(hist) {
     if (v === null || v === undefined) return `<i title="${h(m)}: no data arrived this month"></i>`;
     if (v === "?") return `<i class="u" title="${h(m)}: data arrived but couldn't be read (see How to read this)">?</i>`;
     const n = num(v);
-    if (n === 0) return `<i class="z" title="${h(m)}: data arrived, but this field was empty in what we read"></i>`;
-    const a = 0.25 + 0.75 * Math.min(100, n) / 100;
-    return `<i style="background:color-mix(in srgb,var(--m-hi) ${Math.round(a * 100)}%,transparent)" title="${h(m)}: filled in ${fmt(n, 0)}% of the records read"></i>`;
+    return `<i style="background:${covColour(n)}" title="${h(m)}: ${n === 0 ? "data arrived, but this field was empty in what we read" : `filled in ${fmt(n, 0)}% of the records read`}"></i>`;
   }).join("");
   return `<div style="display:inline-block"><div class="strip">${cells}</div><div class="striplab"><span>${h(M.months[0] || "")}</span><span>${h(M.months[M.months.length - 1] || "")}</span></div></div>`;
 }
-const STRIP_LEGEND = `<div class="legend"><span><i style="background:var(--m-hi)"></i>field filled in (darker = more often)</span><span><i class="z" style="background:var(--m-zero)"></i>data arrived, field empty</span><span><i style="background:var(--m-unk)"></i>couldn't be read (“?”)</span><span><i style="background:var(--m-none)"></i>no data that month</span></div>`;
+const STRIP_LEGEND = `<div class="legend"><span><i style="background:${covColour(100)}"></i>filled in nearly always</span><span><i style="background:${covColour(50)}"></i>about half the time</span><span><i style="background:${covColour(0)}"></i>data arrived, field empty</span><span><i style="background:var(--m-unk)"></i>couldn't be read (“?”)</span><span><i style="background:var(--m-none)"></i>no data that month</span></div>`;
 function ragBadge(a) { return a.rag ? `<span class="badge ${h(a.rag)}">${h(a.rag)} ${a.score !== null && a.score !== undefined ? fmt(a.score, 0) : ""}</span>` : ""; }
 
 /* ---------- tables ---------- */
@@ -688,7 +717,7 @@ function linked(a, b) {
   if (k === "fs") return D.fields[a.i].on.some(o => o.s === b.i);
   if (k === "af") return D.audiences[a.i].f.includes(b.i);
   if (k === "aa") return D.audiences[a.i].dep.includes(b.i) || D.audiences[b.i].dep.includes(a.i);
-  if (k === "as") return D.audiences[a.i].f.some(fi => D.fields[fi].on.some(o => o.s === b.i));
+  if (k === "as") return readsFor(D.audiences[a.i], b.i).some(fi => D.fields[fi].on.some(o => o.s === b.i));
   if (k === "aj") return D.journeys[b.i].aud.includes(a.i);
   if (k === "ax") return D.destinations[b.i].aud.includes(a.i);
   if (k === "dr") return D.sources[b.i].into.includes(a.i);
@@ -748,6 +777,11 @@ function drawLineage() {
 window.addEventListener("resize", () => requestAnimationFrame(drawLineage));
 const uniq = xs => [...new Set(xs)];
 const N = (t, i, focus) => ({t, i, focus: !!focus});
+// An audience reads a profile field from a profile schema and an event field from an
+// event schema (the workbook says which); a lookup schema can be reached either way.
+const readsFor = (a, s) => { const k = kindOf(D.schemas[s].kind); return k === "profile" ? a.fp : k === "event" ? a.fe : a.f; };
+const schemaUsed = s => D.schemas[s].f.filter(f => D.fields[f].aud.some(a => readsFor(D.audiences[a], s).includes(f)));
+const schemaAud = s => uniq(schemaUsed(s).flatMap(f => D.fields[f].aud.filter(a => readsFor(D.audiences[a], s).includes(f))));
 const liveFirst = (xs, list) => xs.slice().sort((p, q) => (list[q].live ? 1 : 0) - (list[p].live ? 1 : 0));
 // The two ends of the lineage, from the workbook's Sources / Journeys / Destinations tabs.
 function srcCol(dsIdx, more) {
@@ -886,8 +920,8 @@ function pageField(i) {
 function audCols() {
   return [
     {label: "Audience", v: a => a.name, html: a => `<a href="${href.a(by.audience[a.id])}">${h(a.name)}</a>${a.desc ? `<div class="sub">${h(a.desc)}</div>` : ""}`},
-    {label: "Evaluation", v: a => a.eval, html: a => h(a.eval || "–")},
-    {label: "Status", v: a => a.life, html: a => h(a.life || "–")},
+    {label: "Evaluation", v: a => a.eval, html: a => evalPill(a.eval)},
+    {label: "Status", v: a => a.life, html: a => lifePill(a.life)},
     {label: "Where it goes", v: a => a.where, html: a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(a.where.split(":")[0].replace(/ \(.*/, ""))}</span><div class="sub">${h((a.where.split(":")[1] || "").trim())}</div>` : '<span class="sub">–</span>'},
     {label: "Complexity", num: true, v: a => num(a.score), html: a => ragBadge(a), tip: "0–100; RED is heaviest for Adobe to evaluate"},
     {label: "Fields read", num: true, v: a => a.f.length, html: a => fmt(a.f.length, 0)},
@@ -897,7 +931,7 @@ function audCols() {
 function jrnCols() {
   return [
     {label: "Journey", v: j => (j.name || "").toLowerCase(), html: j => `<a href="${href.j(D.journeys.indexOf(j))}">${h(j.name)}</a>${j.version ? `<div class="sub">version ${h(j.version)}</div>` : ""}`},
-    {label: "Status", v: j => j.status, html: j => h(j.status || "–")},
+    {label: "Status", v: j => j.status, html: j => statusPill(j.status)},
     {label: "Live", v: j => j.live ? 1 : 0, html: j => liveWord(j.live)},
     {label: "How", v: j => j.how, html: j => h(j.how || "–")},
     {label: "Last changed", v: j => j.changed, html: j => h(j.changed || "–") + (j.by ? `<div class="sub">${h(j.by)}</div>` : "")},
@@ -946,8 +980,8 @@ function dsCols() {
 
 function pageSchema(i) {
   const s = D.schemas[i];
-  const used = s.f.filter(f => D.fields[f].aud.length).sort((x, y) => D.fields[y].aud.length - D.fields[x].aud.length);
-  const aud = uniq(used.flatMap(f => D.fields[f].aud)).sort(audSort);
+  const used = schemaUsed(i).sort((x, y) => D.fields[y].aud.length - D.fields[x].aud.length);
+  const aud = schemaAud(i).sort(audSort);
   const kind = kindOf(s.kind);
   const what = {profile: "one record per customer (or account) – the facts about them", event: "things that happened, each with a date and time", other: "reference data, such as products or stores, that other data links to"}[kind];
   return `<div class="crumb"><a href="#/schemas">Schemas</a> › ${h(s.title)}</div>
@@ -975,8 +1009,8 @@ function pageSchema(i) {
 
 function pageDataset(i) {
   const d = D.datasets[i], s = d.s >= 0 ? D.schemas[d.s] : null, inP = dsInProfile(d);
-  const used = s && inP ? s.f.filter(f => D.fields[f].aud.length).sort((x, y) => D.fields[y].aud.length - D.fields[x].aud.length) : [];
-  const aud = uniq(used.flatMap(f => D.fields[f].aud)).sort(audSort);
+  const used = s && inP ? schemaUsed(d.s).sort((x, y) => D.fields[y].aud.length - D.fields[x].aud.length) : [];
+  const aud = s && inP ? schemaAud(d.s).sort(audSort) : [];
   return `<div class="crumb"><a href="#/datasets">Datasets</a> › ${h(d.table || d.name)}</div>
     <h1>${h(d.name || d.table)}</h1><p>${inP ? '<span class="badge b-in">In Profile</span>' : '<span class="badge b-out">Data lake only</span>'}</p>
     ${d.desc ? `<p class="say">${h(d.desc)}</p>` : ""}
@@ -991,7 +1025,7 @@ function pageDataset(i) {
       {title: "Schema", items: s ? [N("s", d.s)] : [], empty: "Its schema is not in this dictionary."},
       {title: "Fields audiences read", items: used.map(f => N("f", f)), more: s ? href.s(d.s) : "", empty: inP ? "No audience reads its fields." : "Not in Profile, so no audience can read it."},
       {title: "Audiences", items: aud.map(a => N("a", a)), empty: "None."}],
-      "Audiences are traced through the fields they read. The same field can also come from another dataset of the schema.")}
+      "Audiences are traced through the fields they read from this kind of data (profile or event). The same field can also come from another dataset of the schema.")}
     <h2 id="d-src">Where it comes from</h2>
     ${d.fed ? `<p class="say">${h(d.fed)}</p>` : `<p class="sub">${HAS_LINEAGE ? "No dataflow feeds it: it is loaded by an API call or a one-off job, or not at all." : NOT_IN}</p>`}
     ${d.src.length ? table("t-dsrc", srcCols(), d.src.map(r => D.sources[r]), {sort: 3, dir: -1}) : ""}
@@ -1002,7 +1036,8 @@ function pageAudience(i) {
   const a = D.audiences[i];
   // A field found in almost every schema (eventType, _id) says nothing about where the data is: use the specific ones.
   const specific = a.f.filter(f => D.fields[f].on.length <= 3);
-  const schemas = uniq((specific.length ? specific : a.f).flatMap(f => D.fields[f].on.map(o => o.s)));
+  const schemas = uniq((specific.length ? specific : a.f).flatMap(f => D.fields[f].on.map(o => o.s)
+    .filter(s => readsFor(a, s).includes(f))));
   const reads = [...a.f.map(f => N("f", f)), ...a.dep.map(d => N("a", d))];
   const used = a.used.slice().sort(audSort);
   const noRule = !a.fmt && !a.rule;
@@ -1010,7 +1045,7 @@ function pageAudience(i) {
   if (a.fmt === "json") { try { pretty = JSON.stringify(JSON.parse(a.raw), null, 1); } catch (e) { } }
   return `<div class="crumb"><a href="#/audiences">Audiences</a> › ${h(a.id)}</div>
     <h1>${h(a.name)}</h1>
-    <p>${whereBadge(a)}${ragBadge(a)}${a.eval ? `<span class="badge b-out">${h(a.eval)}</span>` : ""}${a.life ? `<span class="badge b-out">${h(a.life)}</span>` : ""}${(a.tags || "").split(/\s*[,;|]\s*/).filter(Boolean).map(t => `<span class="badge b-aud">${h(t)}</span>`).join("")}</p>
+    <p>${whereBadge(a)}${ragBadge(a)}${a.eval ? evalPill(a.eval) : ""}${a.life ? lifePill(a.life) : ""}${(a.tags || "").split(/\s*[,;|]\s*/).filter(Boolean).map(t => `<span class="badge b-aud">${h(t)}</span>`).join("")}</p>
     ${a.desc ? `<p class="say">${h(a.desc)}</p>` : ""}
     <p class="say">${noRule ? `This audience has no rule inside Adobe: it was ${a.origin ? `made by <b>${h(a.origin)}</b>` : "uploaded or made elsewhere"}, so there are no fields to trace.`
       : `It reads <b>${plural(a.f.length, "field")}</b>${a.dep.length ? ` and builds on <b>${plural(a.dep.length, "other audience")}</b>` : ""}. ${used.length ? `<b>${plural(used.length, "audience")}</b> build on it.` : "No other audience builds on it."}`}</p>
@@ -1092,7 +1127,7 @@ function pageSchemas() {
     {label: "Fields", num: true, v: s => s.f.length, html: s => fmt(s.f.length, 0)},
     {label: "Datasets", num: true, v: s => s.ds.length, html: s => fmt(s.ds.length, 0)},
     {label: "Rows (lake)", num: true, v: s => num(s.rows), html: s => fmt(s.rows, 0)},
-    {label: "Audiences", num: true, v: s => uniq(s.f.flatMap(f => D.fields[f].aud)).length, html: s => fmt(uniq(s.f.flatMap(f => D.fields[f].aud)).length, 0), tip: "Audiences that read at least one of its fields"},
+    {label: "Audiences", num: true, v: s => schemaAud(by.schema[s.tab]).length, html: s => fmt(schemaAud(by.schema[s.tab]).length, 0), tip: "Audiences that read at least one of its fields"},
   ];
   return listPage("Schemas", `A ${term("schema", "schema")} is the blueprint for one kind of data. Purple are customer records, blue are events, green are lookups.`,
     "t-schemas", cols, D.schemas,
@@ -1136,7 +1171,7 @@ function pageSources() {
 function pageJourney(i) {
   const x = D.journeys[i];
   return `<div class="crumb"><a href="#/journeys">Journeys</a> › ${h(x.id || "")}</div>
-    <h1>${h(x.name)}</h1><p><span class="badge b-jrn">Journey</span>${liveWord(x.live)}<span class="badge b-out">${h(x.status || "")}</span>${x.version ? `<span class="badge b-out">version ${h(x.version)}</span>` : ""}</p>
+    <h1>${h(x.name)}</h1><p><span class="badge b-jrn">Journey</span>${liveWord(x.live)}${statusPill(x.status)}${x.version ? `<span class="badge b-neutral">version ${h(x.version)}</span>` : ""}</p>
     <p class="say">${x.live ? "It is running now" : "It is not running"}${x.aud.length ? ` and reads <b>${plural(x.aud.length, "audience")}</b> (${h(x.how || "")})` : " and reads no audience: it starts from an event or an API call"}.</p>
     <div class="facts"><div>Last changed<b>${h(x.changed || "–")}</b></div><div>Changed by<b>${h(x.by || "–")}</b></div><div>Journey ID<b class="mono">${h(x.id || "–")}</b></div></div>
     <h2>Lineage</h2>
@@ -1227,16 +1262,18 @@ function route() {
 }
 /* light / dark / follow the computer; ?theme=light also works */
 const THEMES = ["auto", "light", "dark"];
+let THEME = "auto";
 function setTheme(t) {
   if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t);
-  document.getElementById("theme").textContent = "Theme: " + t;
+  document.getElementById("theme").title = `Theme: ${t} (click for light, dark, auto)`;
+  THEME = t;
   try { localStorage.setItem("dd-theme", t); } catch (e) { }
   requestAnimationFrame(drawLineage);
 }
 let theme = new URLSearchParams(location.search).get("theme");
 if (!THEMES.includes(theme)) { try { theme = localStorage.getItem("dd-theme"); } catch (e) { theme = null; } }
 setTheme(THEMES.includes(theme) ? theme : "auto");
-document.getElementById("theme").onclick = () => setTheme(THEMES[(THEMES.indexOf(document.getElementById("theme").textContent.split(": ")[1]) + 1) % 3]);
+document.getElementById("theme").onclick = () => setTheme(THEMES[(THEMES.indexOf(THEME) + 1) % 3]);
 document.getElementById("brand-sub").textContent = `${M.label} · ${M.generated ? M.generated.split("|")[0].replace("Generated", "").trim() : ""}`;
 window.addEventListener("hashchange", route);
 document.addEventListener("click", ev => {

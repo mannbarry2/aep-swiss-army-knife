@@ -15,7 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
-| [October 26, 2026](#october-26-2026) | v3.4.23 | Lineage in the workbook: where data comes from (Sources) and where every audience goes (Journeys, Destinations, "Where it goes") |
+| [October 26, 2026](#october-26-2026) | v3.4.23 | Lineage in the workbook: where data comes from (Sources) and where every audience goes (Journeys, Destinations, "Where it goes"); one colour scheme with the Explorer, categorical columns as pills |
 | [October 25, 2026](#october-25-2026) | v3.4.20 – v3.4.22 | Field history reads a month's biggest batch first, as it was meant to; SQL to check any field by hand; a workbook tidied for readers outside AEP |
 | [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.19 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see; no false "empty" coverage |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
@@ -57,7 +57,8 @@ workbook, which stands on its own.
 | Journeys tab ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | Every Adobe Journey Optimizer journey, one row per version, with its status and the audiences it reads (Read Audience) or starts from (Audience Qualification). Live = Deployed, or Closed (no new entrants, but those in it carry on). |
 | Destinations tab ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | Every dataflow that sends audiences out of AEP, and the audiences it sends. |
 | Where it goes ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | On the Audiences tab, straight after the name: *In use* (a live journey or destination, or another audience built on it), *Not live* (only in journeys not running or dataflows switched off) or *Nothing found using it* -- a candidate to unpublish -- with the journeys and destinations named beside it. Never claimed on a partial read: if the journeys or dataflows could not be fully read, the cell says so. |
-| Fields it reads ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | On the Audiences tab: the fields each rule tests, named as on the Field Index -- profile fields, profile arrays, event fields, arrays inside events -- and the ids of the audiences it builds on and that build on it (Adobe's own list, inSegment() and segmentMembership). |
+| Fields it reads ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | On the Audiences tab: *Profile fields it reads* and *Event fields it reads*, named as on the Field Index, and the ids of the audiences it builds on and that build on it (Adobe's own list, inSegment() and segmentMembership). Profile and event are kept apart because the same name -- a customer id, eventType -- can be both, and where it was read from decides which schemas an audience depends on. |
+| One colour scheme, pills ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | The workbook and the Explorer share one palette (`data_dictionary/dictionary_colours.py`): purple / blue / green by class, the red-amber-green traffic lights, the coverage scale. Categorical columns are pills -- a light fill with bold text of the same hue: Live now, Status, Kind, In Profile, Lifecycle, Evaluation, How it comes in, Destination. |
 
 **Fixes and improvements**
 
