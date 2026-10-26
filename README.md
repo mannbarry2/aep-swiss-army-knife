@@ -102,6 +102,7 @@ The toolkit spans two product ranges:
 | [`parked/audience_renamer.py`](parked/audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
 | [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, with `--data-dict` real field coverage + top-10 example values sampled in-memory (PII starred), and with `--history` (beta) how many months of unbroken data each field has. [Release notes](RELEASE_NOTES.md). |
 | [`data_dictionary/release_notes_html_builder.py`](data_dictionary/release_notes_html_builder.py) | Builds `RELEASE_NOTES.html`, the colour edition of the Data Dictionary release notes (laid out like Adobe Experience League release notes), from `RELEASE_NOTES.md`. Re-run it after editing the Markdown. Stdlib only. |
+| [`data_dictionary/data_dictionary_explorer_html_builder.py`](data_dictionary/data_dictionary_explorer_html_builder.py) | **Prototype.** Turns a Data Dictionary workbook into one self-contained web page: search, a page per field / schema / dataset / audience, and clickable lineage from dataset to the audiences that read each field. No Adobe calls. See [Explorer](#explorer-prototype-the-workbook-as-a-web-page). |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
 cleanly across multiple Adobe orgs without folder collisions. `creds/*.json`
@@ -943,3 +944,33 @@ there are, audiences carry their RED / AMBER / GREEN. Ids, raw rule text and
 other technical columns are folded away behind a **+** above the column
 letters. A schema's name in a **Tab** column is a link to its tab, and each
 schema tab links back to the list.
+
+### Explorer (prototype): the workbook as a web page
+
+[`data_dictionary/data_dictionary_explorer_html_builder.py`](data_dictionary/data_dictionary_explorer_html_builder.py)
+turns a finished workbook (and its PQL file) into **one .html file** for people
+who would otherwise need training to find their way round the workbook. It
+reads only the Data Dictionary's output, so it makes no Adobe calls and takes
+seconds:
+
+```
+python data_dictionary/data_dictionary_explorer_html_builder.py --sandbox=roi-prod
+```
+
+It writes `Data Dictionary Explorer - <sandbox> - <date>.html` next to the
+workbook. The page has a search box, then a page for every field, schema, dataset
+and audience. Each one says in plain words what the item is and how good its data
+is, and has a lineage strip you can click along:
+**dataset → schema → field → audiences that read it → audiences built on those**.
+Which fields an audience reads is worked out from its rule: profile arrays,
+event sequences, arrays inside events, and audiences it builds on through
+`inSegment()` or `segmentMembership`. Fields Adobe keeps for itself (Journey
+Optimizer's email tracking, say) are named on the audience page and are not
+linked. Sources and dataflows on the left, and destinations and journeys on the
+right, are not collected yet and show as *next step*.
+
+Everything is inside the one file (no server, no internet, no install), so open
+it in Edge or Chrome from the synced OneDrive folder. SharePoint and Teams
+download an .html file instead of showing it, so hosting it for everyone needs a
+web environment. Opening it as `…html?selftest` renders every page once and
+lists any that fail.
