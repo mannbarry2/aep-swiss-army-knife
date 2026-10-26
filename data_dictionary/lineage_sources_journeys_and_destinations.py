@@ -178,6 +178,8 @@ def read_flow_service(get_json) -> dict:
 
 # How data comes IN, in words a reader knows, by the dataflow's flow spec.
 SOURCE_KINDS = {"stream data without transformation": "Streaming (HTTP API)",
+                "stream data with transformation": "Streaming (HTTP API)",
+                "streaming connection": "Streaming (HTTP API)",       # by its source's spec
                 "http api": "Streaming (HTTP API)",
                 "fileupload": "File uploaded in the UI",
                 "datastream_to_dataset": "Web / app (Edge datastream)",
@@ -223,7 +225,7 @@ def read_sources(fs: dict) -> list[dict]:
                 got += [p["dataSetId"]] if p.get("dataSetId") else [d.get("datasetId") for d in p.get("datasets") or []]
             return [x for x in dict.fromkeys(got) if x]
 
-        kind = SOURCE_KINDS.get(spec.lower())
+        kind = SOURCE_KINDS.get(spec.lower()) or SOURCE_KINDS.get(src_spec.lower())
         if not kind:
             store = FILE_STORES.get(src_spec.lower())
             kind = f"Files from {store}" if store else (src_spec or spec or "Other")
@@ -242,7 +244,8 @@ def read_sources(fs: dict) -> list[dict]:
 def fed_by(sources: list[dict]) -> str:
     """One line for a dataset's 'Fed by' cell: each way in, with the dataflow
     names when there are one or two, or a count when there are more (a file
-    uploaded by hand makes a new dataflow every time). Switched-off ones say so."""
+    uploaded by hand makes a new dataflow every time). A SQL job's name is its
+    SQL, so those are always counted. Switched-off ones say so."""
     groups: dict[str, list[dict]] = {}
     for s in sources:
         groups.setdefault(s["kind"], []).append(s)
@@ -250,7 +253,10 @@ def fed_by(sources: list[dict]) -> str:
     for kind, ss in groups.items():
         names = list(dict.fromkeys(s["name"][:60] for s in ss))
         off = sum(not s["live"] for s in ss)
-        what = ", ".join(names) if len(names) <= 2 else f"{len(ss)} dataflows"
+        if kind.startswith("SQL job"):
+            what = f"{len(ss)} job" + ("s" if len(ss) > 1 else "")
+        else:
+            what = ", ".join(names) if len(names) <= 2 else f"{len(ss)} dataflows"
         parts.append(f"{kind}: {what}" + (f" ({off} switched off)" if off else ""))
     return "; ".join(parts)
 

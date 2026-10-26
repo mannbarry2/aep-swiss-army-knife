@@ -100,9 +100,11 @@ The toolkit spans two product ranges:
 | [`performance_and_guardrails/batch_audience_evaluation_timing.py`](performance_and_guardrails/batch_audience_evaluation_timing.py) | Measures how long batch audience evaluation actually takes in a sandbox (read-only). |
 | [`platform_access_and_audit/user_activity_log_from_audit_events.py`](platform_access_and_audit/user_activity_log_from_audit_events.py) | Who is actively using AEP: per-user **activity** (not sign-ins) from the audit log over the last N days, with the tech-account suppression-list noise excluded and counted separately. |
 | [`parked/audience_renamer.py`](parked/audience_renamer.py) | **IN DEVELOPMENT — DO NOT USE.** Parked, unfinished: renaming a development sandbox's audiences to a naming convention. Refuses to run. |
-| [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, with `--data-dict` real field coverage + top-10 example values sampled in-memory (PII starred), and with `--history` (beta) how many months of unbroken data each field has. [Release notes](RELEASE_NOTES.md). |
+| [`data_dictionary_v3.py`](data_dictionary_v3.py) | **Data Dictionary v3.4.** Sucks out every XDM schema, filters to the ones that matter, and writes a tabbed, *strictly-confidential* workbook: a master field index, one tab per schema (ready for Claude → Mermaid ERDs), a Datasets/SQL-table map, an Audiences tab, with `--data-dict` real field coverage + top-10 example values sampled in-memory (PII starred), and with `--history` (beta) how many months of unbroken data each field has. Lineage either side: where data comes from (Sources, *Fed by*) and where every audience goes (Journeys, Destinations, *Where it goes*). [Release notes](RELEASE_NOTES.md). |
 | [`data_dictionary/release_notes_html_builder.py`](data_dictionary/release_notes_html_builder.py) | Builds `RELEASE_NOTES.html`, the colour edition of the Data Dictionary release notes (laid out like Adobe Experience League release notes), from `RELEASE_NOTES.md`. Re-run it after editing the Markdown. Stdlib only. |
-| [`data_dictionary/data_dictionary_explorer_html_builder.py`](data_dictionary/data_dictionary_explorer_html_builder.py) | **Prototype.** Turns a Data Dictionary workbook into one self-contained web page: search, a page per field / schema / dataset / audience, and clickable lineage from dataset to the audiences that read each field. No Adobe calls. See [Explorer](#explorer-prototype-the-workbook-as-a-web-page). |
+| [`data_dictionary/data_dictionary_explorer_html_builder.py`](data_dictionary/data_dictionary_explorer_html_builder.py) | **Prototype.** Turns a Data Dictionary workbook into one self-contained web page: search, a page per field / schema / dataset / audience / journey / source, and clickable lineage from source to the journeys and destinations each audience goes to. Draws the workbook only; no Adobe calls. See [Explorer](#explorer-prototype-the-workbook-as-a-web-page). |
+| [`data_dictionary/lineage_sources_journeys_and_destinations.py`](data_dictionary/lineage_sources_journeys_and_destinations.py) | Library: where data comes from (every dataflow into a dataset) and where audiences go (AJO journeys, destination dataflows), for the Data Dictionary's lineage tabs. The journey census and the streaming triage use it too. See [Lineage](#lineage-where-data-comes-from-where-audiences-go). |
+| [`data_dictionary/audience_rule_reader.py`](data_dictionary/audience_rule_reader.py) | Library: the fields and audiences an audience rule reads, for the Audiences tab's *Fields it reads* and *Builds on*. |
 
 The tools are credential-driven and tenant-aware, so the same scripts run
 cleanly across multiple Adobe orgs without folder collisions. `creds/*.json`
@@ -945,29 +947,63 @@ other technical columns are folded away behind a **+** above the column
 letters. A schema's name in a **Tab** column is a link to its tab, and each
 schema tab links back to the list.
 
+### Lineage: where data comes from, where audiences go
+
+The workbook holds both ends of the lineage the schemas and fields sit between
+(v3.4.23), read with the same credential and only GETs:
+
+- **Sources** tab: every dataflow that brings data into a dataset. That
+  includes streaming from other systems (HTTP API inlets, named), files from
+  cloud storage (with the folder), files uploaded by hand in the UI (each upload
+  is a new dataflow), the web / app (Edge), and SQL jobs (Data Distiller, which
+  also name the datasets they read). It gives when each last ran and whether it
+  is switched on. Adobe's own housekeeping between its stores (loading Profile
+  and identity, TTL, lookups) is left out. The Datasets tab sums the sources up
+  per dataset in **Fed by**.
+- **Journeys** tab: every Adobe Journey Optimizer journey, one row per version,
+  and the audiences it reads (Read Audience) or starts from (Audience
+  Qualification). *Live now* means Deployed, or Closed (no new entrants, but
+  those already in it carry on).
+- **Destinations** tab: every dataflow sending audiences out of AEP, and which
+  audiences.
+- **Audiences** tab: **Where it goes** comes straight after the name. It says
+  *In use* (a live journey or destination, or another audience built on it),
+  *Not live* (only in journeys that are not running or dataflows switched off),
+  or *Nothing found using it*, which marks a candidate to unpublish. The
+  journeys and destinations are named beside it. The tab also has *Fields it
+  reads* (named as on the Field Index) and the ids of the audiences each one
+  builds on and that build on it. "Nothing found" is never claimed when the
+  journeys or dataflows could not be fully read, and it is not proof: calls
+  from other systems and Data Distiller queries are not seen.
+
+The logic lives in two libraries the dictionary imports:
+[`data_dictionary/lineage_sources_journeys_and_destinations.py`](data_dictionary/lineage_sources_journeys_and_destinations.py)
+(sources, journeys, destinations; the journey census and the streaming triage
+use it too) and
+[`data_dictionary/audience_rule_reader.py`](data_dictionary/audience_rule_reader.py)
+(the fields and audiences a rule reads).
+
 ### Explorer (prototype): the workbook as a web page
 
 [`data_dictionary/data_dictionary_explorer_html_builder.py`](data_dictionary/data_dictionary_explorer_html_builder.py)
 turns a finished workbook (and its PQL file) into **one .html file** for people
 who would otherwise need training to find their way round the workbook. It
-reads only the Data Dictionary's output, so it makes no Adobe calls and takes
-seconds:
+only draws what the workbook holds. The workbook stands alone, and the Explorer
+works nothing out for itself. It makes no Adobe calls and takes seconds:
 
 ```
 python data_dictionary/data_dictionary_explorer_html_builder.py --sandbox=roi-prod
 ```
 
 It writes `Data Dictionary Explorer - <sandbox> - <date>.html` next to the
-workbook. The page has a search box, then a page for every field, schema, dataset
-and audience. Each one says in plain words what the item is and how good its data
-is, and has a lineage strip you can click along:
-**dataset → schema → field → audiences that read it → audiences built on those**.
-Which fields an audience reads is worked out from its rule: profile arrays,
-event sequences, arrays inside events, and audiences it builds on through
-`inSegment()` or `segmentMembership`. Fields Adobe keeps for itself (Journey
-Optimizer's email tracking, say) are named on the audience page and are not
-linked. Sources and dataflows on the left, and destinations and journeys on the
-right, are not collected yet and show as *next step*.
+workbook. The page has a search box, then a page for every field, schema,
+dataset, audience, journey, source and destination. Each one says in plain words
+what the item is and how good its data is, and has a lineage strip you can click
+along:
+**source → dataset → schema → field → audience → journey or destination**.
+The links come from the workbook's lineage columns and tabs (see
+[Lineage](#lineage-where-data-comes-from-where-audiences-go)). A workbook from
+before v3.4.23 still opens, without them.
 
 Everything is inside the one file (no server, no internet, no install), so open
 it in Edge or Chrome from the synced OneDrive folder. SharePoint and Teams

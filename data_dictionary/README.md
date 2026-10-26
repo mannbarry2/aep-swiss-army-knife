@@ -13,6 +13,8 @@ Everything that describes what exists in a sandbox: schemas, fields, datasets, a
 | [`profile_dataset_overlap_report.py`](profile_dataset_overlap_report.py) | The Profile dataset overlap report and the cut-list (also Data Dictionary tabs). |
 | [`audience_complexity_score.py`](audience_complexity_score.py) | Library: the 0-100 complexity score the Data Dictionary gives every audience. |
 | [`release_notes_html_builder.py`](release_notes_html_builder.py) | Builds RELEASE_NOTES.html from RELEASE_NOTES.md. |
-| [`data_dictionary_explorer_html_builder.py`](data_dictionary_explorer_html_builder.py) | Prototype: a Data Dictionary workbook as one web page, with search and clickable lineage. |
+| [`data_dictionary_explorer_html_builder.py`](data_dictionary_explorer_html_builder.py) | Prototype: a Data Dictionary workbook as one web page, with search and clickable lineage. Draws the workbook only. |
+| [`lineage_sources_journeys_and_destinations.py`](lineage_sources_journeys_and_destinations.py) | Library: sources into datasets, AJO journeys and destinations out of audiences (Data Dictionary lineage tabs; also used by the journey census and streaming triage). |
+| [`audience_rule_reader.py`](audience_rule_reader.py) | Library: the fields and audiences an audience rule reads (Data Dictionary Audiences tab). |
 
 Run any tool from the repo root: `python data_dictionary/<tool>.py --help`.

@@ -1,6 +1,6 @@
 # Data Dictionary release notes
 
-**Last update:** October 25, 2026 · **Latest version:** v3.4.22 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
+**Last update:** October 26, 2026 · **Latest version:** v3.4.23 · **Script:** [`data_dictionary_v3.py`](data_dictionary_v3.py)
 
 > [!TIP]
 > Every workbook the Data Dictionary writes carries its version, the commit
@@ -15,6 +15,7 @@
 
 | Release date | Version | Highlights |
 | --- | --- | --- |
+| [October 26, 2026](#october-26-2026) | v3.4.23 | Lineage in the workbook: where data comes from (Sources) and where every audience goes (Journeys, Destinations, "Where it goes") |
 | [October 25, 2026](#october-25-2026) | v3.4.20 – v3.4.22 | Field history reads a month's biggest batch first, as it was meant to; SQL to check any field by hand; a workbook tidied for readers outside AEP |
 | [October 24, 2026](#october-24-2026) | v3.4.15 – v3.4.19 | Field history's timeouts fixed; every unreadable month explained; "In Profile now" — what an audience can see; no false "empty" coverage |
 | [October 23, 2026](#october-23-2026) | v3.4.14 | Field history hardened after its first prod run; endpoint health report |
@@ -29,6 +30,41 @@
 | [August 14, 2026](#august-14-2026) | v3.4.0 – v3.4.1 | Complete Profile coverage; credential name gone from the workbook |
 | [August 13, 2026](#august-13-2026) | v3.3.0 | Audiences tab; provenance line; How to Use tab |
 | [Earlier releases](#earlier-releases) | v3.0.0 – v3.2.0 | The baseline; Profile coverage; SQL table names |
+
+---
+
+## October 26, 2026
+
+**Release date: October 26, 2026** · v3.4.23
+
+New features and updates to existing features in the Data Dictionary:
+
+- **Lineage:** the workbook now says where the data comes from and where every audience goes, so an audience nothing uses can be found and unpublished.
+
+### Lineage
+
+The journey half of the journey census was meant to come across with its
+audience half on August 13, and did not: the dictionary could not say which
+journeys use an audience. This release puts both ends of the lineage in the
+workbook, which stands on its own.
+
+**New features**
+
+| Feature | Description |
+| --- | --- |
+| Sources tab ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | Every dataflow that brings data into a dataset: streaming from other systems (HTTP API inlets, named), files from cloud storage (with their folder), files uploaded by hand in the UI, the web / app (Edge), and SQL jobs (Data Distiller), which also name the datasets they read. When it last ran, and whether it is switched on. Adobe's own housekeeping between its stores is left out. |
+| Fed by ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | On the Datasets tab: the dataflows that fill each dataset, summed up in a line. |
+| Journeys tab ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | Every Adobe Journey Optimizer journey, one row per version, with its status and the audiences it reads (Read Audience) or starts from (Audience Qualification). Live = Deployed, or Closed (no new entrants, but those in it carry on). |
+| Destinations tab ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | Every dataflow that sends audiences out of AEP, and the audiences it sends. |
+| Where it goes ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | On the Audiences tab, straight after the name: *In use* (a live journey or destination, or another audience built on it), *Not live* (only in journeys not running or dataflows switched off) or *Nothing found using it* -- a candidate to unpublish -- with the journeys and destinations named beside it. Never claimed on a partial read: if the journeys or dataflows could not be fully read, the cell says so. |
+| Fields it reads ![New](https://img.shields.io/badge/New-2D7D46?style=flat-square)<br>`v3.4.23` | On the Audiences tab: the fields each rule tests, named as on the Field Index -- profile fields, profile arrays, event fields, arrays inside events -- and the ids of the audiences it builds on and that build on it (Adobe's own list, inSegment() and segmentMembership). |
+
+**Fixes and improvements**
+
+| Fix | Description |
+| --- | --- |
+| One copy of the journey logic ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.23` | `extract_audiences()` moved from the journey census into `data_dictionary/lineage_sources_journeys_and_destinations.py`, which the census now imports; the streaming triage tool finds destinations through the same module. |
+| Explorer draws, the workbook knows ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.23` | Reading an audience's rule moved out of the Explorer prototype into `data_dictionary/audience_rule_reader.py`, used by the dictionary. The Explorer now only draws what the workbook holds, and has pages for journeys, sources and destinations. |
 
 ---
 

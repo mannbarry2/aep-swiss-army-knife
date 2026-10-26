@@ -83,6 +83,10 @@ check("fed by: names, and switched-off flows said",
       L.fed_by([src["f1"], src["f2"]]))
 many = [dict(src["f1"], name=f"Upload {i}", kind="File uploaded in the UI") for i in range(5)]
 check("fed by: many uploads are a count", L.fed_by(many) == "File uploaded in the UI: 5 dataflows", L.fed_by(many))
+check("fed by: SQL jobs are counted, not quoted", L.fed_by([src["f3"]]) == "SQL job (Data Distiller): 1 job", L.fed_by([src["f3"]]))
+fs_other = dict(fs, flow_specs=dict(fs["flow_specs"], **{"s-stream": "Some newer streaming spec"}))
+check("sources: streaming known by its source's spec too",
+      next(s for s in L.read_sources(fs_other) if s["id"] == "f1")["kind"] == "Streaming (HTTP API)")
 
 # ---- destinations ---------------------------------------------------------------
 fs_d = dict(fs, flows=[fs["flows"][4]])
