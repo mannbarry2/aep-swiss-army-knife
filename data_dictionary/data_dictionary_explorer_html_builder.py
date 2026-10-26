@@ -40,6 +40,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+import data_dictionary_v3 as dd  # noqa: E402
 from data_dictionary import audience_complexity_score as acs  # noqa: E402
 
 SCRIPT_NAME = "data_dictionary_explorer_html_builder"
@@ -286,6 +287,12 @@ def pql_text_refs(text: str) -> tuple[set[tuple[str, str]], list[str]]:
 # ----------------------------------------------------------------------------
 # The model the page draws
 # ----------------------------------------------------------------------------
+def _rule_for_people(text):
+    """The readable rule as the workbook shows it: no renderer markers, […] for hidden parts."""
+    t = dd._pql_for_people(text)
+    return "(too complex to show as text – the full rule is below)" if str(t or "").startswith("(too complex") else t
+
+
 def _yes(v) -> bool:
     return str(v or "").strip().lower() in ("yes", "y", "true")
 
@@ -378,7 +385,7 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
             "id": aid, "name": r.get("Audience name"), "desc": r.get("Description"),
             "eval": r.get("Evaluation"), "life": r.get("Lifecycle"), "tags": r.get("Tags"),
             "origin": r.get("Origin"), "by": r.get("Created by"), "mod": r.get("Last modified by"),
-            "rule": side.get("readable_pql") or r.get("PQL (readable)"),
+            "rule": _rule_for_people(side.get("readable_pql") or r.get("PQL (readable)")),
             "raw": raw[:RAW_PQL_MAX], "rawcut": len(raw) > RAW_PQL_MAX, "fmt": fmt,
             "score": _num(r.get("Complexity score (0-100)")), "rag": r.get("Complexity RAG"),
             "why": r.get("Why this score"), "lookback": _num(r.get("Lookback (days)")),
@@ -607,6 +614,8 @@ D.fields.forEach((f, i) => by.field[f.path] = i);
 D.schemas.forEach((s, i) => by.schema[s.tab] = i);
 D.datasets.forEach((d, i) => by.dataset[d.table || d.id] = i);
 D.audiences.forEach((a, i) => by.audience[a.id] = i);
+const audByName = {};
+D.audiences.forEach((a, i) => { if (!(a.name in audByName)) audByName[a.name] = i; });
 const href = {
   f: i => "#/field/" + enc(D.fields[i].path),
   s: i => "#/schema/" + enc(D.schemas[i].tab),
@@ -865,10 +874,11 @@ function pageHome() {
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 function ruleHtml(rule) {
   // Audience ids become their names, linked: "is in «Mens_Audience»".
-  const link = id => by.audience[id] !== undefined ? `<a href="${href.a(by.audience[id])}">«${h(D.audiences[by.audience[id]].name)}»</a>` : null;
-  // One pass, so the links it writes are not rewritten again.
-  const re = new RegExp(String.raw`segmentMembership\.\w+\.(${UUID})\.status in \[&quot;realized&quot;, &quot;existing&quot;\]|inSegment\(&quot;(${UUID})&quot;\)|(${UUID})`, "g");
-  return h(rule).replace(re, (m, a, b, c) => { const l = link(a || b || c); return l ? (c ? l : "is in " + l) : m; });
+  const html = h(rule), unh = s => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const link = key => { const i = by.audience[key] ?? audByName[unh(key)]; return i !== undefined ? `<a href="${href.a(i)}">«${h(D.audiences[i].name)}»</a>` : null; };
+  // One pass, so the links it writes are not rewritten again. inSegment() names an audience by id or by name.
+  const re = new RegExp(String.raw`segmentMembership\.\w+\.(${UUID})\.status in \[&quot;realized&quot;, &quot;existing&quot;\]|inSegment\(&quot;(.+?)&quot;\)|(${UUID})`, "g");
+  return html.replace(re, (m, a, b, c) => { const l = link(a || b || c); return l ? (c ? l : "is in " + l) : m; });
 }
 function retentionList() {
   const rows = M.retention.map(r => {
@@ -1021,7 +1031,9 @@ function pageDataset(i) {
 
 function pageAudience(i) {
   const a = D.audiences[i];
-  const schemas = uniq(a.f.flatMap(f => D.fields[f].on.map(o => o.s)));
+  // A field found in almost every schema (eventType, _id) says nothing about where the data is: use the specific ones.
+  const specific = a.f.filter(f => D.fields[f].on.length <= 3);
+  const schemas = uniq((specific.length ? specific : a.f).flatMap(f => D.fields[f].on.map(o => o.s)));
   const reads = [...a.f.map(f => N("f", f)), ...a.dep.map(d => N("a", d))];
   const used = a.used.slice().sort(audSort);
   const noRule = !a.fmt && !a.rule;
@@ -1033,7 +1045,7 @@ function pageAudience(i) {
     ${a.desc ? `<p class="say">${h(a.desc)}</p>` : ""}
     <p class="say">${noRule ? `This audience has no rule inside Adobe: it was ${a.origin ? `made by <b>${h(a.origin)}</b>` : "uploaded or made elsewhere"}, so there are no fields to trace.`
       : `It reads <b>${plural(a.f.length, "field")}</b>${a.dep.length ? ` and builds on <b>${plural(a.dep.length, "other audience")}</b>` : ""}. ${used.length ? `<b>${plural(used.length, "audience")}</b> build on it.` : "No other audience builds on it."}`}</p>
-    <div class="facts"><div>Created by<b>${h(a.by || "–")}</b></div><div>Last changed by<b>${h(a.mod || "–")}</b></div><div>Origin<b>${h(a.origin || "–")}</b></div><div>Looks back<b>${num(a.lookback) ? fmt(a.lookback, 0) + " days" : "–"}</b></div><div>Largest audience it builds on<b>${h(a.base || "–")}${num(a.basen) ? ` (${fmt(a.basen, 0)})` : ""}</b></div><div>Audience ID<b class="mono">${h(a.id)}</b></div></div>
+    <div class="facts"><div>Created by<b>${h(a.by || "–")}</b></div><div>Last changed by<b>${h(a.mod || "–")}</b></div><div>Origin<b>${h(a.origin || "–")}</b></div><div>Looks back<b>${num(a.lookback) ? plural(num(a.lookback), "day") : h(a.lookback || "–")}</b></div><div>Largest audience it builds on<b>${h(a.base || "–")}${num(a.basen) ? ` (${fmt(a.basen, 0)})` : ""}</b></div><div>Audience ID<b class="mono">${h(a.id)}</b></div></div>
     <h2>Lineage</h2>
     ${lineage([
       {title: "Schemas", items: schemas.map(s => N("s", s)), more: "#a-reads"},
