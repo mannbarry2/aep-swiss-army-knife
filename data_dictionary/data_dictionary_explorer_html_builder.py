@@ -1046,7 +1046,7 @@ function pageAudience(i) {
       ${a.raw ? `<details><summary>Full rule, as Adobe stores it (technical)</summary><div class="copyrow"><pre class="code">${h(pretty)}</pre>${copyBtn(a.raw)}</div>${a.rawcut ? '<p class="hint">Cut short here; the whole rule is in the PQL file next to the workbook.</p>' : ""}</details>` : ""}` : ""}
     <h2 id="a-reads">Fields it reads</h2>
     ${a.f.length ? table("t-af", fieldCols(), a.f.map(f => D.fields[f])) : `<p class="sub">${a.dep.length ? "None directly – it is built from the audiences below." : noRule ? "None – it has no rule." : "None that is in this dictionary."}</p>`}
-    ${a.miss.length ? `<p class="hint">Also reads ${a.miss.map(p => `<code>${h(p)}</code>${/^_experience\.customerJourneyManagement\./.test(p) ? " (Journey Optimizer's own email and push tracking)" : ""}`).join(", ")} – not in this dictionary: Adobe system data, or a schema that was left out.</p>` : ""}
+    ${a.miss.length ? `<p class="hint">Also reads ${a.miss.map(p => `<code>${h(p)}</code>${/^_experience\.customerJourneyManagement\./.test(p) ? " (Journey Optimizer's own email and push tracking)" : /^pushNotificationDetails/.test(p) ? " (Journey Optimizer's push-notification sign-ups)" : ""}`).join(", ")} – not in this dictionary: Adobe system data, or a schema that was left out.</p>` : ""}
     ${a.dep.length ? `<h2>Audiences it builds on</h2>${table("t-adep", audCols(), a.dep.map(d => D.audiences[d]), {sort: 3, dir: -1})}` : ""}
     <h2 id="a-used">Audiences built on it</h2>${used.length ? table("t-aused", audCols(), used.map(x => D.audiences[x]), {sort: 3, dir: -1}) : '<p class="sub">None.</p>'}`;
 }
