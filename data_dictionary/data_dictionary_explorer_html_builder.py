@@ -389,7 +389,6 @@ PAGE = r"""<!doctype html>
 html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans)}
 a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
 code,.mono{font-family:var(--mono);font-size:13px}
-.conf{background:#7d1a1a;color:#fff;font-size:11px;letter-spacing:.12em;text-align:center;padding:2px 0;font-weight:600}
 header.top{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:4px solid var(--header)}
 .bar{max-width:1280px;margin:0 auto;padding:10px 20px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .brand{font-weight:700;white-space:nowrap;color:var(--ink)} .brand small{display:block;font-weight:400;color:var(--muted);font-size:12px}
@@ -488,7 +487,6 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
 </style>
 </head>
 <body>
-<div class="conf">STRICTLY CONFIDENTIAL</div>
 <header class="top"><div class="bar">
   <a class="brand" href="#/">Data Dictionary Explorer<span class="proto">PROTOTYPE</span><small id="brand-sub"></small></a>
   <div class="searchwrap" id="topsearch"></div>
