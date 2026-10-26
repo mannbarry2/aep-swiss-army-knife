@@ -2313,6 +2313,7 @@ SCALE_COLUMNS = {
 # HEAD_LINES lines: one narrow column with a long name made the whole header
 # row four lines tall.
 FIT_MAX, FIT_MAX_WRAP, FIT_MAX_FIRST = 50, 50, 72
+WRAP_MIN = 30            # a prose column with longer text is at least this wide
 HEAD_LINES, HEAD_MAX = 2, 24
 # A note row taller than this is cut short -- long explanations belong on How
 # to Use, not above a table where they stay frozen on screen.
@@ -2432,6 +2433,10 @@ def _polish_workbook(wb):
                     cap = (FIT_MAX_WRAP if wrap else FIT_MAX_FIRST if col == 1
                            else FIT_MAX)
                     width = max(word, 8, min(p90 + 2, cap))
+                    # Prose fitted to its typical length made every longer one
+                    # wrap into a tall row: give it room for a short sentence.
+                    if wrap and lens and lens[-1] > width:
+                        width = max(width, min(cap, WRAP_MIN))
                     while (width < HEAD_MAX
                            and _wrapped_lines(head, width * 0.9 - 1) > HEAD_LINES):
                         width += 1

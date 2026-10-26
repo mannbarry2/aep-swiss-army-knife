@@ -70,4 +70,17 @@ check("other cells in a tall row read from the top", ws["A6"].alignment.vertical
 check("long note merged and wrapped",
       any(str(r) .startswith("A3:") for r in ws.merged_cells.ranges) and ws["A3"].alignment.wrap_text)
 check("colour scale on the months", any("F6" in str(r.sqref) for r in ws.conditional_formatting))
+
+# Mostly short descriptions with a few longer ones: room for a sentence, not a sliver.
+wb2 = Workbook()
+ws2 = wb2.active
+for c, h in enumerate(["Audience name", "Description"], 1):
+    ws2.cell(5, c, h)
+ws2._dd_table = (5, 2)
+for i in range(20):
+    ws2.append([f"aud{i}", "Week 20" if i < 18 else "Audience who have opened the email we sent in week 24"])
+ws2.auto_filter.ref = f"A5:B{ws2.max_row}"
+dd._polish_workbook(wb2)
+check("prose column wide enough for a short sentence", ws2.column_dimensions["B"].width >= dd.WRAP_MIN,
+      ws2.column_dimensions["B"].width)
 print(f"\n{sum(results)}/{len(results)} passed")
