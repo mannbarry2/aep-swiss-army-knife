@@ -91,17 +91,6 @@ SANDBOX_LIST_URL = (
 AUDIENCES_URL = "https://platform.adobe.io/data/core/ups/audiences"
 MERGE_POLICIES_URL = "https://platform.adobe.io/data/core/ups/config/mergePolicies"
 PREVIEW_URL = "https://platform.adobe.io/data/core/ups/preview"
-# Flow Service -- base confirmed in repo; sub-paths are standard AEP and are
-# called defensively (a wrong path degrades to a blank destination column, it
-# never crashes the run).
-FLOWS_URL = "https://platform.adobe.io/data/foundation/flowservice/flows"
-TARGET_CONNECTIONS_URL = (
-    "https://platform.adobe.io/data/foundation/flowservice/targetConnections"
-)
-CONNECTION_SPECS_URL = (
-    "https://platform.adobe.io/data/foundation/flowservice/connectionSpecs"
-)
-
 DEFAULT_SANDBOX = "prod"          # this tool targets prod by default
 PAGE_LIMIT = 100
 MAX_PAGES = 500                   # cursor-loop backstop (~50k items)
@@ -489,92 +478,6 @@ def merge_policy_edge_active(pol: dict) -> str:
 
 
 # --- Flow Service: audience -> destination mapping -----------------------
-def _flow_paged(url, headers, label):
-    """Flow Service pagination follows _links.next.href (continuationToken).
-    The next href is relative to the flowservice base (e.g. '/flows?...'), NOT
-    the host root, so it is resolved against the base path of `url`."""
-    base = url.rsplit("/", 1)[0]          # .../foundation/flowservice
-    out: "list[dict]" = []
-    full = f"{url}?{urllib.parse.urlencode({'limit': PAGE_LIMIT})}"
-    page = 0
-    while full and page < MAX_PAGES:
-        page += 1
-        try:
-            body = http(full, headers=headers)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:200]
-            logger.warning(f"{label} fetch failed: HTTP {e.code} {detail}")
-            break
-        except Exception as e:
-            logger.warning(f"{label} fetch failed: {type(e).__name__}: {e}")
-            break
-        data = json.loads(body) or {}
-        items = data.get("items") or data.get("flows") or data.get("children") or []
-        out.extend(items)
-        nxt = ((data.get("_links") or {}).get("next") or {}).get("href")
-        if not nxt or not items:
-            break
-        # next href is relative to the flowservice base (e.g. '/flows?...').
-        full = nxt if nxt.startswith("http") else f"{base}{nxt}"
-    return out
-
-
-# Connection-spec names that are internal AEP plumbing (ingestion, profile
-# store, identity), never marketing destinations. Anything NOT matching these
-# is treated as a candidate destination; the segmentSelectors in the flow
-# detail then confirm it is an audience-activation flow.
-_INTERNAL_SPECS = (
-    "datalake", "dwh", "activation-ups", "activation-datalake",
-    "entity lookup", "ups-atlas", "uis identities", "uis graphs",
-    "dataretention", "ups segments", "ups-snapshot",
-)
-
-
-def _is_internal_spec(name) -> bool:
-    n = (name or "").lower()
-    return any(s in n for s in _INTERNAL_SPECS)
-
-
-def _fetch_flow_detail(headers, fid) -> "dict | None":
-    """GET one flow's full detail. The /flows LIST omits `transformations`
-    (where the activated audiences live), so each activation flow is fetched
-    individually."""
-    if not fid:
-        return None
-    try:
-        body = http(f"{FLOWS_URL}/{urllib.parse.quote(str(fid), safe='')}",
-                    headers=headers, timeout=30)
-    except Exception as e:
-        logger.warning(f"  flow {fid} detail fetch failed: {type(e).__name__}")
-        return None
-    try:
-        data = json.loads(body) or {}
-    except (ValueError, TypeError):
-        return None
-    items = data.get("items")
-    if isinstance(items, list) and items:
-        return items[0]
-    return data
-
-
-def _segment_ids_from_flow(detail) -> "list[str]":
-    """Audience/segment ids activated by a flow, from
-    transformations[].params.segmentSelectors.selectors[].value.id (the
-    confirmed AEP activation shape; PLATFORM_SEGMENT and friends)."""
-    out: "list[str]" = []
-    for tr in detail.get("transformations") or []:
-        sels = (((tr.get("params") or {}).get("segmentSelectors")) or {}).get("selectors")
-        if not isinstance(sels, list):
-            continue
-        for s in sels:
-            v = s.get("value") if isinstance(s, dict) else None
-            if isinstance(v, dict):
-                sid = str(v.get("id") or v.get("systemSegmentId") or "")
-                if sid:
-                    out.append(sid)
-    return out
-
-
 def build_destination_map(headers) -> "tuple[dict, bool]":
     """Return (audience_id -> list[(label, active)], ok).
 
@@ -587,53 +490,22 @@ def build_destination_map(headers) -> "tuple[dict, bool]":
     export many audiences, and one audience can feed many destinations. The
     label resolves targetConnection -> connectionSpec ('Facebook Custom
     Audience', 'Google Ads', ...) plus the flow's own name."""
-    flows = _flow_paged(FLOWS_URL, headers, "Flows")
-    if not flows:
+    # One way of finding destinations: the Data Dictionary's lineage library,
+    # which this function's original logic moved into (2026-10-26).
+    from data_dictionary import lineage_sources_journeys_and_destinations as lineage
+    try:
+        flows = lineage.read_destinations(lambda url: json.loads(http(url, headers=headers) or b"{}"))
+    except Exception as e:
+        logger.warning(f"Destination flows fetch failed: {type(e).__name__}: {e}")
         return {}, False
-    tcs = _flow_paged(TARGET_CONNECTIONS_URL, headers, "Target connections")
-    specs = _flow_paged(CONNECTION_SPECS_URL, headers, "Connection specs")
-    spec_name = {str(s.get("id")): (s.get("name") or "") for s in specs if s.get("id")}
-    tc_map = {}
-    for tc in tcs:
-        tcid = str(tc.get("id") or "")
-        if not tcid:
-            continue
-        sid = str((tc.get("connectionSpec") or {}).get("id") or "")
-        tc_map[tcid] = {"name": tc.get("name") or "", "spec": spec_name.get(sid, "")}
-
-    # Candidate activation flows: at least one target connection that is a real
-    # (non-internal) destination. Confirmed below via segmentSelectors.
-    candidates = []
-    for f in flows:
-        for t in f.get("targetConnectionIds") or []:
-            tc = tc_map.get(str(t))
-            if tc and not _is_internal_spec(tc["spec"]):
-                candidates.append(f)
-                break
-    logger.info(f"  scanning {len(candidates)} candidate destination flow(s) "
-                f"of {len(flows)} total...")
-
     aud_dest: "dict[str, list[tuple[str, bool]]]" = {}
-    for f in candidates:
-        detail = _fetch_flow_detail(headers, f.get("id"))
-        if not detail:
-            continue
-        seg_ids = _segment_ids_from_flow(detail)
-        if not seg_ids:
-            continue
-        labels = []
-        for t in detail.get("targetConnectionIds") or f.get("targetConnectionIds") or []:
-            tc = tc_map.get(str(t))
-            if tc and not _is_internal_spec(tc["spec"]):
-                labels.append(tc["spec"] or tc["name"] or str(t))
-        spec_label = ", ".join(dict.fromkeys(l for l in labels if l)) or "(destination)"
-        flow_name = detail.get("name") or f.get("name") or ""
-        label = f"{spec_label} ({flow_name})" if flow_name else spec_label
-        state = str(detail.get("state") or f.get("state") or "").lower()
-        active = state in ("enabled", "active", "")  # blank state -> assume active
-        for sid in seg_ids:
-            aud_dest.setdefault(sid, []).append((label, active))
-    logger.info(f"  resolved destinations for {len(aud_dest)} audience(s).")
+    for f in flows:
+        spec_label = f["destination"] or "(destination)"
+        label = f"{spec_label} ({f['name']})" if f["name"] else spec_label
+        for sid in f["audiences"]:
+            aud_dest.setdefault(sid, []).append((label, f["live"]))
+    logger.info(f"  resolved destinations for {len(aud_dest)} audience(s) "
+                f"from {len(flows)} destination flow(s).")
     return {"_map": aud_dest}, True
 
 

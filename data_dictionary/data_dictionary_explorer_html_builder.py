@@ -3,20 +3,19 @@
 data_dictionary/data_dictionary_explorer_html_builder.py  (AEP Swiss Army Knife)
 ==========================================================
 PROTOTYPE. Turns a Data Dictionary workbook into ONE web page people can use
-without training: a search box, a page for every field, schema, dataset and
-audience, and lineage you can click along --
+without training: a search box, a page for every field, schema, dataset,
+audience, journey and source, and lineage you can click along --
 
-    dataset -> schema -> field -> audiences that read it -> audiences built on those
+    source -> dataset -> schema -> field -> audience -> journey / destination
 
-Reads only the Data Dictionary's own output (the workbook and its PQL file),
-so it makes no Adobe calls and takes seconds. The page is a single .html file
-with everything inside it: no server, no install, no internet needed. Open it
-in Edge or Chrome from the synced OneDrive folder (SharePoint and Teams
-download .html files rather than show them).
-
-Where the data came from (sources, dataflows) and where audiences go
-(destinations, journeys) are not in the workbook yet; the page shows those
-columns as "next step".
+It only DRAWS what the workbook holds (the workbook stands alone): the lineage
+comes from the Data Dictionary's Sources, Journeys and Destinations tabs and
+the Audiences tab's 'Fields it reads', 'Builds on' / 'Used by' and 'Where it
+goes' columns (v3.4.23). The PQL file beside the workbook supplies only the
+full text of rules too long for a cell. No Adobe calls; seconds to build. The
+page is a single .html file with everything inside it: no server, no install,
+no internet needed. Open it in Edge or Chrome from the synced OneDrive folder
+(SharePoint and Teams download .html files rather than show them).
 
 Stdlib + openpyxl only.
 
@@ -40,16 +39,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-import data_dictionary_v3 as dd  # noqa: E402
-from data_dictionary import audience_complexity_score as acs  # noqa: E402
 
 SCRIPT_NAME = "data_dictionary_explorer_html_builder"
-SCRIPT_VERSION = "0.1.0"
-SCRIPT_DATE = "2026-10-25"
+SCRIPT_VERSION = "0.2.0"
+SCRIPT_DATE = "2026-10-26"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 RAW_PQL_MAX = 60_000        # characters of raw rule kept per audience (the rest is in the PQL file)
-_NEXT = "\0next"            # env key: what the next lambda's variable stands for
 
 
 def opt(name, default=None):
@@ -134,6 +130,8 @@ def read_workbook(path: Path) -> dict:
                 hist_head = [str(c) for c in r[6:] if c]
                 break
     audiences = _table(wb["Audiences"], "Sandbox") if "Audiences" in wb.sheetnames else []
+    lineage = {n: _table(wb[n], "Sandbox") if n in wb.sheetnames else []
+               for n in ("Sources", "Journeys", "Destinations")}
     tabs = {}
     for s in schemas:
         tab = s.get("Tab")
@@ -141,7 +139,7 @@ def read_workbook(path: Path) -> dict:
             tabs[tab] = {r.get("Field (dot notation)"): r for r in _table(wb[tab], "Field (dot notation)")}
     wb.close()
     return {"meta": meta, "schemas": schemas, "datasets": datasets, "fields": fields,
-            "hist": hist, "months": hist_head, "audiences": audiences, "tabs": tabs}
+            "hist": hist, "months": hist_head, "audiences": audiences, "tabs": tabs, **lineage}
 
 
 def read_pql(path: Path | None) -> dict:
@@ -156,141 +154,10 @@ def read_pql(path: Path | None) -> dict:
 
 
 # ----------------------------------------------------------------------------
-# Which fields an audience rule reads
-# ----------------------------------------------------------------------------
-def _lookup_path(node, env):
-    """(root, [names]) for a chain of fieldLookups, root 'profile' or 'event';
-    None when it does not start from the profile or a known variable."""
-    names = []
-    while isinstance(node, dict) and node.get("nodeType") == "fieldLookup":
-        names.append(str(node.get("fieldName") or ""))
-        node = node.get("object")
-    if not isinstance(node, dict):
-        return None
-    if node.get("nodeType") == "parameterReference":
-        root, prefix = "profile", []
-    elif node.get("nodeType") == "varRef" and node.get("varName") in env:
-        root, prefix = env[node["varName"]]
-    else:
-        return None
-    names = prefix + names[::-1]
-    if root == "profile" and names[:1] == ["xEvent"]:
-        root, names = "event", names[1:]
-    # A lookup join (field@{class}) leaves this schema: keep the joining field only.
-    for n, name in enumerate(names):
-        if "@{" in name:
-            names = names[:n] + [name.split("@{", 1)[0]]
-            break
-    return root, names
-
-
-def _element(p):
-    """What a variable over the array `p` stands for: one item of it."""
-    root, names = p
-    return (root, names[:-1] + [names[-1] + "[]"]) if names else (root, names)
-
-
-def pql_field_refs(tree) -> set[tuple[str, str]]:
-    """Every (root, dotted path) a pql/json rule reads, in the Data Dictionary's
-    notation (array items as 'list[].field'). The event timestamp a sequence is
-    ordered by is left out: every event rule has it."""
-    refs = set()
-
-    def walk(node, env):
-        if isinstance(node, list):
-            for x in node:
-                walk(x, env)
-            return
-        if not isinstance(node, dict):
-            return
-        nt = node.get("nodeType")
-        if nt == "fieldLookup":
-            p = _lookup_path(node, env)
-            if p and p[1]:
-                refs.add((p[0], ".".join(p[1])))
-            base = node
-            while isinstance(base, dict) and base.get("nodeType") == "fieldLookup":
-                base = base.get("object")
-            if isinstance(base, dict) and base.get("nodeType") not in ("parameterReference", "varRef"):
-                walk(base, env)         # a lookup on a function's result, e.g. get(...).status
-            return
-        if nt == "lambda":
-            env = dict(env)
-            bound = env.pop(_NEXT, None)
-            for v in node.get("varNames") or []:
-                if bound is not None:
-                    env[v] = bound
-            walk(node.get("body"), env)
-            return
-        if nt == "select":
-            env = dict(env)
-            decls = [v for v in node.get("variables") or [] if isinstance(v, dict)]
-            for v in decls:
-                p = _lookup_path(v.get("from"), env)
-                if p and v.get("varName"):
-                    env[v["varName"]] = _element(p)
-            for v in decls:
-                walk(v.get("where"), env)
-            walk([v for k, v in node.items() if k != "variables"], env)
-            return
-        if nt == "chain":
-            p = _lookup_path(node.get("array"), env)
-            walk(node.get("elements"), {**env, _NEXT: _element(p) if p and p[1] else ("event", [])})
-            return
-        params = node.get("params") if nt == "fnApply" else None
-        if params and any(isinstance(x, dict) and x.get("nodeType") == "lambda" for x in params):
-            arr = next((x for x in params if isinstance(x, dict) and x.get("nodeType") == "fieldLookup"), None)
-            p = _lookup_path(arr, env) if arr else None
-            inner = {**env, _NEXT: _element(p)} if p and p[1] else env
-            for x in params:
-                walk(x, inner if isinstance(x, dict) and x.get("nodeType") == "lambda" else env)
-            return
-        walk(list(node.values()), env)
-
-    walk(tree, {})
-    return refs
-
-
-def pql_membership_ids(tree) -> list[str]:
-    """Audience ids a rule reads through segmentMembership[namespace][id] --
-    the other way, besides inSegment(), of building on an audience."""
-    ids = []
-    stack = [tree]
-    while stack:
-        n = stack.pop()
-        if isinstance(n, list):
-            stack.extend(n)
-        elif isinstance(n, dict):
-            stack.extend(n.values())
-            ps = n.get("params") or []
-            inner = ps[0] if n.get("fnName") == "get" and len(ps) == 2 else None
-            if (isinstance(inner, dict) and inner.get("fnName") == "get" and inner.get("params")
-                    and (inner["params"][0] or {}).get("fieldName") == "segmentMembership"
-                    and isinstance(ps[1], dict) and ps[1].get("value")):
-                ids.append(str(ps[1]["value"]))
-    return ids
-
-
-_DOTTED = re.compile(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
-_INSEG = re.compile(r'inSegment\(\s*"([^"]+)"')
-
-
-def pql_text_refs(text: str) -> tuple[set[tuple[str, str]], list[str]]:
-    """Best effort for the few rules stored as PQL text: dotted names and
-    inSegment() ids."""
-    refs = set()
-    for m in _DOTTED.findall(text or ""):
-        refs.add(("event", m[len("xEvent."):]) if m.startswith("xEvent.") else ("profile", m))
-    return refs, _INSEG.findall(text or "")
-
-
-# ----------------------------------------------------------------------------
 # The model the page draws
 # ----------------------------------------------------------------------------
-def _rule_for_people(text):
-    """The readable rule as the workbook shows it: no renderer markers, […] for hidden parts."""
-    t = dd._pql_for_people(text)
-    return "(too complex to show as text – the full rule is below)" if str(t or "").startswith("(too complex") else t
+def _split(v, sep) -> list[str]:
+    return [x.strip() for x in str(v or "").split(sep) if x.strip()]
 
 
 def _yes(v) -> bool:
@@ -323,7 +190,7 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
             "profile": r.get("Profile"), "gb": _num(r.get("Data lake GB")),
             "rows": _num(r.get("Data lake rows")), "ttl": _num(r.get("Data lake TTL (days)")),
             "pgb": _num(r.get("Profile GB")), "pttl": _num(r.get("Profile TTL (days)")),
-            "id": r.get("Dataset ID")})
+            "id": r.get("Dataset ID"), "fed": r.get("Fed by"), "src": []})
 
     month_col = next((k for k in (wbk["fields"][0] if wbk["fields"] else {}) if k.startswith("Month by month")), None)
     months = wbk["months"]
@@ -356,47 +223,60 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
         if f_ix[path] not in schemas[s]["f"]:
             schemas[s]["f"].append(f_ix[path])
 
-    containers = {p.rsplit(".", 1)[0] for p in f_ix if "." in p}
-    containers |= {c.removesuffix("[]") for c in containers}
-
     audiences, a_ix = [], {}
     for r in wbk["audiences"]:
         aid = r.get("Audience id")
         side = pql.get(aid, {})
         raw = side.get("raw_pql") or r.get("PQL (raw pql/json)") or ""
-        fmt = side.get("format", r.get("PQL format")) or ""
-        refs, deps = set(), []
-        if fmt == "json" and raw:
-            try:
-                tree = json.loads(raw)
-                refs = pql_field_refs(tree)
-                deps = acs.analyse_tree(tree)["insegment"] + pql_membership_ids(tree)
-            except (ValueError, TypeError):
-                pass
-        elif raw:
-            refs, deps = pql_text_refs(raw)
-        hit = sorted({f_ix[p] for _, p in refs if p in f_ix})
-        missing = sorted({p for _, p in refs if p not in f_ix and p not in containers
-                          and p.split(".")[0] != "segmentMembership"})
-        if fmt != "json":
-            missing = []            # text rules: only keep names we could match
+        reads = _split(r.get("Fields it reads"), ";")
         a_ix[aid] = len(audiences)
         audiences.append({
             "id": aid, "name": r.get("Audience name"), "desc": r.get("Description"),
             "eval": r.get("Evaluation"), "life": r.get("Lifecycle"), "tags": r.get("Tags"),
             "origin": r.get("Origin"), "by": r.get("Created by"), "mod": r.get("Last modified by"),
-            "rule": _rule_for_people(side.get("readable_pql") or r.get("PQL (readable)")),
-            "raw": raw[:RAW_PQL_MAX], "rawcut": len(raw) > RAW_PQL_MAX, "fmt": fmt,
+            "rule": r.get("PQL (readable)"), "cut": _yes(r.get("PQL truncated in sheet")),
+            "raw": raw[:RAW_PQL_MAX], "rawcut": len(raw) > RAW_PQL_MAX,
+            "fmt": side.get("format", r.get("PQL format")) or "",
             "score": _num(r.get("Complexity score (0-100)")), "rag": r.get("Complexity RAG"),
             "why": r.get("Why this score"), "lookback": _num(r.get("Lookback (days)")),
             "base": r.get("Largest base audience"), "basen": _num(r.get("Largest base (profiles)")),
-            "f": hit, "miss": missing, "depids": deps, "dep": [], "used": []})
+            "where": r.get("Where it goes"),
+            "f": sorted({f_ix[p] for p in reads if p in f_ix}), "miss": [p for p in reads if p not in f_ix],
+            "depids": _split(r.get("Builds on (audience ids)"), ","),
+            "usedids": _split(r.get("Used by (audience ids)"), ","), "j": [], "x": []})
+    for a in audiences:
+        a["dep"] = [a_ix[d] for d in a.pop("depids") if d in a_ix]
+        a["used"] = [a_ix[u] for u in a.pop("usedids") if u in a_ix]
     for i, a in enumerate(audiences):
-        a["dep"] = sorted({a_ix[d] for d in a.pop("depids") if d in a_ix and a_ix[d] != i})
-        for d in a["dep"]:
-            audiences[d]["used"].append(i)
         for f in a["f"]:
             fields[f]["aud"].append(i)
+
+    journeys = []
+    for r in wbk["Journeys"]:
+        auds = [a_ix[x] for x in _split(r.get("Audience ids"), ",") if x in a_ix]
+        for a in auds:
+            audiences[a]["j"].append(len(journeys))
+        journeys.append({"id": r.get("Journey id"), "name": r.get("Journey"), "version": r.get("Version"),
+                         "status": r.get("Status"), "live": _yes(r.get("Live now")), "how": r.get("How"),
+                         "reads": r.get("Audiences it reads"), "changed": r.get("Last changed"),
+                         "by": r.get("Changed by"), "aud": auds})
+    destinations = []
+    for r in wbk["Destinations"]:
+        auds = [a_ix[x] for x in _split(r.get("Audience ids"), ",") if x in a_ix]
+        for a in auds:
+            audiences[a]["x"].append(len(destinations))
+        destinations.append({"id": r.get("Flow id"), "dest": r.get("Destination"), "name": r.get("Dataflow"),
+                             "live": _yes(r.get("Live now")), "aud": auds})
+    by_table = {d["table"]: i for i, d in enumerate(datasets) if d["table"]}
+    sources = []
+    for r in wbk["Sources"]:
+        into = [by_table[x] for x in _split(r.get("Into dataset"), ",") if x in by_table]
+        for d in into:
+            datasets[d]["src"].append(len(sources))
+        sources.append({"id": r.get("Flow id"), "kind": r.get("How it comes in"), "name": r.get("Dataflow"),
+                        "live": _yes(r.get("Live now")), "into": into, "profile": _yes(r.get("Into Profile")),
+                        "from": r.get("From"), "last": r.get("Last run (UTC)"), "state": r.get("Last run"),
+                        "by": r.get("Created by")})
 
     meta = wbk["meta"]
     title = meta.get("title") or ""
@@ -405,7 +285,8 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
                      "workbook": workbook_name, "months": months, "retention": meta["retention"],
                      "gaps": meta["gaps"], "built": datetime.now().strftime("%Y-%m-%d %H:%M"),
                      "builder": f"{SCRIPT_NAME} v{SCRIPT_VERSION}"},
-            "schemas": schemas, "datasets": datasets, "fields": fields, "audiences": audiences}
+            "schemas": schemas, "datasets": datasets, "fields": fields, "audiences": audiences,
+            "journeys": journeys, "destinations": destinations, "sources": sources}
 
 
 def render_html(model: dict) -> str:
@@ -441,7 +322,9 @@ def main():
     out.write_text(page, encoding="utf-8")
     linked = sum(1 for a in model["audiences"] if a["f"])
     print(f"{len(model['schemas'])} schemas, {len(model['datasets'])} datasets, {len(model['fields'])} fields, "
-          f"{len(model['audiences'])} audiences ({linked} linked to the fields they read)")
+          f"{len(model['audiences'])} audiences ({linked} linked to the fields they read), "
+          f"{len(model['journeys'])} journeys, {len(model['destinations'])} destinations, "
+          f"{len(model['sources'])} sources")
     print(f"written: {out}  ({len(page.encode('utf-8')) / 1e6:.1f} MB)")
 
 
@@ -460,6 +343,7 @@ PAGE = r"""<!doctype html>
   --bg:#f5f6f8; --panel:#ffffff; --ink:#1c2230; --muted:#5d6678; --faint:#8a93a3; --line:#e2e5eb;
   --accent:#2457c5; --accent-weak:#e9effc; --focus:#ffd257;
   --k-profile:#7a4cc2; --k-event:#2a72c8; --k-other:#21857a; --k-aud:#c4572a; --k-ds:#5d6678;
+  --k-jrn:#0e7c86; --k-dst:#a23b72; --k-src:#8a6a12;
   --red:#c0392b; --red-bg:#fbe9e7; --amber:#b9770e; --amber-bg:#fdf3e1; --green:#23854a; --green-bg:#e6f4ea;
   --m-none:#eceef2; --m-unk:#d5d9e0; --m-zero:#f6d4c8; --m-hi:#2e9a57;
   --edge:#b8c0cc; --edge-hot:#2457c5; --code-bg:#f2f4f7;
@@ -471,6 +355,7 @@ PAGE = r"""<!doctype html>
     --bg:#14171d; --panel:#1c2028; --ink:#e6e9ef; --muted:#a5adbb; --faint:#7d8696; --line:#2e3440;
     --accent:#7aa2ff; --accent-weak:#22304d; --focus:#8a6d1f;
     --k-profile:#b08cf0; --k-event:#6fa8f0; --k-other:#4cc2b2; --k-aud:#f08a5d; --k-ds:#a5adbb;
+    --k-jrn:#4fc3cc; --k-dst:#e07bb0; --k-src:#d9b44a;
     --red:#ff7b6b; --red-bg:#3a2020; --amber:#f0b44c; --amber-bg:#3a2f18; --green:#5fd08a; --green-bg:#173323;
     --m-none:#262b35; --m-unk:#3a404c; --m-zero:#5a3328; --m-hi:#4cc27a;
     --edge:#465063; --edge-hot:#7aa2ff; --code-bg:#232833;
@@ -480,6 +365,7 @@ PAGE = r"""<!doctype html>
     --bg:#14171d; --panel:#1c2028; --ink:#e6e9ef; --muted:#a5adbb; --faint:#7d8696; --line:#2e3440;
     --accent:#7aa2ff; --accent-weak:#22304d; --focus:#8a6d1f;
     --k-profile:#b08cf0; --k-event:#6fa8f0; --k-other:#4cc2b2; --k-aud:#f08a5d; --k-ds:#a5adbb;
+    --k-jrn:#4fc3cc; --k-dst:#e07bb0; --k-src:#d9b44a;
     --red:#ff7b6b; --red-bg:#3a2020; --amber:#f0b44c; --amber-bg:#3a2f18; --green:#5fd08a; --green-bg:#173323;
     --m-none:#262b35; --m-unk:#3a404c; --m-zero:#5a3328; --m-hi:#4cc27a;
     --edge:#465063; --edge-hot:#7aa2ff; --code-bg:#232833;
@@ -547,7 +433,7 @@ table.t td .sub{color:var(--muted);font-size:12px;word-break:break-all}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px} .legend span i{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:4px}
 /* lineage */
 .linwrap{position:relative;overflow-x:auto;padding:6px 2px 10px}
-.lin{position:relative;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(190px,1fr);column-gap:56px;min-width:min-content}
+.lin{position:relative;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(165px,1fr);column-gap:44px;min-width:min-content}
 .lin svg{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
 .lin .col{position:relative;z-index:1;min-width:0}
 .lin h4{margin:0 0 8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:700}
@@ -556,6 +442,8 @@ table.t td .sub{color:var(--muted);font-size:12px;word-break:break-all}
 .node .l{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:10px}
 .node .s{display:block;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .vals{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px} .vals span{font-size:12px;background:var(--code-bg);border:1px solid var(--line);border-radius:5px;padding:1px 7px;font-family:var(--mono)} .vals b{font-family:var(--sans);font-weight:400;color:var(--muted);margin-left:5px}
+.node.k-jrn{border-left-color:var(--k-jrn)} .node.k-dst{border-left-color:var(--k-dst)} .node.k-src{border-left-color:var(--k-src)}
+.b-jrn{background:color-mix(in srgb,var(--k-jrn) 16%,transparent);color:var(--k-jrn)} .b-dst{background:color-mix(in srgb,var(--k-dst) 16%,transparent);color:var(--k-dst)} .b-src{background:color-mix(in srgb,var(--k-src) 16%,transparent);color:var(--k-src)}
 .node.k-profile{border-left-color:var(--k-profile)} .node.k-event{border-left-color:var(--k-event)} .node.k-other{border-left-color:var(--k-other)} .node.k-aud{border-left-color:var(--k-aud)}
 .node.focus{border:2px solid var(--accent);border-left-width:5px;background:var(--accent-weak);font-weight:600}
 .node .r{position:absolute;right:6px;top:5px;width:8px;height:8px;border-radius:50%}
@@ -590,7 +478,7 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
   <a class="brand" href="#/">Data Dictionary Explorer<span class="proto">PROTOTYPE</span><small id="brand-sub"></small></a>
   <div class="searchwrap" id="topsearch"></div>
   <nav class="main" id="nav">
-    <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/help">How to read this</a>
+    <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/help">How to read this</a>
   </nav>
   <button id="theme" title="Light, dark, or follow this computer">Theme: auto</button>
 </div></header>
@@ -609,7 +497,11 @@ const enc = encodeURIComponent;
 const SEARCH_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="5"/><path d="M11 11l3.5 3.5"/></svg>';
 
 /* ---------- lookups ---------- */
-const by = {field: {}, schema: {}, dataset: {}, audience: {}};
+const by = {field: {}, schema: {}, dataset: {}, audience: {}, journey: {}, source: {}, destination: {}};
+const keyOf = (x, i) => x.id || "n" + i;
+D.journeys.forEach((x, i) => by.journey[keyOf(x, i)] = i);
+D.sources.forEach((x, i) => by.source[keyOf(x, i)] = i);
+D.destinations.forEach((x, i) => by.destination[keyOf(x, i)] = i);
 D.fields.forEach((f, i) => by.field[f.path] = i);
 D.schemas.forEach((s, i) => by.schema[s.tab] = i);
 D.datasets.forEach((d, i) => by.dataset[d.table || d.id] = i);
@@ -621,7 +513,16 @@ const href = {
   s: i => "#/schema/" + enc(D.schemas[i].tab),
   d: i => "#/dataset/" + enc(D.datasets[i].table || D.datasets[i].id),
   a: i => "#/audience/" + enc(D.audiences[i].id),
+  j: i => "#/journey/" + enc(keyOf(D.journeys[i], i)),
+  r: i => "#/source/" + enc(keyOf(D.sources[i], i)),
+  x: i => "#/destination/" + enc(keyOf(D.destinations[i], i)),
 };
+// The workbook's lineage tabs (Data Dictionary v3.4.23); older workbooks have none.
+const HAS_LINEAGE = !!(D.journeys.length || D.sources.length || D.destinations.length);
+const NOT_IN = "Not in this workbook – it needs a Data Dictionary run from v3.4.23.";
+const liveWord = live => live ? '<span class="badge b-in">Live</span>' : '<span class="badge b-out">Not live</span>';
+const WHERE_RAG = w => /^In use/.test(w || "") ? "GREEN" : /^Not live/.test(w || "") ? "AMBER" : /^Nothing found/.test(w || "") ? "RED" : "";
+const whereBadge = a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(a.where)}</span>` : "";
 const kindOf = k => ({Profile: "profile", Event: "event"})[k] || "other";
 const kindWord = k => ({Profile: "Profile record", Event: "Event"})[k] || "Lookup / other";
 const fieldKind = f => kindOf(D.schemas[f.on[0].s].kind);
@@ -653,8 +554,14 @@ D.datasets.forEach((d, i) => IDX.push({t: "d", i, title: d.name || d.table, sub:
   hay: [d.name, d.table, d.desc, d.schema, d.id].join(" ").toLowerCase()}));
 D.audiences.forEach((a, i) => IDX.push({t: "a", i, title: a.name, sub: `audience · ${a.eval || ""} ${a.life || ""}`,
   hay: [a.name, a.desc, a.tags, a.id, a.by].join(" ").toLowerCase()}));
-const TYPE_LABEL = {f: "Field", s: "Schema", d: "Dataset", a: "Audience"};
-const TYPE_BADGE = {f: "b-event", s: "b-profile", d: "b-out", a: "b-aud"};
+D.journeys.forEach((x, i) => IDX.push({t: "j", i, title: x.name, sub: `journey · ${x.status || ""}${x.version ? " · v" + x.version : ""}`,
+  hay: [x.name, x.reads, x.by, x.id].join(" ").toLowerCase()}));
+D.sources.forEach((x, i) => IDX.push({t: "r", i, title: x.name, sub: `source · ${x.kind || ""}`,
+  hay: [x.name, x.kind, x.from, x.id, ...x.into.map(d => D.datasets[d].table)].join(" ").toLowerCase()}));
+D.destinations.forEach((x, i) => IDX.push({t: "x", i, title: x.name || x.dest, sub: `destination · ${x.dest || ""}`,
+  hay: [x.name, x.dest, x.id].join(" ").toLowerCase()}));
+const TYPE_LABEL = {f: "Field", s: "Schema", d: "Dataset", a: "Audience", j: "Journey", r: "Source", x: "Destination"};
+const TYPE_BADGE = {f: "b-event", s: "b-profile", d: "b-out", a: "b-aud", j: "b-jrn", r: "b-src", x: "b-dst"};
 function search(q, limit) {
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return [];
@@ -665,7 +572,7 @@ function search(q, limit) {
     let sc = 0;
     if (t === q0 || s === q0) sc += 100; else if (t.startsWith(q0)) sc += 60; else if (t.includes(q0)) sc += 40;
     if (words.every(w => t.includes(w))) sc += 20;
-    sc += {s: 6, d: 4, f: 3, a: 2}[e.t];
+    sc += {s: 6, d: 4, f: 3, a: 2, j: 1, x: 1, r: 0}[e.t];
     out.push([sc, e]);
   }
   out.sort((a, b) => b[0] - a[0] || a[1].title.length - b[1].title.length);
@@ -782,6 +689,9 @@ function linked(a, b) {
   if (k === "af") return D.audiences[a.i].f.includes(b.i);
   if (k === "aa") return D.audiences[a.i].dep.includes(b.i) || D.audiences[b.i].dep.includes(a.i);
   if (k === "as") return D.audiences[a.i].f.some(fi => D.fields[fi].on.some(o => o.s === b.i));
+  if (k === "aj") return D.journeys[b.i].aud.includes(a.i);
+  if (k === "ax") return D.destinations[b.i].aud.includes(a.i);
+  if (k === "dr") return D.sources[b.i].into.includes(a.i);
   return false;
 }
 function nodeHtml(n) {
@@ -790,6 +700,9 @@ function nodeHtml(n) {
   if (n.t === "s") { const s = D.schemas[n.i]; label = s.name; sub = `${kindWord(s.kind)}${s.profile ? " · in Profile" : ""}`; kc = kindOf(s.kind); }
   if (n.t === "d") { const d = D.datasets[n.i]; label = d.name || d.table; sub = dsInProfile(d) ? "in Profile" : "data lake only"; kc = "ds"; if (!dsInProfile(d)) extra = " dim"; }
   if (n.t === "a") { const a = D.audiences[n.i]; label = a.name; sub = [a.eval, a.life].filter(Boolean).join(" · "); kc = "aud"; if (a.rag) sub += `<span class="r ${h(a.rag)}"></span>`; }
+  if (n.t === "j") { const x = D.journeys[n.i]; label = x.name; sub = `journey · ${x.status || ""}${x.version ? " · v" + x.version : ""}`; kc = "jrn"; if (!x.live) extra = " dim"; }
+  if (n.t === "x") { const x = D.destinations[n.i]; label = x.name || x.dest; sub = x.dest || "destination"; kc = "dst"; if (!x.live) extra = " dim"; }
+  if (n.t === "r") { const x = D.sources[n.i]; label = x.name || x.kind; sub = x.kind || "source"; kc = "src"; if (!x.live) extra = " dim"; }
   return `<a class="node k-${kc}${n.focus ? " focus" : ""}${extra}" data-n="${n.t}${n.i}" href="${href[n.t](n.i)}" title="${h(label)}"><span class="l">${h(label)}</span><span class="s">${n.t === "a" ? sub : h(sub)}</span></a>`;
 }
 const CAP = 10;
@@ -835,8 +748,18 @@ function drawLineage() {
 window.addEventListener("resize", () => requestAnimationFrame(drawLineage));
 const uniq = xs => [...new Set(xs)];
 const N = (t, i, focus) => ({t, i, focus: !!focus});
-const SOURCES_PH = {title: "Where it comes from", items: [], ph: true, empty: "Sources and dataflows – <b>next step</b> (not collected yet)"};
-const DEST_PH = {title: "Where it goes", items: [], ph: true, empty: "Destinations and journeys – <b>next step</b> (not collected yet)"};
+const liveFirst = (xs, list) => xs.slice().sort((p, q) => (list[q].live ? 1 : 0) - (list[p].live ? 1 : 0));
+// The two ends of the lineage, from the workbook's Sources / Journeys / Destinations tabs.
+function srcCol(dsIdx, more) {
+  return {title: "Where it comes from", items: liveFirst(uniq(dsIdx.flatMap(d => D.datasets[d].src)), D.sources).map(r => N("r", r)), more,
+          ph: !HAS_LINEAGE, empty: HAS_LINEAGE ? "No dataflow feeds it (loaded by an API call, or a one-off job)." : NOT_IN};
+}
+function goesCol(audIdx, title, more) {
+  const js = liveFirst(uniq(audIdx.flatMap(a => D.audiences[a].j)), D.journeys).map(j => N("j", j));
+  const xs = liveFirst(uniq(audIdx.flatMap(a => D.audiences[a].x)), D.destinations).map(x => N("x", x));
+  return {title: title || "Where it goes", items: [...js, ...xs], more, ph: !HAS_LINEAGE,
+          empty: HAS_LINEAGE ? "No journey or destination uses it." : NOT_IN};
+}
 const audSort = (x, y) => (D.audiences[y].score || 0) - (D.audiences[x].score || 0);
 
 /* ---------- pages ---------- */
@@ -850,7 +773,7 @@ function pageHome() {
   const card = (s) => `<a class="panel tile" href="${href.s(D.schemas.indexOf(s))}" style="padding:10px 14px"><b>${h(s.name)}</b><div class="l">${kindWord(s.kind)} · ${plural(s.f.length, "field")} · ${s.profile ? "in Profile" : "not in Profile"}</div></a>`;
   const group = (k, title) => { const xs = S.filter(s => kindOf(s.kind) === k); return xs.length ? `<h3><span class="badge b-${k}">${title}</span> ${xs.length}</h3><div class="grid g4">${xs.map(card).join("")}</div>` : ""; };
   return `<section class="hero"><div class="crumb">${h(M.label)}</div><h1>What data do we have, and what uses it?</h1>
-    <p class="lede">Search for anything below, or start from a box. Every name is a link: click through to follow the data from the ${term("dataset", "dataset")} it lands in, to its ${term("schema", "schema")} and ${term("fields", "field")}, to the ${term("audiences", "audience")} that use it.</p>
+    <p class="lede">Search for anything below, or start from a box. Every name is a link: click through to follow the data from where it comes in, to the ${term("dataset", "dataset")} it lands in, its ${term("schema", "schema")} and ${term("fields", "field")}, the ${term("audiences", "audience")} that use it, and the journeys and destinations they go to.</p>
     <div class="searchwrap searchbig" id="bigsearch"></div></section>
     <div class="grid g4" style="margin-top:22px">
       <a class="panel tile" href="#/fields"><div class="n">${fmt(D.fields.length, 0)}</div><div class="l">fields · ${fmt(withHist, 0)} with history</div></a>
@@ -867,10 +790,26 @@ function pageHome() {
         <ul class="list-plain">${D.audiences.filter(a => num(a.score) !== null).sort((a, b) => b.score - a.score).slice(0, 6).map(a => `<li><a href="${href.a(D.audiences.indexOf(a))}">${h(a.name)}</a> ${ragBadge(a)}</li>`).join("")}</ul>
         <a href="#/audiences${red.length ? "/RED" : ""}">${red.length ? `All ${red.length} RED audiences →` : "All audiences →"}</a></div>
     </div>
+    ${HAS_LINEAGE ? homeLineage() : ""}
     ${M.gaps.length ? `<div class="panel" style="margin-top:14px"><h3 style="margin-top:0">Where the picture is incomplete</h3><ul class="list-plain">${M.gaps.map(g => { const i = by.schema[g.tab]; return `<li>${i !== undefined ? `<a href="${href.s(i)}">${h(D.schemas[i].name)}</a>` : h(g.schema)}: ${h(g.status)}</li>`; }).join("")}</ul></div>` : ""}
     <h2>Every schema</h2>${group("profile", "Profile records")}${group("event", "Events")}${group("other", "Lookups and other")}`;
 }
 
+function homeLineage() {
+  const pub = D.audiences.filter(a => /publish/i.test(a.life || ""));
+  const n = re => pub.filter(a => re.test(a.where || "")).length;
+  const kinds = {};
+  D.sources.forEach(r => { kinds[r.kind] = kinds[r.kind] || {all: 0, live: 0}; kinds[r.kind].all++; kinds[r.kind].live += r.live ? 1 : 0; });
+  return `<div class="grid g2" style="margin-top:14px">
+    <div class="panel card"><h3>Where audiences go</h3><p>Of ${plural(pub.length, "published audience")}:</p>
+      <ul class="list-plain"><li><span class="badge GREEN">In use</span> ${fmt(n(/^In use/), 0)} – a live journey or destination, or another audience built on it</li>
+      <li><span class="badge AMBER">Not live</span> <a href="#/audiences/notlive">${fmt(n(/^Not live/), 0)}</a> – only in journeys not running or dataflows switched off</li>
+      <li><span class="badge RED">Nothing found using it</span> <a href="#/audiences/unused">${fmt(n(/^Nothing found/), 0)}</a> – candidates to unpublish</li></ul>
+      <p><a href="#/journeys">${plural(D.journeys.length, "journey version")} →</a> &nbsp; <a href="#/destinations">${plural(D.destinations.length, "destination dataflow")} →</a></p></div>
+    <div class="panel card"><h3>How data comes in</h3><p>Every dataflow that fills a dataset, by kind:</p>
+      <ul class="list-plain">${Object.entries(kinds).sort((p, q) => q[1].all - p[1].all).map(([k, v]) => `<li><span class="badge b-src">${h(k)}</span> ${fmt(v.all, 0)}${v.live < v.all ? ` <span class="sub">(${fmt(v.live, 0)} live)</span>` : ""}</li>`).join("")}</ul>
+      <p><a href="#/sources">All sources →</a></p></div></div>`;
+}
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 function ruleHtml(rule) {
   // Audience ids become their names, linked: "is in «Mens_Audience»".
@@ -902,9 +841,8 @@ function pageField(i) {
   const f = D.fields[i];
   const schemaIdx = uniq(f.on.map(o => o.s));
   const ds = uniq(schemaIdx.flatMap(s => D.schemas[s].ds));
-  // Audiences others build on go first, so the lines to the last column show.
-  const aud = f.aud.slice().sort((x, y) => D.audiences[y].used.length - D.audiences[x].used.length || audSort(x, y));
-  const built = uniq(aud.flatMap(a => D.audiences[a].used)).filter(x => !aud.includes(x)).sort(audSort);
+  // Audiences that go somewhere come first, so the lines to the last column show.
+  const aud = f.aud.slice().sort((x, y) => (D.audiences[y].j.length + D.audiences[y].x.length > 0) - (D.audiences[x].j.length + D.audiences[x].x.length > 0) || audSort(x, y));
   const best = f.on.reduce((m, o) => Math.max(m, num(o.months) || 0), 0);
   const pd = f.on.reduce((m, o) => Math.max(m, num(o.pdays) || 0), 0);
   const cov = f.on.reduce((m, o) => Math.max(m, num(o.cov) ?? -1), -1);
@@ -924,12 +862,12 @@ function pageField(i) {
     ${ident || rel ? `<p>${ident ? `<span class="badge b-profile">Identity: ${h(ident)}</span>` : ""}${rel ? `<span class="badge b-other">Links to ${h(rel)}</span>` : ""}</p>` : ""}
     <h2>Lineage</h2>
     ${lineage([
+      srcCol(ds),
       {title: "Stored in (datasets)", items: ds.map(d => N("d", d)), more: "#f-where"},
       {title: "Schemas", items: schemaIdx.map(s => N("s", s)), more: "#f-where"},
       {title: "This field", items: [N("f", i, true)]},
       {title: "Audiences that read it", items: aud.map(a => N("a", a)), more: "#f-aud", empty: "No audience reads this field."},
-      {title: "Audiences built on those", items: built.map(a => N("a", a)), more: "#f-aud", empty: "None."},
-      DEST_PH], "Greyed datasets are data lake only: audiences can't read them. Every box is a link.")}
+      goesCol(aud, "Where those go", "#f-aud")], "Greyed boxes are not live: a dataset only in the data lake (audiences can't read it), a journey not running, a dataflow switched off. Every box is a link.")}
     <h2 id="f-where">Where it lives, and how good the data is</h2>
     ${rows.map(({o, s}) => `<div class="panel" style="margin-bottom:12px">
       <h3 style="margin-top:0"><a href="${href.s(o.s)}">${h(s.name)}</a> <span class="badge b-${kindOf(s.kind)}">${kindWord(s.kind)}</span>${profileWord(s.profile)}${o.req ? '<span class="badge b-out">Required</span>' : ""}</h3>
@@ -942,7 +880,7 @@ function pageField(i) {
       ${o.sql ? `<details><summary>SQL to check it yourself (paste into Query Service)</summary><div class="copyrow"><pre class="code">${h(o.sql)}</pre>${copyBtn(o.sql)}</div></details>` : ""}
     </div>`).join("")}
     <h2 id="f-aud">Audiences that read this field</h2>
-    ${aud.length ? table("t-faud", audCols(), aud.map(a => D.audiences[a]), {sort: 3, dir: -1}) : '<p class="sub">None.</p>'}`;
+    ${aud.length ? table("t-faud", audCols(), aud.map(a => D.audiences[a]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
 }
 
 function audCols() {
@@ -950,9 +888,36 @@ function audCols() {
     {label: "Audience", v: a => a.name, html: a => `<a href="${href.a(by.audience[a.id])}">${h(a.name)}</a>${a.desc ? `<div class="sub">${h(a.desc)}</div>` : ""}`},
     {label: "Evaluation", v: a => a.eval, html: a => h(a.eval || "–")},
     {label: "Status", v: a => a.life, html: a => h(a.life || "–")},
+    {label: "Where it goes", v: a => a.where, html: a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(a.where.split(":")[0].replace(/ \(.*/, ""))}</span><div class="sub">${h((a.where.split(":")[1] || "").trim())}</div>` : '<span class="sub">–</span>'},
     {label: "Complexity", num: true, v: a => num(a.score), html: a => ragBadge(a), tip: "0–100; RED is heaviest for Adobe to evaluate"},
     {label: "Fields read", num: true, v: a => a.f.length, html: a => fmt(a.f.length, 0)},
     {label: "Built on", num: true, v: a => a.dep.length, html: a => fmt(a.dep.length, 0), tip: "Other audiences this one includes"},
+  ];
+}
+function jrnCols() {
+  return [
+    {label: "Journey", v: j => (j.name || "").toLowerCase(), html: j => `<a href="${href.j(D.journeys.indexOf(j))}">${h(j.name)}</a>${j.version ? `<div class="sub">version ${h(j.version)}</div>` : ""}`},
+    {label: "Status", v: j => j.status, html: j => h(j.status || "–")},
+    {label: "Live", v: j => j.live ? 1 : 0, html: j => liveWord(j.live)},
+    {label: "How", v: j => j.how, html: j => h(j.how || "–")},
+    {label: "Last changed", v: j => j.changed, html: j => h(j.changed || "–") + (j.by ? `<div class="sub">${h(j.by)}</div>` : "")},
+  ];
+}
+function dstCols() {
+  return [
+    {label: "Dataflow", v: x => (x.name || "").toLowerCase(), html: x => `<a href="${href.x(D.destinations.indexOf(x))}">${h(x.name || x.dest)}</a>`},
+    {label: "Destination", v: x => x.dest, html: x => h(x.dest || "–")},
+    {label: "Live", v: x => x.live ? 1 : 0, html: x => liveWord(x.live)},
+    {label: "Audiences", num: true, v: x => x.aud.length, html: x => fmt(x.aud.length, 0)},
+  ];
+}
+function srcCols() {
+  return [
+    {label: "Dataflow", v: r => (r.name || "").toLowerCase(), html: r => `<a href="${href.r(D.sources.indexOf(r))}">${h(r.name || r.kind)}</a>${r.from ? `<div class="sub">${h(r.from)}</div>` : ""}`},
+    {label: "How it comes in", v: r => r.kind, html: r => `<span class="badge b-src">${h(r.kind || "–")}</span>`},
+    {label: "Live", v: r => r.live ? 1 : 0, html: r => liveWord(r.live)},
+    {label: "Last run (UTC)", v: r => r.last, html: r => h(r.last || "–") + (r.state ? `<div class="sub">${h(r.state)}</div>` : "")},
+    {label: "Into", v: r => r.into.length, html: r => r.into.map(d => `<a href="${href.d(d)}">${h(D.datasets[d].table || D.datasets[d].name)}</a>`).join(", ") || "–"},
   ];
 }
 function fieldCols(s) {
@@ -996,7 +961,7 @@ function pageSchema(i) {
       <div>Last changed<b>${h(s.mod || "–")}</b></div><div>SQL table names<b class="mono">${h(s.tables || "–")}</b></div>
     </div>
     <h2>Lineage</h2>
-    ${lineage([SOURCES_PH,
+    ${lineage([srcCol(s.ds, "#s-ds"),
       {title: "Stored in (datasets)", items: s.ds.map(d => N("d", d)), more: "#s-ds"},
       {title: "This schema", items: [N("s", i, true)]},
       {title: "Fields audiences read", items: used.map(f => N("f", f)), more: "#s-fields", empty: "No audience reads any of its fields."},
@@ -1004,8 +969,8 @@ function pageSchema(i) {
     <h2 id="s-fields">All ${plural(s.f.length, "field")}</h2>
     <div class="tools"><input type="search" placeholder="Filter these fields…" data-filter="t-sf"><span class="count" id="t-sf-count"></span></div>
     ${table("t-sf", fieldCols(i), s.f.map(f => D.fields[f]))}
-    <h2 id="s-ds">Datasets</h2>${table("t-sds", dsCols(), s.ds.map(d => D.datasets[d]), {sort: 3, dir: -1})}
-    <h2 id="s-aud">Audiences that read its fields</h2>${aud.length ? table("t-saud", audCols(), aud.map(a => D.audiences[a]), {sort: 3, dir: -1}) : '<p class="sub">None.</p>'}`;
+    <h2 id="s-ds">Datasets</h2>${table("t-sds", dsCols(), s.ds.map(d => D.datasets[d]), {sort: 4, dir: -1})}
+    <h2 id="s-aud">Audiences that read its fields</h2>${aud.length ? table("t-saud", audCols(), aud.map(a => D.audiences[a]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
 }
 
 function pageDataset(i) {
@@ -1017,16 +982,20 @@ function pageDataset(i) {
     ${d.desc ? `<p class="say">${h(d.desc)}</p>` : ""}
     <p class="say">${inP ? `This ${term("dataset", "dataset")} is loaded into ${term("Profile", "profile")}, so audiences can use its data${num(d.pttl) !== null ? `; Profile keeps it for <b>${fmt(d.pttl, 0)} days</b>` : ""}.` : `This ${term("dataset", "dataset")} is not loaded into Profile: audiences can't use it, but SQL in Query Service can.`}
       The ${term("data lake", "lake")} holds <b>${fmt(d.rows, 0)} rows</b> (${fmt(d.gb, 2)} GB)${num(d.ttl) !== null ? ` and keeps them for ${fmt(d.ttl, 0)} days` : ", with no expiry set"}.</p>
+    ${d.fed ? `<p class="say">Fed by: ${h(d.fed)}.</p>` : ""}
     <div class="facts"><div>SQL table name<b class="mono">${h(d.table || "–")}</b></div><div>Schema<b>${s ? `<a href="${href.s(d.s)}">${h(s.name)}</a>` : h(d.schema || "–") + (d.s < 0 ? ' <span class="sub">(not in this dictionary)</span>' : "")}</b></div><div>Dataset ID<b class="mono">${h(d.id || "–")}</b></div><div>Type<b>${h(d.kind || "–")}</b></div></div>
     ${d.table ? `<div class="copyrow" style="max-width:760px;margin-top:8px"><pre class="code">SELECT * FROM ${h(d.table)} LIMIT 10</pre>${copyBtn(`/* Data Dictionary: look at ${d.table} */ SELECT * FROM ${d.table} LIMIT 10`)}</div>` : ""}
     <h2>Lineage</h2>
-    ${lineage([SOURCES_PH,
+    ${lineage([srcCol([i], "#d-src"),
       {title: "This dataset", items: [N("d", i, true)]},
       {title: "Schema", items: s ? [N("s", d.s)] : [], empty: "Its schema is not in this dictionary."},
       {title: "Fields audiences read", items: used.map(f => N("f", f)), more: s ? href.s(d.s) : "", empty: inP ? "No audience reads its fields." : "Not in Profile, so no audience can read it."},
       {title: "Audiences", items: aud.map(a => N("a", a)), empty: "None."}],
       "Audiences are traced through the fields they read. The same field can also come from another dataset of the schema.")}
-    ${aud.length ? `<h2>Audiences that read its fields</h2>${table("t-daud", audCols(), aud.map(a => D.audiences[a]), {sort: 3, dir: -1})}` : ""}`;
+    <h2 id="d-src">Where it comes from</h2>
+    ${d.fed ? `<p class="say">${h(d.fed)}</p>` : `<p class="sub">${HAS_LINEAGE ? "No dataflow feeds it: it is loaded by an API call or a one-off job, or not at all." : NOT_IN}</p>`}
+    ${d.src.length ? table("t-dsrc", srcCols(), d.src.map(r => D.sources[r]), {sort: 3, dir: -1}) : ""}
+    ${aud.length ? `<h2>Audiences that read its fields</h2>${table("t-daud", audCols(), aud.map(a => D.audiences[a]), {sort: 4, dir: -1})}` : ""}`;
 }
 
 function pageAudience(i) {
@@ -1041,7 +1010,7 @@ function pageAudience(i) {
   if (a.fmt === "json") { try { pretty = JSON.stringify(JSON.parse(a.raw), null, 1); } catch (e) { } }
   return `<div class="crumb"><a href="#/audiences">Audiences</a> › ${h(a.id)}</div>
     <h1>${h(a.name)}</h1>
-    <p>${ragBadge(a)}${a.eval ? `<span class="badge b-out">${h(a.eval)}</span>` : ""}${a.life ? `<span class="badge b-out">${h(a.life)}</span>` : ""}${(a.tags || "").split(/\s*[,;|]\s*/).filter(Boolean).map(t => `<span class="badge b-aud">${h(t)}</span>`).join("")}</p>
+    <p>${whereBadge(a)}${ragBadge(a)}${a.eval ? `<span class="badge b-out">${h(a.eval)}</span>` : ""}${a.life ? `<span class="badge b-out">${h(a.life)}</span>` : ""}${(a.tags || "").split(/\s*[,;|]\s*/).filter(Boolean).map(t => `<span class="badge b-aud">${h(t)}</span>`).join("")}</p>
     ${a.desc ? `<p class="say">${h(a.desc)}</p>` : ""}
     <p class="say">${noRule ? `This audience has no rule inside Adobe: it was ${a.origin ? `made by <b>${h(a.origin)}</b>` : "uploaded or made elsewhere"}, so there are no fields to trace.`
       : `It reads <b>${plural(a.f.length, "field")}</b>${a.dep.length ? ` and builds on <b>${plural(a.dep.length, "other audience")}</b>` : ""}. ${used.length ? `<b>${plural(used.length, "audience")}</b> build on it.` : "No other audience builds on it."}`}</p>
@@ -1052,15 +1021,21 @@ function pageAudience(i) {
       {title: "What it reads", items: reads, more: "#a-reads", empty: noRule ? "No rule – nothing to trace." : "No field we could match."},
       {title: "This audience", items: [N("a", i, true)]},
       {title: "Audiences built on it", items: used.map(x => N("a", x)), more: "#a-used", empty: "None."},
-      DEST_PH])}
+      goesCol([i], "Where it goes", "#a-goes")])}
+    <h2 id="a-goes">Where it goes ${whereBadge(a)}</h2>
+    ${HAS_LINEAGE ? (a.j.length || a.x.length ? `${a.j.length ? table("t-aj", jrnCols(), a.j.map(j => D.journeys[j]), {sort: 2, dir: -1}) : ""}
+      ${a.x.length ? `<h3>Destinations</h3>${table("t-ax", dstCols(), a.x.map(x => D.destinations[x]))}` : ""}`
+      : `<p class="say">No journey or destination uses it${a.used.length ? `, but ${plural(a.used.length, "audience")} ${a.used.length === 1 ? "is" : "are"} built on it` : ""}.</p>`)
+      : `<p class="sub">${NOT_IN}</p>`}
+    ${/^Nothing found/.test(a.where || "") ? '<p class="hint">"Nothing found using it" is not proof: calls from other systems, Data Distiller queries and other products are not seen. Ask the person who made it before unpublishing.</p>' : ""}
     ${a.why ? `<h2>Complexity ${ragBadge(a)}</h2><p class="say">${h(a.why)}</p><p class="hint">How heavy the rule is for Adobe to work out, 0–100. The formula is on the workbook's How to Use tab.</p>` : ""}
-    ${a.rule || a.raw ? `<h2>The rule</h2>${a.rule ? `<div class="copyrow"><pre class="code">${ruleHtml(a.rule)}</pre></div>${/\[…\]/.test(a.rule) ? '<p class="hint">[…] marks parts too complex to show as text; the full rule is below.</p>' : ""}` : ""}
+    ${a.rule || a.raw ? `<h2>The rule</h2>${a.rule ? `<div class="copyrow"><pre class="code">${ruleHtml(a.rule)}</pre></div>${/\[…\]/.test(a.rule) ? '<p class="hint">[…] marks parts too complex to show as text; the full rule is below.</p>' : ""}${a.cut ? '<p class="hint">Cut short in the workbook (too long for a cell); the full rule is below.</p>' : ""}` : ""}
       ${a.raw ? `<details><summary>Full rule, as Adobe stores it (technical)</summary><div class="copyrow"><pre class="code">${h(pretty)}</pre>${copyBtn(a.raw)}</div>${a.rawcut ? '<p class="hint">Cut short here; the whole rule is in the PQL file next to the workbook.</p>' : ""}</details>` : ""}` : ""}
     <h2 id="a-reads">Fields it reads</h2>
     ${a.f.length ? table("t-af", fieldCols(), a.f.map(f => D.fields[f])) : `<p class="sub">${a.dep.length ? "None directly – it is built from the audiences below." : noRule ? "None – it has no rule." : "None that is in this dictionary."}</p>`}
     ${a.miss.length ? `<p class="hint">Also reads ${a.miss.map(p => `<code>${h(p)}</code>${/^_experience\.customerJourneyManagement\./.test(p) ? " (Journey Optimizer's own email and push tracking)" : /^pushNotificationDetails/.test(p) ? " (Journey Optimizer's push-notification sign-ups)" : ""}`).join(", ")} – not in this dictionary: Adobe system data, or a schema that was left out.</p>` : ""}
-    ${a.dep.length ? `<h2>Audiences it builds on</h2>${table("t-adep", audCols(), a.dep.map(d => D.audiences[d]), {sort: 3, dir: -1})}` : ""}
-    <h2 id="a-used">Audiences built on it</h2>${used.length ? table("t-aused", audCols(), used.map(x => D.audiences[x]), {sort: 3, dir: -1}) : '<p class="sub">None.</p>'}`;
+    ${a.dep.length ? `<h2>Audiences it builds on</h2>${table("t-adep", audCols(), a.dep.map(d => D.audiences[d]), {sort: 4, dir: -1})}` : ""}
+    <h2 id="a-used">Audiences built on it</h2>${used.length ? table("t-aused", audCols(), used.map(x => D.audiences[x]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
 }
 
 let FILTERS = [];
@@ -1133,14 +1108,67 @@ function pageDatasets() {
 function pageAudiences(rag) {
   const chips = [{label: "RED", test: a => a.rag === "RED"}, {label: "AMBER", test: a => a.rag === "AMBER"}, {label: "GREEN", test: a => a.rag === "GREEN"},
     {label: "Published", test: a => /publish/i.test(a.life || "")}, {label: "Streaming", test: a => /stream/i.test(a.eval || "")}, {label: "Batch", test: a => /batch/i.test(a.eval || "")},
-    {label: "Has a rule", test: a => a.f.length || a.dep.length}];
-  const on = new Set(rag ? [chips.findIndex(c => c.label === rag)] : []);
+    {label: "Has a rule", test: a => a.f.length || a.dep.length},
+    {label: "In use", test: a => /^In use/.test(a.where || "")}, {label: "Not live", test: a => /^Not live/.test(a.where || "")},
+    {label: "Nothing found using it", test: a => /^Nothing found/.test(a.where || "")}];
+  const want = {RED: "RED", unused: "Nothing found using it", notlive: "Not live"}[rag];
+  const on = new Set(want ? [chips.findIndex(c => c.label === want), ...(rag === "unused" ? [3] : [])] : []);
   return listPage("Audiences", `Every ${term("audience", "audience")} in ${h(M.label)}. Complexity is how heavy the rule is for Adobe to work out (RED is heaviest).`,
-    "t-audiences", audCols(), D.audiences, chips, {sort: 3, dir: -1, on});
+    "t-audiences", audCols(), D.audiences, chips, {sort: 4, dir: -1, on});
+}
+function pageJourneys() {
+  return listPage("Journeys", `Every Adobe Journey Optimizer journey, one row per version, and the audiences it reads. ${HAS_LINEAGE ? "" : NOT_IN}`,
+    "t-journeys", [...jrnCols(), {label: "Audiences", num: true, v: j => j.aud.length, html: j => fmt(j.aud.length, 0)}], D.journeys,
+    [{label: "Live", test: j => j.live}, {label: "Not live", test: j => !j.live}, {label: "Reads an audience", test: j => j.aud.length > 0}],
+    {sort: 2, dir: -1}) + `<p class="hint"><a href="#/destinations">Destinations →</a> the other place audiences go.</p>`;
+}
+function pageDestinations() {
+  return listPage("Destinations", `Every dataflow sending audiences out of AEP. ${HAS_LINEAGE ? "" : NOT_IN}`,
+    "t-dests", dstCols(), D.destinations, [{label: "Live", test: x => x.live}], {sort: 2, dir: -1});
+}
+function pageSources() {
+  const kinds = {};
+  D.sources.forEach(r => kinds[r.kind] = (kinds[r.kind] || 0) + 1);
+  const chips = Object.keys(kinds).sort((p, q) => kinds[q] - kinds[p]).map(k => ({label: `${k} (${kinds[k]})`, test: r => r.kind === k}));
+  return listPage("Sources", `Every dataflow that brings data into a dataset. ${HAS_LINEAGE ? "Pick a kind to narrow it down." : NOT_IN}`,
+    "t-sources", srcCols(), D.sources, [{label: "Live", test: r => r.live}, {label: "Into Profile", test: r => r.profile}, ...chips], {sort: 3, dir: -1});
+}
+function pageJourney(i) {
+  const x = D.journeys[i];
+  return `<div class="crumb"><a href="#/journeys">Journeys</a> › ${h(x.id || "")}</div>
+    <h1>${h(x.name)}</h1><p><span class="badge b-jrn">Journey</span>${liveWord(x.live)}<span class="badge b-out">${h(x.status || "")}</span>${x.version ? `<span class="badge b-out">version ${h(x.version)}</span>` : ""}</p>
+    <p class="say">${x.live ? "It is running now" : "It is not running"}${x.aud.length ? ` and reads <b>${plural(x.aud.length, "audience")}</b> (${h(x.how || "")})` : " and reads no audience: it starts from an event or an API call"}.</p>
+    <div class="facts"><div>Last changed<b>${h(x.changed || "–")}</b></div><div>Changed by<b>${h(x.by || "–")}</b></div><div>Journey ID<b class="mono">${h(x.id || "–")}</b></div></div>
+    <h2>Lineage</h2>
+    ${lineage([{title: "Audiences it reads", items: x.aud.map(a => N("a", a)), more: "#j-aud", empty: "None."},
+               {title: "This journey", items: [N("j", i, true)]}])}
+    <h2 id="j-aud">Audiences it reads</h2>${x.aud.length ? table("t-jaud", audCols(), x.aud.map(a => D.audiences[a]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
+}
+function pageDestination(i) {
+  const x = D.destinations[i];
+  return `<div class="crumb"><a href="#/destinations">Destinations</a> › ${h(x.id || "")}</div>
+    <h1>${h(x.name || x.dest)}</h1><p><span class="badge b-dst">${h(x.dest || "Destination")}</span>${liveWord(x.live)}</p>
+    <p class="say">This dataflow sends <b>${plural(x.aud.length, "audience")}</b> to ${h(x.dest || "a destination")}${x.live ? "" : ", but it is switched off"}.</p>
+    <h2>Lineage</h2>
+    ${lineage([{title: "Audiences it sends", items: x.aud.map(a => N("a", a)), more: "#x-aud", empty: "None."},
+               {title: "This destination", items: [N("x", i, true)]}])}
+    <h2 id="x-aud">Audiences it sends</h2>${x.aud.length ? table("t-xaud", audCols(), x.aud.map(a => D.audiences[a]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
+}
+function pageSource(i) {
+  const x = D.sources[i];
+  const schemas = uniq(x.into.map(d => D.datasets[d].s).filter(s => s >= 0));
+  return `<div class="crumb"><a href="#/sources">Sources</a> › ${h(x.id || "")}</div>
+    <h1>${h(x.name || x.kind)}</h1><p><span class="badge b-src">${h(x.kind || "Source")}</span>${liveWord(x.live)}${x.profile ? '<span class="badge b-in">Into Profile</span>' : ""}</p>
+    <p class="say">${h(x.kind || "This dataflow")} into <b>${x.into.map(d => h(D.datasets[d].name || D.datasets[d].table)).join(", ") || "a dataset not in this dictionary"}</b>${x.from ? ` – ${h(x.from)}` : ""}. ${x.last ? `It last ran at ${h(x.last)} UTC${x.state ? ` (${h(x.state)})` : ""}.` : "It has not run."}</p>
+    <div class="facts"><div>Created by<b>${h(x.by || "–")}</b></div><div>Dataflow ID<b class="mono">${h(x.id || "–")}</b></div></div>
+    <h2>Lineage</h2>
+    ${lineage([{title: "This source", items: [N("r", i, true)]},
+               {title: "Into (datasets)", items: x.into.map(d => N("d", d)), empty: "A dataset not in this dictionary."},
+               {title: "Schemas", items: schemas.map(s => N("s", s)), empty: "Its schema is not in this dictionary."}])}`;
 }
 function pageSearch(q) {
   const res = search(q, 400);
-  const groups = ["f", "s", "d", "a"].map(t => [t, res.filter(e => e.t === t)]).filter(g => g[1].length);
+  const groups = ["f", "s", "d", "a", "j", "x", "r"].map(t => [t, res.filter(e => e.t === t)]).filter(g => g[1].length);
   return `<h1>Results for “${h(q)}”</h1><p class="lede">${res.length ? plural(res.length, "match", "matches") : "Nothing matches. Try part of a word, or a friendly name such as “email” or “store”."}</p>
     ${groups.map(([t, xs]) => `<h2>${TYPE_LABEL[t]}s <span class="count">${xs.length}</span></h2><div class="panel" style="padding:6px 14px">${xs.slice(0, 100).map(e => `<div style="padding:5px 0;border-bottom:1px solid var(--line)"><a href="${href[e.t](e.i)}">${h(e.title)}</a> <span class="sub">${h(e.sub)}</span></div>`).join("")}${xs.length > 100 ? `<div class="hint">…and ${xs.length - 100} more; add another word to narrow it down.</div>` : ""}</div>`).join("")}`;
 }
@@ -1149,9 +1177,9 @@ function pageHelp() {
   <div class="grid g2">
    <div class="panel"><h3 style="margin-top:0">The words</h3><dl class="kv">${Object.entries({"Schema": GLOSS.schema, "Dataset": GLOSS.dataset, "Field": GLOSS.field, "Profile": GLOSS.profile, "Data lake": GLOSS.lake, "Audience": GLOSS.audience, "Filled in": GLOSS.coverage}).map(([k, v]) => `<dt><b>${k}</b></dt><dd>${h(v)}</dd>`).join("")}</dl></div>
    <div class="panel"><h3 style="margin-top:0">Following the data (lineage)</h3><p>Each page has a lineage strip. Data flows left to right:</p>
-    <p><b>dataset → schema → field → audiences that read it → audiences built on those</b></p>
-    <p>Click any box to move there; the lines show which boxes connect. Hover a box to highlight its lines. A greyed dataset is data-lake only, so audiences can't read it.</p>
-    <p class="warn">Not here yet: <b>where data comes from</b> (sources, dataflows) and <b>where audiences go</b> (destinations, journeys). They're the next step.</p></div>
+    <p><b>source → dataset → schema → field → audience → journey or destination</b></p>
+    <p>Click any box to move there; the lines show which boxes connect. Hover a box to highlight its lines. A greyed box is not live: a dataset only in the data lake (audiences can't read it), a journey that is not running, a dataflow that is switched off.</p>
+    <p><b>Where it goes</b> on an audience: <span class="badge GREEN">In use</span> a live journey or destination, or another audience built on it; <span class="badge AMBER">Not live</span> only in journeys not running or dataflows switched off; <span class="badge RED">Nothing found using it</span> a candidate to unpublish – but ask its owner first, as calls from other systems are not seen.</p></div>
    <div class="panel"><h3 style="margin-top:0">A field's three numbers</h3>
     <p><b>Filled in</b>: out of a recent sample of records, the share that had the field. 0% can mean the field is new or unused.</p>
     <p><b>Have we got it? (months)</b>: how many months of unbroken data we hold, read month by month from the data lake.</p>
@@ -1175,6 +1203,12 @@ function route() {
   else if (kind === "schema") { html = by.schema[key] !== undefined ? pageSchema(by.schema[key]) : miss("schema"); nav = "schemas"; }
   else if (kind === "dataset") { html = by.dataset[key] !== undefined ? pageDataset(by.dataset[key]) : miss("dataset"); nav = "datasets"; }
   else if (kind === "audience") { html = by.audience[key] !== undefined ? pageAudience(by.audience[key]) : miss("audience"); nav = "audiences"; }
+  else if (kind === "journey") { html = by.journey[key] !== undefined ? pageJourney(by.journey[key]) : miss("journey"); nav = "journeys"; }
+  else if (kind === "source") { html = by.source[key] !== undefined ? pageSource(by.source[key]) : miss("source"); nav = "sources"; }
+  else if (kind === "destination") { html = by.destination[key] !== undefined ? pageDestination(by.destination[key]) : miss("destination"); nav = "journeys"; }
+  else if (kind === "journeys") html = pageJourneys();
+  else if (kind === "sources") html = pageSources();
+  else if (kind === "destinations") { html = pageDestinations(); nav = "journeys"; }
   else if (kind === "fields") html = pageFields();
   else if (kind === "schemas") html = pageSchemas();
   else if (kind === "datasets") html = pageDatasets();
@@ -1206,7 +1240,7 @@ document.getElementById("theme").onclick = () => setTheme(THEMES[(THEMES.indexOf
 document.getElementById("brand-sub").textContent = `${M.label} · ${M.generated ? M.generated.split("|")[0].replace("Generated", "").trim() : ""}`;
 window.addEventListener("hashchange", route);
 document.addEventListener("click", ev => {
-  const a = ev.target.closest('a[href^="#f-"],a[href^="#s-"],a[href^="#a-"]');
+  const a = ev.target.closest('a[href^="#f-"],a[href^="#s-"],a[href^="#a-"],a[href^="#d-"],a[href^="#j-"],a[href^="#x-"]');
   if (!a) return;
   ev.preventDefault();
   const t = document.getElementById(a.getAttribute("href").slice(1));
@@ -1215,9 +1249,11 @@ document.addEventListener("click", ev => {
 route();
 /* ?selftest renders every page once and lists any that fail (used by the build check) */
 if (new URLSearchParams(location.search).has("selftest")) {
-  const pages = ["#/", "#/fields", "#/schemas", "#/datasets", "#/audiences", "#/audiences/RED", "#/help", "#/search/coupon",
+  const pages = ["#/", "#/fields", "#/schemas", "#/datasets", "#/audiences", "#/audiences/RED", "#/audiences/unused",
+    "#/journeys", "#/destinations", "#/sources", "#/help", "#/search/coupon",
     ...D.fields.map((_, i) => href.f(i)), ...D.schemas.map((_, i) => href.s(i)),
-    ...D.datasets.map((_, i) => href.d(i)), ...D.audiences.map((_, i) => href.a(i))];
+    ...D.datasets.map((_, i) => href.d(i)), ...D.audiences.map((_, i) => href.a(i)),
+    ...D.journeys.map((_, i) => href.j(i)), ...D.sources.map((_, i) => href.r(i)), ...D.destinations.map((_, i) => href.x(i))];
   const bad = [];
   for (const p of pages) {
     try {

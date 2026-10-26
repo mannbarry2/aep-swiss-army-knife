@@ -119,10 +119,12 @@ from pathlib import Path
 # this file is run directly (python <folder>/<tool>.py).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from toolkit_internals import credential_loader  # keyring-first credential store, plaintext creds/ fallback
+# One extract_audiences() for this tool and the Data Dictionary's Journeys tab.
+from data_dictionary.lineage_sources_journeys_and_destinations import extract_audiences  # noqa: E402,F401
 
 SCRIPT_NAME    = "journeys_and_audiences_census"
-SCRIPT_VERSION = "1.2.0"
-SCRIPT_DATE    = "2026-10-23"
+SCRIPT_VERSION = "1.2.1"
+SCRIPT_DATE    = "2026-10-26"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -966,62 +968,6 @@ def run_audience_report(service, conf, token, api_key, opts):
                             incomplete=incomplete, highlight=highlight)
         logger.warning(f"{out_path.name} is locked (open in Excel?) - wrote "
                        f"{alt.name} instead.")
-
-
-def extract_audiences(journey: dict) -> list[dict]:
-    """Pull every audience/segment reference out of a journey definition,
-    regardless of how it's used. Returns a de-duped list of
-    {audience_id, audience_name, via} dicts.
-
-    Two shapes are handled, plus a recursive catch-all so we don't miss a
-    variant we haven't seen yet:
-      * read-audience nodes: a node carrying an "audiences":[{id,name}] list.
-      * audience qualification: an entry/event referencing a segment, seen as
-        segmentId / audienceId / segment.{id,name} keys.
-    """
-    found: dict[str, dict] = {}
-
-    def add(aid, name, via):
-        if not aid:
-            return
-        cur = found.get(aid)
-        if cur is None:
-            found[aid] = {"audience_id": aid, "audience_name": name or "", "via": via}
-        else:
-            if name and not cur["audience_name"]:
-                cur["audience_name"] = name
-            if via not in cur["via"]:
-                cur["via"] = f"{cur['via']}+{via}"
-
-    def walk(obj, node_type=None):
-        if isinstance(obj, dict):
-            nt = obj.get("type") or node_type
-            auds = obj.get("audiences")
-            if isinstance(auds, list):
-                for a in auds:
-                    if isinstance(a, dict):
-                        # Label by the actual node type: a read-audience node vs
-                        # an 'audience_qualification' entry/trigger node (confirmed
-                        # node type); fall back to a generic tag otherwise.
-                        ntl = str(nt).lower() if nt else ""
-                        via = ("read_audience" if "read" in ntl
-                               else "qualification" if "qualif" in ntl
-                               else "audiences")
-                        add(a.get("id") or a.get("audienceId"), a.get("name"), via)
-            for key in ("segmentId", "audienceId"):
-                if obj.get(key):
-                    add(obj[key], obj.get("name"), "qualification")
-            seg = obj.get("segment") or obj.get("audience")
-            if isinstance(seg, dict) and (seg.get("id") or seg.get("segmentId")):
-                add(seg.get("id") or seg.get("segmentId"), seg.get("name"), "qualification")
-            for v in obj.values():
-                walk(v, nt)
-        elif isinstance(obj, list):
-            for v in obj:
-                walk(v, node_type)
-
-    walk(journey)
-    return list(found.values())
 
 
 def list_journeys(token, api_key, conf, sandbox):

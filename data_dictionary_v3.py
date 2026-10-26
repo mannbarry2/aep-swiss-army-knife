@@ -87,6 +87,20 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.23 -- Lineage: where data comes from and where audiences go, in the
+workbook. New tabs: Sources (every dataflow that brings data into a dataset --
+streaming inlets, files from cloud storage, files uploaded in the UI, the Edge,
+SQL jobs), Journeys (every AJO journey version and the audiences it reads) and
+Destinations (every destination dataflow and the audiences it sends). The
+Datasets tab gains 'Fed by'; the Audiences tab gains 'Where it goes' (In use /
+Not live / Nothing found using it -- so an unused audience can be unpublished),
+the journeys and destinations behind it, 'Fields it reads' and the ids of the
+audiences it builds on and that build on it. The journey half of the journey
+census, left behind when its audience half was folded in (v3.2, 13 Aug), is now
+here; extract_audiences() is shared, not copied
+(data_dictionary/lineage_sources_journeys_and_destinations.py). Never fatal:
+a failure costs those columns and says so.
+
 v3.4.22 -- Presentation, for readers who do not work in AEP. A finishing pass
 (_polish_workbook) runs over every tab before saving: column widths fitted to
 the content, header rows tall enough for their words, prose wrapped and its
@@ -361,13 +375,15 @@ import snapshot_tables
 import audience_complexity     # beta complexity score for the Audiences tab
 import overlap_report          # dataset overlap -> Overlap cut-list / full report tabs
 from house_xlsx import Book
+from data_dictionary import audience_rule_reader      # which fields / audiences a rule reads
+from data_dictionary import lineage_sources_journeys_and_destinations as lineage  # sources in, journeys + destinations out
 
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.22"
-SCRIPT_DATE    = "2026-10-25"
+SCRIPT_VERSION = "3.4.23"
+SCRIPT_DATE    = "2026-10-26"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -2285,7 +2301,8 @@ TECH_COLUMNS = {"Schema $id", "Dataset ID", "Dataset id", "Audience id",
                 "PQL (raw pql/json)", "PQL length", "PQL truncated in sheet",
                 "PQL format", "Unresolved tag ids", "System tags",
                 "Merge policy id", "Snapshot batch id", "Last evaluation job id",
-                "Schedule cron"}
+                "Schedule cron", "Builds on (audience ids)", "Used by (audience ids)",
+                "Audience ids", "Journey id", "Flow id"}
 # Prose columns: wrapped at their width, and the row grows to fit.
 WRAP_COLUMNS = {"Description", "Why", "Why this score"}
 # Colour scales, the deeper the more: header -> [(value, colour), ...].
@@ -2949,6 +2966,37 @@ def split_audience_tags(aud: dict, vocab: dict):
     return sorted(set(named)), system, unresolved
 
 
+# The Audiences tab's columns, in the order attach_audiences() and then
+# attach_lineage() build each row; the tab shows them in AUDIENCE_SHOWN order.
+AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Description", "Audience id",
+                    "Evaluation", "Lifecycle", "Tags", "Tag count",
+                    "Origin", "Created by", "Last modified by",
+                    "PQL (readable)", "PQL rendered",
+                    "PQL (raw pql/json)", "PQL length",
+                    "PQL truncated in sheet", "PQL format",
+                    "Unresolved tag ids", "System tags",
+                    "Complexity score (0-100)", "Complexity RAG",
+                    "Why this score", "Event scan",
+                    "Lookback (days)", "Lookup joins",
+                    "Joined fields", "Aggregations",
+                    "Depends on (audiences)", "Largest base audience",
+                    "Largest base (profiles)", "Sequence steps",
+                    "Conditions", "Longest value list",
+                    "Merge policies", "Used by (audiences)",
+                    # lineage (v3.4.23)
+                    "Fields it reads", "Builds on (audience ids)", "Used by (audience ids)",
+                    "Where it goes", "Live journeys", "Journeys not running", "Destinations"]
+AUD_BUILDS = AUDIENCE_COLUMNS.index("Builds on (audience ids)")
+AUD_USED_BY = AUDIENCE_COLUMNS.index("Used by (audience ids)")
+# Whether an audience is used comes straight after its name: it decides whether
+# it can be unpublished.
+AUDIENCE_SHOWN = ["Sandbox", "Audience name", "Description", "Lifecycle", "Where it goes",
+                  "Live journeys", "Journeys not running", "Destinations", "Evaluation",
+                  "Tags", "Tag count", "Origin", "Created by", "Last modified by",
+                  "PQL (readable)", "Fields it reads"]
+AUDIENCE_SHOWN += [c for c in AUDIENCE_COLUMNS if c not in AUDIENCE_SHOWN]
+
+
 def attach_audiences(token, conf, res, caches):
     """Read the sandbox's audiences onto res['audiences'].
 
@@ -2991,6 +3039,7 @@ def attach_audiences(token, conf, res, caches):
 
     rows, full, n_pql, n_partial, n_trunc, tagged = [], [], 0, 0, 0, 0
     rag_tally = {"RED": 0, "AMBER": 0, "GREEN": 0}
+    dependents: dict[str, set] = {}
     for a in auds:
         named, system, unresolved = split_audience_tags(a, vocab)
         tagged += bool(named)
@@ -3003,6 +3052,22 @@ def attach_audiences(token, conf, res, caches):
                 tree = None
         cx = audience_complexity.score_audience(a, tree, base_pops, seg_names)
         cf = cx["features"]
+        # Lineage (v3.4.23): the fields the rule reads, and the audiences it
+        # builds on -- Adobe's own dependency list plus inSegment() and
+        # segmentMembership[...][id] in the rule.
+        if tree is not None:
+            reads = audience_rule_reader.fields_read(tree)
+            builds = (audience_complexity.analyse_tree(tree)["insegment"]
+                      + audience_rule_reader.membership_ids(tree))
+        elif pql_raw:
+            reads = audience_rule_reader.fields_read(text=pql_raw)
+            builds = audience_rule_reader.text_refs(pql_raw)[1]
+        else:
+            reads, builds = [], []
+        builds = [b for b in dict.fromkeys([str(d) for d in a.get("dependencies") or []] + builds)
+                  if b != a.get("id")]
+        dependents[a.get("id") or ""] = {str(d.get("id") if isinstance(d, dict) else d)
+                                         for d in a.get("dependents") or []}
         if cx["rag"]:
             rag_tally[cx["rag"]] += 1
         if pql:
@@ -3034,7 +3099,14 @@ def attach_audiences(token, conf, res, caches):
             cf["largest_base_name"], cf["largest_base"], cf["sequence_steps"],
             cf["conditions"], cf["max_list"], cf["merge_policies"],
             cf["dependents"],
+            "; ".join(reads), ", ".join(builds), "",     # used-by ids: below
         ])
+    # Built on by: every audience whose rule builds on this one, and Adobe's own list.
+    for row in rows:
+        for b in filter(None, row[AUD_BUILDS].split(", ")):
+            dependents.setdefault(b, set()).add(row[3])
+    for row in rows:
+        row[AUD_USED_BY] = ", ".join(sorted(dependents.get(row[3]) or ()))
     res["audiences"] = rows
     res["audiences_pql"] = full            # one entry per row, same order
     res["complexity_tally"] = rag_tally
@@ -3069,6 +3141,57 @@ def fetch_base_populations(token, conf, sandbox, auds, caches) -> dict:
                 logger.debug(f"  base audience {sid}: {type(e).__name__}: {e}")
                 store[sid] = None
     return store
+
+
+def attach_lineage(token, conf, res, caches):
+    """Where the data comes from and where the audiences go (v3.4.23): every
+    dataflow into a dataset (res['sources']), every AJO journey version
+    (res['journeys']) and destination dataflow (res['destinations']), and on
+    each audience row: Where it goes, Live journeys, Journeys not running,
+    Destinations. Read-only. Never fatal: what could not be read is recorded
+    in res['lineage_errors'] and said on the tabs, so 'Nothing found using it'
+    is never claimed on a partial read."""
+    sandbox = res["name"]
+    headers = aep_headers(token, conf, sandbox)
+
+    def get_json(url):
+        body, _ = http(url, headers=headers, timeout=60)
+        return json.loads(body or "{}")
+
+    res["sources"], res["journeys"], res["destinations"], res["lineage_errors"] = [], [], [], []
+    try:
+        fs = lineage.read_flow_service(get_json)
+        res["sources"] = lineage.read_sources(fs)
+        res["destinations"] = lineage.read_destinations(get_json, fs)
+    except Exception as e:
+        res["lineage_errors"].append(f"dataflows: {type(e).__name__}: {e}")
+    try:
+        res["journeys"], unreadable = lineage.read_journeys(get_json)
+        if unreadable:
+            res["lineage_errors"].append(f"{unreadable} journey definition(s) could not be read")
+    except Exception as e:
+        res["lineage_errors"].append(f"journeys: {type(e).__name__}: {e}")
+    directory = caches.get("directory") or {}
+    for s in res["sources"]:
+        s["by"] = resolve_actor(s["by"], directory) if s["by"] else ""
+
+    use = lineage.usage_by_audience(res["journeys"], res["destinations"])
+    for row in res.get("audiences") or []:
+        u = use.get(row[3], {})
+        verdict = lineage.where_it_goes(u, len([x for x in row[AUD_USED_BY].split(", ") if x]))
+        if res["lineage_errors"] and not verdict.startswith("In use"):
+            verdict += " (journeys / destinations not fully read)"
+        row += [verdict,
+                "; ".join(dict.fromkeys(j["name"] for j in u.get("live", []))),
+                "; ".join(dict.fromkeys(f"{j['name']} ({j['status']})" for j in u.get("other", []))),
+                "; ".join(f"{f['destination']} – {f['name']}" + ("" if f["live"] else " (switched off)")
+                          for f in u.get("dest_on", []) + u.get("dest_off", []))]
+    for err in res["lineage_errors"]:
+        logger.warning(f"  {sandbox}: lineage: {err}")
+    n_live = sum(1 for r in res.get("audiences") or [] if str(r[-4]).startswith("In use"))
+    logger.info(f"  lineage: {len(res['sources'])} source dataflow(s), {len(res['journeys'])} "
+                f"journey version(s), {len(res['destinations'])} destination dataflow(s); "
+                f"{n_live} audience(s) in use.")
 
 
 def write_pql_sidecar(res, out_dir: Path, datestr: str) -> Path | None:
@@ -3176,6 +3299,89 @@ def _archive_previous(out_dir: Path, safe_client: str,
             continue
         moved += 1
     return moved
+
+
+def lineage_tabs(wb, results, label, confidential, style_header, autofit, title_font):
+    """Sources, Journeys and Destinations tabs (v3.4.23): the two ends of the
+    lineage. Written only when some sandbox read them (attach_lineage)."""
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+    if not any(res.get(k) or res.get("lineage_errors") for res in results
+               for k in ("sources", "journeys", "destinations")):
+        return
+    errors = [f"{res['title']}: {e}" for res in results for e in res.get("lineage_errors") or []]
+
+    def tab(name, title, note, cols, rows, widths, live_col=None):
+        ws = wb.create_sheet(name)
+        confidential(ws)
+        ws["A2"] = f"{title} – {label}"
+        ws["A2"].font = title_font
+        ws["A3"] = note + (f"  NOT FULLY READ: {'; '.join(errors)}" if errors else "")
+        ws["A3"].font = Font(italic=True, color="C00000" if errors else "666666")
+        hr = 5
+        for c, nm in enumerate(cols, 1):
+            ws.cell(hr, c, nm)
+        style_header(ws, len(cols), row=hr)
+        for r, row in enumerate(rows, hr + 1):
+            for c, val in enumerate(row, 1):
+                cell = ws.cell(r, c, val)
+                if c == live_col:
+                    cell.font = Font(bold=True, color="2E7D32") if val == "Yes" else Font(color="808080")
+        autofit(ws, widths)
+        ws.freeze_panes = ws.cell(hr + 1, 1).coordinate
+        if rows:
+            ws.auto_filter.ref = f"A{hr}:{get_column_letter(len(cols))}{hr + len(rows)}"
+
+    src_rows, jrn_rows, dst_rows = [], [], []
+    for res in results:
+        ds = {d["id"]: d for d in res.get("datasets") or []}
+        names = {r[3]: r[1] for r in res.get("audiences") or []}
+
+        def tables(ids):
+            return ", ".join(ds[i]["table"] if i in ds else i for i in ids)
+        for s in res.get("sources") or []:
+            into_profile = any((ds.get(i) or {}).get("profile", "").startswith("Profile") for i in s["datasets"])
+            src_rows.append([res["title"], s["kind"], s["name"], "Yes" if s["live"] else "No",
+                             tables(s["datasets"]), "Yes" if into_profile else "No",
+                             s["detail"] or (f"reads: {tables(s['reads'])}" if s["reads"] else ""),
+                             s["last_run"], s["last_state"], s["by"], s["id"]])
+        for j in res.get("journeys") or []:
+            auds = j["audiences"]
+            jrn_rows.append([res["title"], j["name"], j["version"], j["status"], "Yes" if j["live"] else "No",
+                             "(the definition could not be read)" if auds is None else
+                             ("; ".join(names.get(a["id"]) or a["name"] or a["id"] for a in auds)
+                              or "(none: it starts from an event or an API call)"),
+                             ", ".join(dict.fromkeys(a["via"] for a in auds or [])),
+                             j["changed"], j["by"], ", ".join(a["id"] for a in auds or []), j["id"]])
+        for f in res.get("destinations") or []:
+            dst_rows.append([res["title"], f["destination"], f["name"], "Yes" if f["live"] else "No",
+                             "; ".join(names.get(a) or a for a in f["audiences"]), len(f["audiences"]),
+                             ", ".join(f["audiences"]), f["id"]])
+
+    tab("Sources", "Sources: where the data comes from",
+        "Every dataflow that brings data into a dataset: streaming from other systems (HTTP API "
+        "inlets), files from cloud storage, files uploaded by hand in the UI (each upload is a new "
+        "dataflow), the web / app (Edge) and SQL jobs (Data Distiller, which also read datasets). "
+        "Adobe's own housekeeping between its stores is left out. The Datasets tab sums these up "
+        "per dataset in 'Fed by'.",
+        ["Sandbox", "How it comes in", "Dataflow", "Live now", "Into dataset", "Into Profile",
+         "From", "Last run (UTC)", "Last run", "Created by", "Flow id"],
+        src_rows, [16, 30, 50, 9, 50, 11, 60, 17, 11, 32, 38], live_col=4)
+    tab("Journeys", "Journeys: where audiences go (1)",
+        "Every Adobe Journey Optimizer journey, one row per version, and the audiences it reads "
+        "(Read Audience) or starts from (Audience Qualification). Live now = Deployed, or Closed "
+        "(no new entrants, but those in it carry on). Stopped, Finished, Draft and Dry Run journeys "
+        "send nothing. The Audiences tab sums these up per audience in 'Where it goes'.",
+        ["Sandbox", "Journey", "Version", "Status", "Live now", "Audiences it reads", "How",
+         "Last changed", "Changed by", "Audience ids", "Journey id"],
+        jrn_rows, [16, 52, 8, 12, 9, 60, 24, 17, 28, 40, 38], live_col=5)
+    tab("Destinations", "Destinations: where audiences go (2)",
+        "Every destination dataflow that sends audiences out of AEP (an advertising platform, a "
+        "file drop, an HTTP endpoint...), and the audiences it sends. Live now = the dataflow is "
+        "switched on.",
+        ["Sandbox", "Destination", "Dataflow", "Live now", "Audiences it sends", "Audiences",
+         "Audience ids", "Flow id"],
+        dst_rows, [16, 34, 40, 9, 70, 10, 40, 38], live_col=4)
 
 
 def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None):
@@ -3502,7 +3708,21 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
         ("...see who is being targeted, and how",
          "Audiences",
          "Every audience with its tags, who built it, who last changed it, and "
-         "the rule behind it in readable form."),
+         "the rule behind it in readable form. 'Fields it reads' lists the "
+         "fields the rule tests, as they are named on the Field Index."),
+        ("...see where an audience goes, or find ones nothing uses",
+         "Audiences ('Where it goes') / Journeys / Destinations",
+         "'Where it goes' says, per audience: In use (a live journey, a live "
+         "destination, or another audience built on it), Not live (only in "
+         "journeys that are not running or destinations switched off), or "
+         "Nothing found using it -- a candidate to unpublish. The Journeys tab "
+         "has every journey version and the audiences it reads; Destinations "
+         "every dataflow sending audiences out."),
+        ("...see where the data comes from",
+         "Sources / Datasets ('Fed by')",
+         "Every dataflow that brings data in: streaming from other systems, "
+         "files from cloud storage, files uploaded by hand, the web / app, SQL "
+         "jobs. 'Fed by' on the Datasets tab sums them up per dataset."),
         ("...know which Profile snapshot table to query",
          "Snapshot Tables",
          "Every snapshot export table with its merge policy. The GREEN rows "
@@ -3603,6 +3823,13 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          f"{audience_complexity.RAG_RED} or more, AMBER "
          f"{audience_complexity.RAG_AMBER} or more, otherwise GREEN. The "
          "weights are a first cut: argue with them."),
+        ("'Nothing found using it' is not proof",
+         "Audiences",
+         "It means no journey, destination or other audience in this sandbox "
+         "uses it, as far as Adobe's APIs show. Calls from other systems, Data "
+         "Distiller queries and other products are not seen. Ask the person who "
+         "made it before unpublishing. If the journeys or destinations could "
+         "not be fully read, the cell says so."),
         ("Not every audience has a rule",
          "Audiences",
          "Only Origin=AEPSegments audiences are rule-based. Uploads, Data "
@@ -3834,7 +4061,8 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     dt["A3"] = ("Every dataset and its AEP Query Service table name. SQL uses the "
                 "SYSTEM table name, not the friendly name: SELECT ... FROM "
                 "<Table Name>. Kind = the class of the schema the dataset feeds "
-                "(Profile / Event / Custom). The Profile column flags datasets "
+                "(Profile / Event / Custom). Fed by = the dataflows that fill it "
+                "(each one is on the Sources tab). The Profile column flags datasets "
                 "enabled for Unified Profile and the Profile Snapshot Export (the "
                 "merged union to query for whole profiles). Data hygiene columns "
                 "come from Catalog: data lake size and row count, the data lake "
@@ -3843,7 +4071,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 "set. Use the header filters to sort by GB or TTL.")
     dt["A3"].font = Font(italic=True, color="666666")
     DATASET_COLUMNS = ["Sandbox", "Schema", "Kind", "Friendly Name (dataset)",
-                       "Description", "Table Name (SQL / system)", "Profile",
+                       "Description", "Table Name (SQL / system)", "Fed by", "Profile",
                        "Data lake GB", "Data lake rows", "Data lake TTL (days)",
                        "Profile GB", "Profile TTL (days)", "Dataset ID"]
     hr = 5
@@ -3856,6 +4084,11 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     def _prof_rank(p):
         return 0 if p.startswith("snapshot") else (1 if p else 2)
     for res in results:
+        # Fed by (v3.4.23): every dataflow into the dataset, from the Sources tab.
+        feeds = {}
+        for s in res.get("sources") or []:
+            for dsid in s["datasets"]:
+                feeds.setdefault(dsid, []).append(s)
         for d in sorted(res.get("datasets") or [],
                         key=lambda x: (_prof_rank(x.get("profile") or ""),
                                        (x.get("schema_title") or "~").lower(),
@@ -3866,21 +4099,22 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
             dt.cell(rr, 4, d.get("name"))
             dt.cell(rr, 5, d.get("description", ""))
             dt.cell(rr, 6, d.get("table"))
-            pcell = dt.cell(rr, 7, d.get("profile"))
+            dt.cell(rr, 7, lineage.fed_by(feeds.get(d.get("id"), [])))
+            pcell = dt.cell(rr, 8, d.get("profile"))
             if (d.get("profile") or "").startswith("snapshot"):
                 pcell.font = Font(bold=True, color="7030A0")
             elif d.get("profile"):
                 pcell.font = Font(color="2E7D32")
-            for c, key, fmt in ((8, "lake_gb", "#,##0.00"),
-                                (9, "lake_rows", "#,##0"),
-                                (10, "lake_ttl_days", "#,##0"),
-                                (11, "profile_gb", "#,##0.00"),
-                                (12, "profile_ttl_days", "#,##0")):
+            for c, key, fmt in ((9, "lake_gb", "#,##0.00"),
+                                (10, "lake_rows", "#,##0"),
+                                (11, "lake_ttl_days", "#,##0"),
+                                (12, "profile_gb", "#,##0.00"),
+                                (13, "profile_ttl_days", "#,##0")):
                 if d.get(key) is not None:
                     dt.cell(rr, c, d[key]).number_format = fmt
-            dt.cell(rr, 13, d.get("id"))
+            dt.cell(rr, 14, d.get("id"))
             rr += 1
-    autofit(dt, [18, 40, 9, 42, 50, 44, 26, 13, 15, 13, 11, 13, 34])
+    autofit(dt, [18, 40, 9, 42, 50, 44, 50, 26, 13, 15, 13, 11, 13, 34])
 
     # ---- Dropped Schemas (hidden): everything the filters left out ----------
     # Hidden because it runs to thousands of ad-hoc rows nobody reads day to
@@ -3989,55 +4223,55 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                     "the full text of a very long rule is: see the How to Use tab.")
         at["A4"].font = Font(italic=True, color="1F4E78")
         sb_title = {res["name"]: res["title"] for res in results}
-        AUDIENCE_COLUMNS = ["Sandbox", "Audience name", "Description",
-                            "Audience id",
-                            "Evaluation", "Lifecycle", "Tags", "Tag count",
-                            "Origin", "Created by", "Last modified by",
-                            "PQL (readable)", "PQL rendered",
-                            "PQL (raw pql/json)", "PQL length",
-                            "PQL truncated in sheet", "PQL format",
-                            "Unresolved tag ids", "System tags",
-                            "Complexity score (0-100)", "Complexity RAG",
-                            "Why this score", "Event scan",
-                            "Lookback (days)", "Lookup joins",
-                            "Joined fields", "Aggregations",
-                            "Depends on (audiences)", "Largest base audience",
-                            "Largest base (profiles)", "Sequence steps",
-                            "Conditions", "Longest value list",
-                            "Merge policies", "Used by (audiences)"]
+        pos = {c: i for i, c in enumerate(AUDIENCE_COLUMNS)}
+        rag_at = pos["Complexity RAG"]
+        # 'Where it goes' is coloured like a traffic light: in use, not live,
+        # nothing found (the unpublish candidates).
+        use_rag = (("In use", "GREEN"), ("Not live", "AMBER"), ("Nothing found", "RED"))
         hr = 5
-        for c, nm in enumerate(AUDIENCE_COLUMNS, 1):
+        for c, nm in enumerate(AUDIENCE_SHOWN, 1):
             at.cell(hr, c, nm)
-        style_header(at, len(AUDIENCE_COLUMNS), row=hr)
+        style_header(at, len(AUDIENCE_SHOWN), row=hr)
         rr = hr + 1
         # Tagged and rule-bearing audiences first: the ones anyone came to read.
         for row in sorted(aud_rows,
                           key=lambda r: (0 if r[6] else 1, 0 if r[11] else 1,
                                          str(r[1]).lower())):
-            for c, val in enumerate(row, 1):
-                if c == 1:           # 'ROI Prod', as on every other tab
+            for c, name in enumerate(AUDIENCE_SHOWN, 1):
+                val = row[pos[name]] if pos[name] < len(row) else ""
+                if name == "Sandbox":          # 'ROI Prod', as on every other tab
                     val = sb_title.get(val, val)
-                elif c == 12:
+                elif name == "PQL (readable)":
                     val = _pql_for_people(val)
                 cell = at.cell(rr, c, val)
-                if c == 16 and val == "yes":
+                if name == "PQL truncated in sheet" and val == "yes":
                     cell.font = Font(bold=True, color="C00000")
                 # Complexity score + RAG cells carry the traffic light.
-                if c in (20, 21) and row[20]:
-                    bg, fg = snapshot_tables.RAG_COLOURS[row[20]]
+                if name in ("Complexity score (0-100)", "Complexity RAG") and row[rag_at]:
+                    bg, fg = snapshot_tables.RAG_COLOURS[row[rag_at]]
                     cell.fill = PatternFill("solid", fgColor=bg)
                     cell.font = Font(bold=True, color=fg)
-                if c == 22:
+                if name == "Where it goes":
+                    grade = next((g for start, g in use_rag if str(val).startswith(start)), None)
+                    if grade:
+                        bg, fg = snapshot_tables.RAG_COLOURS[grade]
+                        cell.fill = PatternFill("solid", fgColor=bg)
+                        cell.font = Font(bold=True, color=fg)
+                if name == "Why this score":
                     cell.alignment = Alignment(wrap_text=True, vertical="top")
-                if c == 30 and isinstance(val, int):
+                if name == "Largest base (profiles)" and isinstance(val, int):
                     cell.number_format = "#,##0"
             rr += 1
-        autofit(at, [16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 11,
-                     12, 10, 22, 12, 12, 12, 90, 10, 12, 10, 10, 20, 12, 40, 14,
-                     10, 11, 12, 10, 12])
+        widths = dict(zip(AUDIENCE_COLUMNS, [
+            16, 46, 50, 36, 12, 14, 34, 10, 20, 32, 32, 70, 13, 50, 11, 12, 10, 22, 12, 12, 12,
+            90, 10, 12, 10, 10, 20, 12, 40, 14, 10, 11, 12, 10, 12, 60, 40, 40, 36, 50, 50, 50]))
+        autofit(at, [widths[c] for c in AUDIENCE_SHOWN])
         at.freeze_panes = at.cell(hr + 1, 1).coordinate
         at.auto_filter.ref = (f"A{hr}:"
-                              f"{get_column_letter(len(AUDIENCE_COLUMNS))}{rr - 1}")
+                              f"{get_column_letter(len(AUDIENCE_SHOWN))}{rr - 1}")
+
+    # ---- Lineage tabs (v3.4.23): where data comes from, where audiences go --
+    lineage_tabs(wb, results, label, confidential, style_header, autofit, title_font)
 
     # ---- Snapshot tabs: which snapshot table to query, and how fresh it is ---
     # Folded in from snapshot_tables.py, which owns the layout -- the tabs here
@@ -5278,6 +5512,7 @@ def run(service: str, sandbox_arg: str | None,
             logger.debug(traceback.format_exc())
             continue
         attach_audiences(token, conf, res, aud_caches)
+        attach_lineage(token, conf, res, aud_caches)
         print_sandbox(res)
         results.append(res)
 
