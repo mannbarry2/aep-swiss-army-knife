@@ -184,6 +184,8 @@ SOURCE_KINDS = {"stream data without transformation": "Streaming (HTTP API)",
                 "fileupload": "File uploaded in the UI",
                 "datastream_to_dataset": "Web / app (Edge datastream)",
                 "query service": "SQL job (Data Distiller)",
+                "report suite source": "Adobe Analytics (report suite)",           # by its source's spec
+                "analytics classification connection spec": "Adobe Analytics (classifications)",
                 "ups export": "Profile export to a dataset"}
 FILE_STORES = {"azure-blob": "Azure Blob", "s3": "Amazon S3", "amazon-s3": "Amazon S3", "sftp": "SFTP",
                "google-cloud": "Google Cloud Storage", "gcs": "Google Cloud Storage",
