@@ -455,6 +455,7 @@ table.t td .sub{color:var(--muted);font-size:12px;word-break:break-all}
 .node:hover{text-decoration:none;border-color:var(--accent);box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .node .l{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:10px}
 .node .s{display:block;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vals.mini{margin-top:0;gap:3px;max-width:340px} .vals.mini span{font-size:11px;padding:0 5px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .vals.mini em{font-size:11px;color:var(--faint);font-style:normal;align-self:center}
 .vals{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px} .vals span{font-size:12px;background:var(--code-bg);border:1px solid var(--line);border-radius:5px;padding:1px 7px;font-family:var(--mono)} .vals b{font-family:var(--sans);font-weight:400;color:var(--muted);margin-left:5px}
 .node.k-jrn{border-left-color:var(--k-jrn)} .node.k-dst{border-left-color:var(--k-dst)} .node.k-src{border-left-color:var(--k-src)}
 .b-jrn{background:var(--p-journey-bg);color:var(--p-journey)} .b-dst{background:var(--p-destination-bg);color:var(--p-destination)} .b-src{background:var(--p-source-bg);color:var(--p-source)} .b-neutral{background:var(--p-neutral-bg);color:var(--p-neutral)}
@@ -561,7 +562,7 @@ const term = (word, key) => `<span class="term" title="${h(GLOSS[key])}">${h(wor
 /* ---------- search ---------- */
 const IDX = [];
 D.fields.forEach((f, i) => IDX.push({t: "f", i, title: fieldLabel(f), sub: f.path,
-  hay: [f.name, f.path, f.fpath, f.desc, ...f.on.map(o => D.schemas[o.s].title)].join(" ").toLowerCase()}));
+  hay: [f.name, f.path, f.fpath, f.desc, ...f.on.map(o => D.schemas[o.s].title), ...f.on.map(o => o.top)].join(" ").toLowerCase()}));
 D.schemas.forEach((s, i) => IDX.push({t: "s", i, title: s.name, sub: `${kindWord(s.kind)} schema · ${plural(s.f.length, "field")}`,
   hay: [s.tab, s.title, s.desc, s.cls, s.tables].join(" ").toLowerCase()}));
 D.datasets.forEach((d, i) => IDX.push({t: "d", i, title: d.name || d.table, sub: `dataset · ${d.table || ""}`,
@@ -662,7 +663,7 @@ const lifePill = s => s ? `<span class="badge ${/^published$/i.test(s) ? "GREEN"
 const evalPill = s => s ? `<span class="badge b-neutral">${h(s)}</span>` : "–";
 function covBar(c) {
   const n = num(c);
-  return n === null ? '<span class="sub">–</span>' : `<span class="covbar"><i style="width:${Math.max(4, Math.min(100, n))}%;background:${covColour(n)}"></i></span>${fmt(n, 0)}%`;
+  return n === null ? '<span class="sub">–</span>' : `<span style="white-space:nowrap"><span class="covbar"><i style="width:${Math.max(4, Math.min(100, n))}%;background:${covColour(n)}"></i></span>${fmt(n, 0)}%</span>`;
 }
 function strip(hist) {
   if (!hist || !hist.length) return '<span class="sub">no history read</span>';
@@ -865,10 +866,12 @@ function retentionList() {
   return `${short.length ? `<p><b>Shorter than 90 days:</b></p><ul class="list-plain">${short.map(li).join("")}</ul>` : ""}
     ${rest.length ? `<details><summary>${short.length ? "The other " : ""}${plural(rest.length, "dataset")} keep ${common}</summary><ul class="list-plain">${rest.map(li).join("")}</ul></details>` : ""}`;
 }
-function topValues(s) {
+// The workbook's 'Top values (count)': "value(count) | value(count) | ..."; `limit` keeps the first few.
+function topValues(s, limit) {
   if (!s) return "";
   const vals = String(s).split(" | ").map(v => { const m = /^(.*)\((\d+)\)$/.exec(v.trim()); return m ? [m[1], m[2]] : [v.trim(), ""]; });
-  return `<div class="vals">${vals.map(([v, n]) => `<span>${h(v)}${n ? `<b>×${fmt(+n, 0)}</b>` : ""}</span>`).join("")}</div>`;
+  const shown = limit ? vals.slice(0, limit) : vals;
+  return `<div class="vals${limit ? " mini" : ""}">${shown.map(([v, n]) => `<span title="${h(v)}${n ? ` – ${n} of the records read` : ""}">${h(v === "" ? "(blank)" : v)}${n ? `<b>×${fmt(+n, 0)}</b>` : ""}</span>`).join("")}${limit && vals.length > limit ? `<em>+${vals.length - limit}</em>` : ""}</div>`;
 }
 
 function pageField(i) {
@@ -961,6 +964,7 @@ function fieldCols(s) {
     {label: "Holds", v: f => typeWords(f.type), html: f => h(typeWords(f.type))},
     ...(s === undefined ? [{label: "Schemas", num: true, v: f => f.on.length, html: f => fmt(f.on.length, 0)}] : []),
     {label: "Filled in", num: true, v: f => num(pick(f).cov), html: f => covBar(pick(f).cov), tip: "Share of a recent sample of records with this field filled in"},
+    {label: "Most common", v: f => pick(f).top || "", html: f => topValues(pick(f).top, 3) || '<span class="sub">–</span>', tip: "Top values in the recent sample, with how many records had each (personal data masked)"},
     {label: "Months held", num: true, v: f => num(pick(f).months), html: f => num(pick(f).months) === null ? '<span class="sub">?</span>' : fmt(pick(f).months), tip: "Have we got it? Months of unbroken data"},
     {label: "Profile days", num: true, v: f => num(pick(f).pdays), html: f => num(pick(f).pdays) === null ? '<span class="sub">–</span>' : fmt(pick(f).pdays, 0), tip: "Days of it in Profile now"},
     {label: "Audiences", num: true, v: f => f.aud.length, html: f => f.aud.length ? `<b>${fmt(f.aud.length, 0)}</b>` : '<span class="sub">0</span>'},
@@ -1117,7 +1121,7 @@ function pageFields() {
     "t-fields", fieldCols(), D.fields,
     [{label: "Used by an audience", test: f => f.aud.length > 0}, {label: "In Profile", test: f => f.on.some(o => D.schemas[o.s].profile)},
      {label: "12+ months held", test: f => f.on.some(o => num(o.months) >= 12)}, {label: "Profile records", test: f => f.on.some(o => kindOf(D.schemas[o.s].kind) === "profile")},
-     {label: "Events", test: f => f.on.some(o => kindOf(D.schemas[o.s].kind) === "event")}], {sort: 6, dir: -1});
+     {label: "Events", test: f => f.on.some(o => kindOf(D.schemas[o.s].kind) === "event")}], {sort: 7, dir: -1});
 }
 function pageSchemas() {
   const cols = [
