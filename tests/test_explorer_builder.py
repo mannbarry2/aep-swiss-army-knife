@@ -65,6 +65,10 @@ block = page.split('id="dd-data">', 1)[1].split("</script>", 1)[0]
 check("data block survives a '</script>' in a description", "<\\/script>" in block and json.loads(block.replace("<\\/", "</")))
 check("page title names the sandbox", "<title>Data Dictionary Explorer – ROI Prod</title>" in page)
 check("author is Barry, not a library", 'content="Barry Mann (barrymann.com)"' in page)
+wbk_aa = dict(wbk, schemas=[dict(wbk["schemas"][0], **{"Adobe Analytics": "Yes"})])
+check("Adobe Analytics flag read from the Schemas tab", ex.build_model(wbk_aa, {}, "x")["schemas"][0]["aa"]
+      and not m["schemas"][0]["aa"])
+check("Adobe Analytics hidden by default, with a switch", 'let SHOW_AA = false;' in page and 'id="aa"' in page)
 check("field lists show the top values, from the workbook column",
       'label: "Most common"' in page and "topValues(pick(f).top, 3)" in page)
 

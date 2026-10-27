@@ -71,6 +71,13 @@ check("long note merged and wrapped",
       any(str(r) .startswith("A3:") for r in ws.merged_cells.ranges) and ws["A3"].alignment.wrap_text)
 check("colour scale on the months", any("F6" in str(r.sqref) for r in ws.conditional_formatting))
 
+# Adobe Analytics report-suite schemas are flagged (kept, for the Explorer to hide).
+check("Adobe Analytics: an 'AA:' title", dd.is_adobe_analytics({"title": "AA: TescoUKGroceries"}, ["a.b"]))
+check("Adobe Analytics: mostly _experience.analytics fields",
+      dd.is_adobe_analytics({"title": "Web"}, ["_experience.analytics.event1to100.event1.value"] * 3 + ["a"] * 7))
+check("Adobe Analytics: an ordinary schema is not", not dd.is_adobe_analytics(
+    {"title": "Tesco Order Event"}, ["_tescostores.x"] * 50 + ["_experience.analytics.customDimensions.eVars.eVar1"]))
+
 # Mostly short descriptions with a few longer ones: room for a sentence, not a sliver.
 wb2 = Workbook()
 ws2 = wb2.active

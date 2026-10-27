@@ -1845,6 +1845,18 @@ def is_test(raw: dict) -> bool:
     return bool(_TEST_RE.search(raw.get("title") or ""))
 
 
+def is_adobe_analytics(raw: dict, paths) -> bool:
+    """An Adobe Analytics report-suite schema: titled 'AA: ...', or a good share
+    of its fields are Analytics' own (_experience.analytics...). KEPT -- the
+    workbook is a census -- but flagged on the Schemas tab, so the Explorer can
+    hide it by default (UK's has 5,809 of 7,513 fields)."""
+    title = (raw.get("title") or "").strip().lower()
+    if title.startswith("aa:") or "adobe analytics" in title:
+        return True
+    paths = list(paths)
+    return bool(paths) and sum(p.startswith("_experience.analytics.") for p in paths) >= 0.2 * len(paths)
+
+
 # ----------------------------------------------------------------------------
 # Credential menu + sandbox picker
 # ----------------------------------------------------------------------------
@@ -2155,6 +2167,7 @@ def collect_sandbox(token, conf, sb):
             "class": cls,
             "meta_class": raw.get("meta:class") or "",
             "profile_enabled": sid in profile_by_schema,
+            "analytics": is_adobe_analytics(raw, (r[0] for r in field_rows)),
             "kind": KIND_LABEL[schema_kind(raw.get("meta:class") or "")],
             **{key: (metrics_by_schema.get(sid) or {}).get(key)
                for key in ("lake_gb", "lake_rows", "lake_ttl_days",
@@ -2267,7 +2280,7 @@ SCHEMA_CSV_COLUMNS = ["Sandbox", "Schema", "Description", "Class", "Kind",
                       "Data lake TTL (days)", "Profile GB", "Profile TTL (days)",
                       "SQL table names", "Fields", "Identities",
                       "Relationships", "Friendly-labelled fields", "Last Modified",
-                      "Schema $id"]
+                      "Adobe Analytics", "Schema $id"]
 
 
 # Per-schema tab: one field per row (the schema's own metadata lives in the
@@ -4054,7 +4067,8 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                k.get("lake_gb"), k.get("lake_rows"), k.get("lake_ttl_days"),
                k.get("profile_gb"), k.get("profile_ttl_days"),
                _sql_table_names(k), k["n_fields"], k["n_identities"],
-               k["n_relationships"], k["n_labels"], k["last_mod"], k["id"]]
+               k["n_relationships"], k["n_labels"], k["last_mod"],
+               "Yes" if k.get("analytics") else "No", k["id"]]
         for c, val in enumerate(row, 1):
             cell = sh.cell(rr, c, val)
             if c in (9, 12) and val is not None:
@@ -4063,7 +4077,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
                 cell.number_format = "#,##0"
         rr += 1
     autofit(sh, [26, 18, 38, 50, 22, 9, 10, 9, 13, 15, 13, 11, 13, 40, 7, 10,
-                 13, 16, 16, 58])
+                 13, 16, 16, 10, 58])
 
     # ---- Datasets tab: friendly name -> SQL table (system) name -------------
     # EVERY dataset in each sandbox, so a query can be aimed at the right table.

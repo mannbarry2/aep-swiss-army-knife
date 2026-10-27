@@ -90,6 +90,7 @@ def _profile(v):
 
 PILL_COLUMNS = {
     "Live now": _yes_no, "Into Profile": _yes_no, "In Profile": _yes_no,
+    "Adobe Analytics": lambda v: PILL["neutral"] if str(v).lower() == "yes" else None,
     "Kind": _kind, "Status": _status, "Lifecycle": _lifecycle, "Profile": _profile,
     "How it comes in": lambda v: PILL["source"],
     "Destination": lambda v: PILL["destination"],

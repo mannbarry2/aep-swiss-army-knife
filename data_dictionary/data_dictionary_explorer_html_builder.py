@@ -178,7 +178,7 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
             "ttl": _num(r.get("Data lake TTL (days)")), "pgb": _num(r.get("Profile GB")),
             "pttl": _num(r.get("Profile TTL (days)")), "tables": r.get("SQL table names"),
             "nid": _num(r.get("Identities")), "nrel": _num(r.get("Relationships")),
-            "mod": r.get("Last Modified"), "ds": [], "f": []})
+            "mod": r.get("Last Modified"), "aa": _yes(r.get("Adobe Analytics")), "ds": [], "f": []})
 
     datasets = []
     for r in wbk["datasets"]:
@@ -423,7 +423,7 @@ h1{font-size:26px;margin:4px 0 6px;line-height:1.25} h2{font-size:18px;margin:30
 .big{font-size:28px;font-weight:700;line-height:1} .big small{font-size:14px;font-weight:400;color:var(--muted)}
 .copyrow{display:flex;gap:8px;align-items:flex-start}
 pre.code{flex:1;min-width:0;overflow-wrap:anywhere;margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.45 var(--mono);max-height:340px;overflow:auto}
-#theme{white-space:nowrap}
+#theme,#aa{white-space:nowrap} #aa.on{background:var(--p-neutral-bg);color:var(--p-neutral);font-weight:700}
 button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:5px 10px;cursor:pointer} button:hover{border-color:var(--accent);color:var(--accent)}
 details summary{cursor:pointer;color:var(--accent);font-size:14px;margin:6px 0}
 table.t{width:100%;border-collapse:collapse;font-size:14px;background:var(--panel)}
@@ -493,6 +493,7 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
   <nav class="main" id="nav">
     <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/help">How to read this</a>
   </nav>
+  <button id="aa" hidden title="Adobe Analytics report-suite data: in the workbook, hidden here by default">AA hidden</button>
   <button id="theme" title="Theme: auto (click for light, dark, auto)">◐</button>
 </div></header>
 <main id="app"></main>
@@ -557,6 +558,30 @@ const GLOSS = {
 };
 const term = (word, key) => `<span class="term" title="${h(GLOSS[key])}">${h(word)}</span>`;
 
+/* ---------- Adobe Analytics report-suite data: hidden unless asked for ---------- */
+// The workbook flags the schemas (Schemas tab, 'Adobe Analytics'); hidden with them are
+// fields found only there, their datasets, and the dataflows that feed only those.
+const AA_S = new Set(D.schemas.flatMap((s, i) => s.aa ? [i] : []));
+let SHOW_AA = false;
+try { SHOW_AA = localStorage.getItem("dd-aa") === "show"; } catch (e) { }
+const aaDs = d => AA_S.has(D.datasets[d].s);
+const HIDE = {
+  s: i => AA_S.has(i),
+  f: i => D.fields[i].on.length > 0 && D.fields[i].on.every(o => AA_S.has(o.s)),
+  d: i => aaDs(i),
+  r: i => /^Adobe Analytics/i.test(D.sources[i].kind || "") || (D.sources[i].into.length > 0 && D.sources[i].into.every(aaDs)),
+};
+const shown = (t, i) => SHOW_AA || !(HIDE[t] && HIDE[t](i));
+const showIdx = (t, xs) => xs.filter(i => shown(t, i));
+const showRows = (t, list) => list.filter((_, i) => shown(t, i));
+// A field's schemas, without the hidden ones -- unless that would leave none.
+const visOn = f => { const o = SHOW_AA ? f.on : f.on.filter(x => !AA_S.has(x.s)); return o.length ? o : f.on; };
+function aaNote(what) {
+  if (!AA_S.size) return "";
+  return SHOW_AA ? ` <a href="#" data-aa="hide">Hide Adobe Analytics</a>.`
+    : ` Adobe Analytics report-suite ${what} are hidden (they are in the workbook) – <a href="#" data-aa="show">show them</a>.`;
+}
+
 /* ---------- search ---------- */
 const IDX = [];
 D.fields.forEach((f, i) => IDX.push({t: "f", i, title: fieldLabel(f), sub: f.path,
@@ -580,6 +605,7 @@ function search(q, limit) {
   if (!words.length) return [];
   const out = [];
   for (const e of IDX) {
+    if (!shown(e.t, e.i)) continue;
     if (!words.every(w => e.hay.includes(w))) continue;
     const t = e.title.toLowerCase(), s = (e.sub || "").toLowerCase(), q0 = q.toLowerCase().trim();
     let sc = 0;
@@ -784,7 +810,7 @@ const schemaAud = s => uniq(schemaUsed(s).flatMap(f => D.fields[f].aud.filter(a 
 const liveFirst = (xs, list) => xs.slice().sort((p, q) => (list[q].live ? 1 : 0) - (list[p].live ? 1 : 0));
 // The two ends of the lineage, from the workbook's Sources / Journeys / Destinations tabs.
 function srcCol(dsIdx, more) {
-  return {title: "Where it comes from", items: liveFirst(uniq(dsIdx.flatMap(d => D.datasets[d].src)), D.sources).map(r => N("r", r)), more,
+  return {title: "Where it comes from", items: liveFirst(showIdx("r", uniq(dsIdx.flatMap(d => D.datasets[d].src))), D.sources).map(r => N("r", r)), more,
           ph: !HAS_LINEAGE, empty: HAS_LINEAGE ? "No dataflow feeds it (loaded by an API call, or a one-off job)." : NOT_IN};
 }
 function goesCol(audIdx, title, more) {
@@ -797,10 +823,11 @@ const audSort = (x, y) => (D.audiences[y].score || 0) - (D.audiences[x].score ||
 
 /* ---------- pages ---------- */
 function pageHome() {
-  const S = D.schemas, kinds = {profile: 0, event: 0, other: 0};
+  const S = showRows("s", D.schemas), kinds = {profile: 0, event: 0, other: 0};
   S.forEach(s => kinds[kindOf(s.kind)]++);
-  const inProf = D.datasets.filter(dsInProfile).length;
-  const withHist = D.fields.filter(f => f.on.some(o => num(o.months) > 0)).length;
+  const DS = showRows("d", D.datasets), FS = showRows("f", D.fields);
+  const inProf = DS.filter(dsInProfile).length;
+  const withHist = FS.filter(f => f.on.some(o => num(o.months) > 0)).length;
   const red = D.audiences.filter(a => a.rag === "RED");
   const linkedAud = D.audiences.filter(a => a.f.length).length;
   const card = (s) => `<a class="panel tile" href="${href.s(D.schemas.indexOf(s))}" style="padding:10px 14px"><b>${h(s.name)}</b><div class="l">${kindWord(s.kind)} · ${plural(s.f.length, "field")} · ${s.profile ? "in Profile" : "not in Profile"}</div></a>`;
@@ -809,9 +836,9 @@ function pageHome() {
     <p class="lede">Search for anything below, or start from a box. Every name is a link: click through to follow the data from where it comes in, to the ${term("dataset", "dataset")} it lands in, its ${term("schema", "schema")} and ${term("fields", "field")}, the ${term("audiences", "audience")} that use it, and the journeys and destinations they go to.</p>
     <div class="searchwrap searchbig" id="bigsearch"></div></section>
     <div class="grid g4" style="margin-top:22px">
-      <a class="panel tile" href="#/fields"><div class="n">${fmt(D.fields.length, 0)}</div><div class="l">fields · ${fmt(withHist, 0)} with history</div></a>
+      <a class="panel tile" href="#/fields"><div class="n">${fmt(FS.length, 0)}</div><div class="l">fields · ${fmt(withHist, 0)} with history</div></a>
       <a class="panel tile" href="#/schemas"><div class="n">${fmt(S.length, 0)}</div><div class="l">schemas · ${kinds.profile} profile, ${kinds.event} event, ${kinds.other} other</div></a>
-      <a class="panel tile" href="#/datasets"><div class="n">${fmt(D.datasets.length, 0)}</div><div class="l">datasets · ${fmt(inProf, 0)} loaded into Profile</div></a>
+      <a class="panel tile" href="#/datasets"><div class="n">${fmt(DS.length, 0)}</div><div class="l">datasets · ${fmt(inProf, 0)} loaded into Profile</div></a>
       <a class="panel tile" href="#/audiences"><div class="n">${fmt(D.audiences.length, 0)}</div><div class="l">audiences · ${fmt(linkedAud, 0)} traced to their fields</div></a>
     </div>
     <div class="grid g2" style="margin-top:14px">
@@ -832,7 +859,7 @@ function homeLineage() {
   const pub = D.audiences.filter(a => /publish/i.test(a.life || ""));
   const n = re => pub.filter(a => re.test(a.where || "")).length;
   const kinds = {};
-  D.sources.forEach(r => { kinds[r.kind] = kinds[r.kind] || {all: 0, live: 0}; kinds[r.kind].all++; kinds[r.kind].live += r.live ? 1 : 0; });
+  showRows("r", D.sources).forEach(r => { kinds[r.kind] = kinds[r.kind] || {all: 0, live: 0}; kinds[r.kind].all++; kinds[r.kind].live += r.live ? 1 : 0; });
   return `<div class="grid g2" style="margin-top:14px">
     <div class="panel card"><h3>Where audiences go</h3><p>Of ${plural(pub.length, "published audience")}:</p>
       <ul class="list-plain"><li><span class="badge GREEN">In use</span> ${fmt(n(/^In use/), 0)} – a live journey or destination, or another audience built on it</li>
@@ -874,7 +901,7 @@ function topValues(s, limit) {
 
 function pageField(i) {
   const f = D.fields[i];
-  const schemaIdx = uniq(f.on.map(o => o.s));
+  const schemaIdx = uniq(visOn(f).map(o => o.s));
   const ds = uniq(schemaIdx.flatMap(s => D.schemas[s].ds));
   // Audiences that go somewhere come first, so the lines to the last column show.
   const aud = f.aud.slice().sort((x, y) => (D.audiences[y].j.length + D.audiences[y].x.length > 0) - (D.audiences[x].j.length + D.audiences[x].x.length > 0) || audSort(x, y));
@@ -888,7 +915,7 @@ function pageField(i) {
   if (best > 0) say.push(`We hold about <b>${fmt(best)} months</b> of it.`);
   if (pd > 0) say.push(`Profile has <b>${fmt(pd, 0)} days</b> of it right now, so audiences can look back that far.`);
   say.push(aud.length ? `<b>${plural(aud.length, "audience")}</b> use it.` : "No audience uses it yet.");
-  const rows = f.on.map(o => ({o, s: D.schemas[o.s]}));
+  const rows = visOn(f).map(o => ({o, s: D.schemas[o.s]}));
   return `<div class="crumb"><a href="#/fields">Fields</a> › ${h(f.fpath || f.path)}</div>
     <h1>${h(fieldLabel(f))}</h1>
     <div class="copyrow" style="max-width:760px"><pre class="code">${h(f.path)}</pre>${copyBtn(f.path)}</div>
@@ -1038,7 +1065,7 @@ function pageAudience(i) {
   const a = D.audiences[i];
   // A field found in almost every schema (eventType, _id) says nothing about where the data is: use the specific ones.
   const specific = a.f.filter(f => D.fields[f].on.length <= 3);
-  const schemas = uniq((specific.length ? specific : a.f).flatMap(f => D.fields[f].on.map(o => o.s)
+  const schemas = uniq((specific.length ? specific : a.f).flatMap(f => visOn(D.fields[f]).map(o => o.s)
     .filter(s => readsFor(a, s).includes(f))));
   const reads = [...a.f.map(f => N("f", f)), ...a.dep.map(d => N("a", d))];
   const used = a.used.slice().sort(audSort);
@@ -1115,8 +1142,9 @@ document.addEventListener("click", ev => {
 });
 
 function pageFields() {
-  return listPage("Fields", `Every field across every schema, ${fmt(D.fields.length, 0)} in all. Click a column heading to sort; click a field for its full story.`,
-    "t-fields", fieldCols(), D.fields,
+  const FS = showRows("f", D.fields);
+  return listPage("Fields", `Every field across every schema, ${fmt(FS.length, 0)} in all. Click a column heading to sort; click a field for its full story.${aaNote("fields")}`,
+    "t-fields", fieldCols(), FS,
     [{label: "Used by an audience", test: f => f.aud.length > 0}, {label: "In Profile", test: f => f.on.some(o => D.schemas[o.s].profile)},
      {label: "12+ months held", test: f => f.on.some(o => num(o.months) >= 12)}, {label: "Profile records", test: f => f.on.some(o => kindOf(D.schemas[o.s].kind) === "profile")},
      {label: "Events", test: f => f.on.some(o => kindOf(D.schemas[o.s].kind) === "event")}], {sort: 7, dir: -1});
@@ -1131,14 +1159,14 @@ function pageSchemas() {
     {label: "Rows (lake)", num: true, v: s => num(s.rows), html: s => fmt(s.rows, 0)},
     {label: "Audiences", num: true, v: s => schemaAud(by.schema[s.tab]).length, html: s => fmt(schemaAud(by.schema[s.tab]).length, 0), tip: "Audiences that read at least one of its fields"},
   ];
-  return listPage("Schemas", `A ${term("schema", "schema")} is the blueprint for one kind of data. Purple are customer records, blue are events, green are lookups.`,
-    "t-schemas", cols, D.schemas,
+  return listPage("Schemas", `A ${term("schema", "schema")} is the blueprint for one kind of data. Purple are customer records, blue are events, green are lookups.${aaNote("schemas")}`,
+    "t-schemas", cols, showRows("s", D.schemas),
     [{label: "In Profile", test: s => s.profile}, {label: "Profile records", test: s => kindOf(s.kind) === "profile"}, {label: "Events", test: s => kindOf(s.kind) === "event"}, {label: "Lookups / other", test: s => kindOf(s.kind) === "other"}],
     {sort: 6, dir: -1});
 }
 function pageDatasets() {
-  return listPage("Datasets", `A ${term("dataset", "dataset")} is where data actually lands. All ${fmt(D.datasets.length, 0)} are listed, including those whose schema was left out of this dictionary.`,
-    "t-datasets", dsCols(), D.datasets,
+  return listPage("Datasets", `A ${term("dataset", "dataset")} is where data actually lands. All ${fmt(showRows("d", D.datasets).length, 0)} are listed, including those whose schema was left out of this dictionary.${aaNote("datasets")}`,
+    "t-datasets", dsCols(), showRows("d", D.datasets),
     [{label: "In Profile", test: dsInProfile}, {label: "Schema in this dictionary", test: d => d.s >= 0}, {label: "Has rows", test: d => num(d.rows) > 0}],
     {sort: 3, dir: -1, on: new Set([1])});
 }
@@ -1165,10 +1193,10 @@ function pageDestinations() {
 }
 function pageSources() {
   const kinds = {};
-  D.sources.forEach(r => kinds[r.kind] = (kinds[r.kind] || 0) + 1);
+  showRows("r", D.sources).forEach(r => kinds[r.kind] = (kinds[r.kind] || 0) + 1);
   const chips = Object.keys(kinds).sort((p, q) => kinds[q] - kinds[p]).map(k => ({label: `${k} (${kinds[k]})`, test: r => r.kind === k}));
-  return listPage("Sources", `Every dataflow that brings data into a dataset. ${HAS_LINEAGE ? "Pick a kind to narrow it down." : NOT_IN}`,
-    "t-sources", srcCols(), D.sources, [{label: "Live", test: r => r.live}, {label: "Into Profile", test: r => r.profile}, ...chips], {sort: 3, dir: -1});
+  return listPage("Sources", `Every dataflow that brings data into a dataset. ${HAS_LINEAGE ? "Pick a kind to narrow it down." : NOT_IN}${aaNote("feeds")}`,
+    "t-sources", srcCols(), showRows("r", D.sources), [{label: "Live", test: r => r.live}, {label: "Into Profile", test: r => r.profile}, ...chips], {sort: 3, dir: -1});
 }
 function pageJourney(i) {
   const x = D.journeys[i];
@@ -1275,6 +1303,23 @@ function setTheme(t) {
 let theme = new URLSearchParams(location.search).get("theme");
 if (!THEMES.includes(theme)) { try { theme = localStorage.getItem("dd-theme"); } catch (e) { theme = null; } }
 setTheme(THEMES.includes(theme) ? theme : "auto");
+function setAA(show) {
+  SHOW_AA = show;
+  try { localStorage.setItem("dd-aa", show ? "show" : "hide"); } catch (e) { }
+  const b = document.getElementById("aa");
+  b.textContent = show ? "AA shown" : "AA hidden";
+  b.classList.toggle("on", show);
+  b.title = show ? "Adobe Analytics report-suite data is shown; click to hide it" : "Adobe Analytics report-suite data is hidden (it is in the workbook); click to show it";
+}
+if (AA_S.size) { document.getElementById("aa").hidden = false; setAA(SHOW_AA); }
+document.getElementById("aa").onclick = () => { setAA(!SHOW_AA); route(); };
+document.addEventListener("click", ev => {
+  const a = ev.target.closest("[data-aa]");
+  if (!a) return;
+  ev.preventDefault();
+  setAA(a.dataset.aa === "show");
+  route();
+});
 document.getElementById("theme").onclick = () => setTheme(THEMES[(THEMES.indexOf(THEME) + 1) % 3]);
 document.getElementById("brand-sub").textContent = `${M.label} · ${M.generated ? M.generated.split("|")[0].replace("Generated", "").trim() : ""}`;
 window.addEventListener("hashchange", route);
