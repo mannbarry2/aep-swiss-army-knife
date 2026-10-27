@@ -165,7 +165,7 @@ def _yes(v) -> bool:
     return str(v or "").strip().lower() in ("yes", "y", "true")
 
 
-def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
+def build_model(wbk: dict, pql: dict, workbook_name: str, label: str = "") -> dict:
     schemas, s_ix = [], {}
     for r in wbk["schemas"]:
         title = str(r.get("Schema") or "").strip()
@@ -178,7 +178,10 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
             "ttl": _num(r.get("Data lake TTL (days)")), "pgb": _num(r.get("Profile GB")),
             "pttl": _num(r.get("Profile TTL (days)")), "tables": r.get("SQL table names"),
             "nid": _num(r.get("Identities")), "nrel": _num(r.get("Relationships")),
-            "mod": r.get("Last Modified"), "aa": _yes(r.get("Adobe Analytics")), "ds": [], "f": []})
+            "mod": r.get("Last Modified"), "ds": [], "f": [],
+            # Adobe Analytics report-suite data, hidden by default: the workbook's flag
+            # where it has one, else the report suite's 'AA: ...' title.
+            "aa": _yes(r.get("Adobe Analytics")) or title.lower().startswith("aa:")})
 
     datasets = []
     for r in wbk["datasets"]:
@@ -285,8 +288,10 @@ def build_model(wbk: dict, pql: dict, workbook_name: str) -> dict:
 
     meta = wbk["meta"]
     title = meta.get("title") or ""
-    label = title.split("–", 1)[1].strip() if "–" in title else ""
-    return {"meta": {"title": title, "label": label, "generated": meta.get("generated"),
+    label = label or (title.split("–", 1)[1].strip() if "–" in title else "")
+    version = re.search(r"v(\d+\.\d+\.\d+)", title)
+    return {"meta": {"title": title, "label": label, "version": version.group(1) if version else "",
+                     "generated": meta.get("generated"),
                      "workbook": workbook_name, "months": months, "retention": meta["retention"],
                      "gaps": meta["gaps"], "built": datetime.now().strftime("%Y-%m-%d %H:%M"),
                      "builder": f"{SCRIPT_NAME} v{SCRIPT_VERSION}"},
@@ -338,7 +343,7 @@ def main():
 
     print(f"{SCRIPT_NAME} v{SCRIPT_VERSION} ({SCRIPT_DATE})  by {SCRIPT_AUTHOR}")
     print(f"workbook {wb_path.name}  |  PQL {pql_path.name if pql_path and pql_path.exists() else '(none)'}")
-    model = build_model(read_workbook(wb_path), read_pql(pql_path), wb_path.name)
+    model = build_model(read_workbook(wb_path), read_pql(pql_path), wb_path.name, opt("label", ""))
     page = render_html(model)
     out.write_text(page, encoding="utf-8")
     linked = sum(1 for a in model["audiences"] if a["f"])
@@ -392,6 +397,7 @@ code,.mono{font-family:var(--mono);font-size:13px}
 header.top{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:4px solid var(--header)}
 .bar{max-width:1280px;margin:0 auto;padding:10px 20px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .brand{font-weight:700;white-space:nowrap;color:var(--ink)} .brand small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.ver{font-size:12px;background:var(--header);color:#fff;border-radius:10px;padding:2px 9px;margin-left:8px;font-weight:700;vertical-align:middle;letter-spacing:.02em}
 .proto{font-size:11px;background:var(--p-amber-bg);color:var(--p-amber);border-radius:10px;padding:1px 8px;margin-left:6px;font-weight:600;vertical-align:middle}
 .searchwrap{position:relative;flex:1;min-width:240px;max-width:560px}
 .searchwrap input{width:100%;font:inherit;padding:8px 12px 8px 34px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
@@ -488,10 +494,10 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
 </head>
 <body>
 <header class="top"><div class="bar">
-  <a class="brand" href="#/">Data Dictionary Explorer<span class="proto">PROTOTYPE</span><small id="brand-sub"></small></a>
+  <a class="brand" href="#/">Data Dictionary Explorer<span class="ver" id="ver"></span><span class="proto">PROTOTYPE</span><small id="brand-sub"></small></a>
   <div class="searchwrap" id="topsearch"></div>
   <nav class="main" id="nav">
-    <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/help">How to read this</a>
+    <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/help">Help</a>
   </nav>
   <button id="aa" hidden title="Adobe Analytics report-suite data: in the workbook, hidden here by default">AA hidden</button>
   <button id="theme" title="Theme: auto (click for light, dark, auto)">◐</button>
@@ -536,7 +542,7 @@ const HAS_LINEAGE = !!(D.journeys.length || D.sources.length || D.destinations.l
 const NOT_IN = "Not in this workbook – it needs a Data Dictionary run from v3.4.23.";
 const liveWord = live => live ? '<span class="badge b-in">Live</span>' : '<span class="badge b-out">Not live</span>';
 const WHERE_RAG = w => /^In use/.test(w || "") ? "GREEN" : /^Not live/.test(w || "") ? "AMBER" : /^Nothing found/.test(w || "") ? "RED" : "";
-const whereBadge = a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(a.where)}</span>` : "";
+const whereBadge = a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(familyWords(a.where))}</span>` : "";
 const kindOf = k => ({Profile: "profile", Event: "event"})[k] || "other";
 const kindWord = k => ({Profile: "Profile record", Event: "Event"})[k] || "Lookup / other";
 const fieldKind = f => kindOf(D.schemas[f.on[0].s].kind);
@@ -820,6 +826,18 @@ function goesCol(audIdx, title, more) {
           empty: HAS_LINEAGE ? "No journey or destination uses it." : NOT_IN};
 }
 const audSort = (x, y) => (D.audiences[y].score || 0) - (D.audiences[x].score || 0);
+// Audience family. A parent is an audience this one is built from (its rule says
+// "is in «parent»"); a child is built from this one; grandparents and grandchildren
+// are two steps away.
+function family(i) {
+  const a = D.audiences[i], parents = a.dep, children = a.used;
+  const grandparents = uniq(parents.flatMap(p => D.audiences[p].dep)).filter(x => x !== i && !parents.includes(x));
+  const grandchildren = uniq(children.flatMap(c => D.audiences[c].used)).filter(x => x !== i && !children.includes(x));
+  return {parents, children, grandparents, grandchildren};
+}
+const names = xs => xs.slice(0, 3).map(x => `<a href="${href.a(x)}">«${h(D.audiences[x].name)}»</a>`).join(", ") + (xs.length > 3 ? ` and ${plural(xs.length - 3, "more")}` : "");
+// The workbook's verdict says "built on it"; here that is a child audience.
+const familyWords = s => String(s || "").replace(/(\d+) audiences? built on it/, (m, n) => `${n} child audience${n === "1" ? "" : "s"}`);
 
 /* ---------- pages ---------- */
 function pageHome() {
@@ -832,7 +850,7 @@ function pageHome() {
   const linkedAud = D.audiences.filter(a => a.f.length).length;
   const card = (s) => `<a class="panel tile" href="${href.s(D.schemas.indexOf(s))}" style="padding:10px 14px"><b>${h(s.name)}</b><div class="l">${kindWord(s.kind)} · ${plural(s.f.length, "field")} · ${s.profile ? "in Profile" : "not in Profile"}</div></a>`;
   const group = (k, title) => { const xs = S.filter(s => kindOf(s.kind) === k); return xs.length ? `<h3><span class="badge b-${k}">${title}</span> ${xs.length}</h3><div class="grid g4">${xs.map(card).join("")}</div>` : ""; };
-  return `<section class="hero"><div class="crumb">${h(M.label)}</div><h1>What data do we have, and what uses it?</h1>
+  return `<section class="hero"><div class="crumb"><b>${h(M.label)}</b>${M.version ? ` · Data Dictionary <b>v${h(M.version)}</b>` : ""} · data read ${h(READ_AT)}</div><h1>What data do we have, and what uses it?</h1>
     <p class="lede">Search for anything below, or start from a box. Every name is a link: click through to follow the data from where it comes in, to the ${term("dataset", "dataset")} it lands in, its ${term("schema", "schema")} and ${term("fields", "field")}, the ${term("audiences", "audience")} that use it, and the journeys and destinations they go to.</p>
     <div class="searchwrap searchbig" id="bigsearch"></div></section>
     <div class="grid g4" style="margin-top:22px">
@@ -862,7 +880,7 @@ function homeLineage() {
   showRows("r", D.sources).forEach(r => { kinds[r.kind] = kinds[r.kind] || {all: 0, live: 0}; kinds[r.kind].all++; kinds[r.kind].live += r.live ? 1 : 0; });
   return `<div class="grid g2" style="margin-top:14px">
     <div class="panel card"><h3>Where audiences go</h3><p>Of ${plural(pub.length, "published audience")}:</p>
-      <ul class="list-plain"><li><span class="badge GREEN">In use</span> ${fmt(n(/^In use/), 0)} – a live journey or destination, or another audience built on it</li>
+      <ul class="list-plain"><li><span class="badge GREEN">In use</span> ${fmt(n(/^In use/), 0)} – a live journey or destination, or a child audience built from it</li>
       <li><span class="badge AMBER">Not live</span> <a href="#/audiences/notlive">${fmt(n(/^Not live/), 0)}</a> – only in journeys not running or dataflows switched off</li>
       <li><span class="badge RED">Nothing found using it</span> <a href="#/audiences/unused">${fmt(n(/^Nothing found/), 0)}</a> – candidates to unpublish</li></ul>
       <p><a href="#/journeys">${plural(D.journeys.length, "journey version")} →</a> &nbsp; <a href="#/destinations">${plural(D.destinations.length, "destination dataflow")} →</a></p></div>
@@ -950,10 +968,11 @@ function audCols() {
     {label: "Audience", v: a => a.name, html: a => `<a href="${href.a(by.audience[a.id])}">${h(a.name)}</a>${a.desc ? `<div class="sub">${h(a.desc)}</div>` : ""}`},
     {label: "Evaluation", v: a => a.eval, html: a => evalPill(a.eval)},
     {label: "Status", v: a => a.life, html: a => lifePill(a.life)},
-    {label: "Where it goes", v: a => a.where, html: a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(a.where.split(":")[0].replace(/ \(.*/, ""))}</span><div class="sub">${h((a.where.split(":")[1] || "").trim())}</div>` : '<span class="sub">–</span>'},
+    {label: "Where it goes", v: a => a.where, html: a => a.where ? `<span class="badge ${WHERE_RAG(a.where)}">${h(a.where.split(":")[0].replace(/ \(.*/, ""))}</span><div class="sub">${h(familyWords((a.where.split(":")[1] || "").trim()))}</div>` : '<span class="sub">–</span>'},
     {label: "Complexity", num: true, v: a => num(a.score), html: a => ragBadge(a), tip: "0–100; RED is heaviest for Adobe to evaluate"},
     {label: "Fields read", num: true, v: a => a.f.length, html: a => fmt(a.f.length, 0)},
-    {label: "Built on", num: true, v: a => a.dep.length, html: a => fmt(a.dep.length, 0), tip: "Other audiences this one includes"},
+    {label: "Parents", num: true, v: a => a.dep.length, html: a => fmt(a.dep.length, 0), tip: "Audiences this one is built from"},
+    {label: "Children", num: true, v: a => a.used.length, html: a => fmt(a.used.length, 0), tip: "Audiences built from this one"},
   ];
 }
 function jrnCols() {
@@ -1067,8 +1086,13 @@ function pageAudience(i) {
   const specific = a.f.filter(f => D.fields[f].on.length <= 3);
   const schemas = uniq((specific.length ? specific : a.f).flatMap(f => visOn(D.fields[f]).map(o => o.s)
     .filter(s => readsFor(a, s).includes(f))));
-  const reads = [...a.f.map(f => N("f", f)), ...a.dep.map(d => N("a", d))];
-  const used = a.used.slice().sort(audSort);
+  const reads = a.f.map(f => N("f", f));
+  const fam = family(i), used = fam.children.slice().sort(audSort);
+  const famSay = [
+    fam.parents.length ? `It is a <b>child</b> of ${names(fam.parents)}` : "",
+    fam.grandparents.length ? `a <b>grandchild</b> of ${names(fam.grandparents)}` : "",
+    fam.children.length ? `the <b>parent</b> of ${names(fam.children)}` : "",
+    fam.grandchildren.length ? `the <b>grandparent</b> of ${names(fam.grandchildren)}` : ""].filter(Boolean);
   const noRule = !a.fmt && !a.rule;
   let pretty = a.raw;
   if (a.fmt === "json") { try { pretty = JSON.stringify(JSON.parse(a.raw), null, 1); } catch (e) { } }
@@ -1077,29 +1101,37 @@ function pageAudience(i) {
     <p>${whereBadge(a)}${ragBadge(a)}${a.eval ? evalPill(a.eval) : ""}${a.life ? lifePill(a.life) : ""}${(a.tags || "").split(/\s*[,;|]\s*/).filter(Boolean).map(t => `<span class="badge b-aud">${h(t)}</span>`).join("")}</p>
     ${a.desc ? `<p class="say">${h(a.desc)}</p>` : ""}
     <p class="say">${noRule ? `This audience has no rule inside Adobe: it was ${a.origin ? `made by <b>${h(a.origin)}</b>` : "uploaded or made elsewhere"}, so there are no fields to trace.`
-      : `It reads <b>${plural(a.f.length, "field")}</b>${a.dep.length ? ` and builds on <b>${plural(a.dep.length, "other audience")}</b>` : ""}. ${used.length ? `<b>${plural(used.length, "audience")}</b> build on it.` : "No other audience builds on it."}`}</p>
-    <div class="facts"><div>Created by<b>${h(a.by || "–")}</b></div><div>Last changed by<b>${h(a.mod || "–")}</b></div><div>Origin<b>${h(a.origin || "–")}</b></div><div>Looks back<b>${num(a.lookback) ? plural(num(a.lookback), "day") : h(a.lookback || "–")}</b></div><div>Largest audience it builds on<b>${h(a.base || "–")}${num(a.basen) ? ` (${fmt(a.basen, 0)})` : ""}</b></div><div>Audience ID<b class="mono">${h(a.id)}</b></div></div>
+      : `It reads <b>${plural(a.f.length, "field")}</b>.`}
+      ${famSay.length ? ` ${famSay.join("; ")}.` : " It has no parent or child audiences."}</p>
+    <div class="facts"><div>Created by<b>${h(a.by || "–")}</b></div><div>Last changed by<b>${h(a.mod || "–")}</b></div><div>Origin<b>${h(a.origin || "–")}</b></div><div>Looks back<b>${num(a.lookback) ? plural(num(a.lookback), "day") : h(a.lookback || "–")}</b></div><div>Largest parent audience<b>${h(a.base || "–")}${num(a.basen) ? ` (${fmt(a.basen, 0)})` : ""}</b></div><div>Audience ID<b class="mono">${h(a.id)}</b></div></div>
     <h2>Lineage</h2>
     ${lineage([
       {title: "Schemas", items: schemas.map(s => N("s", s)), more: "#a-reads"},
-      {title: "What it reads", items: reads, more: "#a-reads", empty: noRule ? "No rule – nothing to trace." : "No field we could match."},
+      {title: "Fields it reads", items: reads, more: "#a-reads", empty: noRule ? "No rule – nothing to trace." : fam.parents.length ? "None directly – see its parent audiences below." : "No field we could match."},
       {title: "This audience", items: [N("a", i, true)]},
-      {title: "Audiences built on it", items: used.map(x => N("a", x)), more: "#a-used", empty: "None."},
       goesCol([i], "Where it goes", "#a-goes")])}
+    ${fam.parents.length || fam.children.length ? `<h2 id="a-family">Audience family</h2>
+    ${lineage([
+      {title: "Grandparents", items: fam.grandparents.map(x => N("a", x)), empty: "None."},
+      {title: "Parents", items: fam.parents.map(x => N("a", x)), empty: "None – it is built from fields only."},
+      {title: "This audience", items: [N("a", i, true)]},
+      {title: "Children", items: used.map(x => N("a", x)), more: "#a-used", empty: "None."},
+      {title: "Grandchildren", items: fam.grandchildren.map(x => N("a", x)), empty: "None."}],
+      "A parent is an audience this one is built from (its rule says “is in «parent»”); a child is built from this one; grandparents and grandchildren are two steps away. Every box is a link.")}` : ""}
     <h2 id="a-goes">Where it goes ${whereBadge(a)}</h2>
     ${HAS_LINEAGE ? (a.j.length || a.x.length ? `${a.j.length ? table("t-aj", jrnCols(), a.j.map(j => D.journeys[j]), {sort: 2, dir: -1}) : ""}
       ${a.x.length ? `<h3>Destinations</h3>${table("t-ax", dstCols(), a.x.map(x => D.destinations[x]))}` : ""}`
-      : `<p class="say">No journey or destination uses it${a.used.length ? `, but ${plural(a.used.length, "audience")} ${a.used.length === 1 ? "is" : "are"} built on it` : ""}.</p>`)
+      : `<p class="say">No journey or destination uses it${a.used.length ? `, but it is the parent of ${plural(a.used.length, "child audience")}, so it is still in use` : ""}.</p>`)
       : `<p class="sub">${NOT_IN}</p>`}
     ${/^Nothing found/.test(a.where || "") ? '<p class="hint">"Nothing found using it" is not proof: calls from other systems, Data Distiller queries and other products are not seen. Ask the person who made it before unpublishing.</p>' : ""}
     ${a.why ? `<h2>Complexity ${ragBadge(a)}</h2><p class="say">${h(a.why)}</p><p class="hint">How heavy the rule is for Adobe to work out, 0–100. The formula is on the workbook's How to Use tab.</p>` : ""}
     ${a.rule || a.raw ? `<h2>The rule</h2>${a.rule ? `<div class="copyrow"><pre class="code">${ruleHtml(a.rule)}</pre></div>${/\[…\]/.test(a.rule) ? '<p class="hint">[…] marks parts too complex to show as text; the full rule is below.</p>' : ""}${a.cut ? '<p class="hint">Cut short in the workbook (too long for a cell); the full rule is below.</p>' : ""}` : ""}
       ${a.raw ? `<details><summary>Full rule, as Adobe stores it (technical)</summary><div class="copyrow"><pre class="code">${h(pretty)}</pre>${copyBtn(a.raw)}</div>${a.rawcut ? '<p class="hint">Cut short here; the whole rule is in the PQL file next to the workbook.</p>' : ""}</details>` : ""}` : ""}
     <h2 id="a-reads">Fields it reads</h2>
-    ${a.f.length ? table("t-af", fieldCols(), a.f.map(f => D.fields[f])) : `<p class="sub">${a.dep.length ? "None directly – it is built from the audiences below." : noRule ? "None – it has no rule." : "None that is in this dictionary."}</p>`}
+    ${a.f.length ? table("t-af", fieldCols(), a.f.map(f => D.fields[f])) : `<p class="sub">${a.dep.length ? "None directly – it is built from its parent audiences, below." : noRule ? "None – it has no rule." : "None that is in this dictionary."}</p>`}
     ${a.miss.length ? `<p class="hint">Also reads ${a.miss.map(p => `<code>${h(p)}</code>${/^_experience\.customerJourneyManagement\./.test(p) ? " (Journey Optimizer's own email and push tracking)" : /^pushNotificationDetails/.test(p) ? " (Journey Optimizer's push-notification sign-ups)" : ""}`).join(", ")} – not in this dictionary: Adobe system data, or a schema that was left out.</p>` : ""}
-    ${a.dep.length ? `<h2>Audiences it builds on</h2>${table("t-adep", audCols(), a.dep.map(d => D.audiences[d]), {sort: 4, dir: -1})}` : ""}
-    <h2 id="a-used">Audiences built on it</h2>${used.length ? table("t-aused", audCols(), used.map(x => D.audiences[x]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
+    ${a.dep.length ? `<h2>Parent audiences <span class="count">built from these</span></h2>${table("t-adep", audCols(), a.dep.map(d => D.audiences[d]), {sort: 4, dir: -1})}` : ""}
+    <h2 id="a-used">Child audiences <span class="count">built from this one</span></h2>${used.length ? table("t-aused", audCols(), used.map(x => D.audiences[x]), {sort: 4, dir: -1}) : '<p class="sub">None.</p>'}`;
 }
 
 let FILTERS = [];
@@ -1244,7 +1276,8 @@ function pageHelp() {
    <div class="panel"><h3 style="margin-top:0">Following the data (lineage)</h3><p>Each page has a lineage strip. Data flows left to right:</p>
     <p><b>source → dataset → schema → field → audience → journey or destination</b></p>
     <p>Click any box to move there; the lines show which boxes connect. Hover a box to highlight its lines. A greyed box is not live: a dataset only in the data lake (audiences can't read it), a journey that is not running, a dataflow that is switched off.</p>
-    <p><b>Where it goes</b> on an audience: <span class="badge GREEN">In use</span> a live journey or destination, or another audience built on it; <span class="badge AMBER">Not live</span> only in journeys not running or dataflows switched off; <span class="badge RED">Nothing found using it</span> a candidate to unpublish – but ask its owner first, as calls from other systems are not seen.</p></div>
+    <p><b>Audience family</b>: a <b>parent</b> is an audience this one is built from (its rule says “is in «parent»”), a <b>child</b> is built from this one, and grandparents and grandchildren are two steps away. Unpublishing a parent breaks its children.</p>
+    <p><b>Where it goes</b> on an audience: <span class="badge GREEN">In use</span> a live journey or destination, or a child audience built from it; <span class="badge AMBER">Not live</span> only in journeys not running or dataflows switched off; <span class="badge RED">Nothing found using it</span> a candidate to unpublish – but ask its owner first, as calls from other systems are not seen.</p></div>
    <div class="panel"><h3 style="margin-top:0">A field's three numbers</h3>
     <p><b>Filled in</b>: out of a recent sample of records, the share that had the field. 0% can mean the field is new or unused.</p>
     <p><b>Have we got it? (months)</b>: how many months of unbroken data we hold, read month by month from the data lake.</p>
@@ -1288,7 +1321,7 @@ function route() {
   Object.keys(TABLES).forEach(id => FILTERS.find(f => f.id === id) ? applyFilter(id) : drawTable(id));
   window.scrollTo(0, 0);
   requestAnimationFrame(drawLineage);
-  document.title = (app.querySelector("h1") ? app.querySelector("h1").textContent + " – " : "") + "Data Dictionary Explorer – " + M.label;
+  document.title = (app.querySelector("h1") ? app.querySelector("h1").textContent + " – " : "") + `Data Dictionary Explorer – ${M.label}${M.version ? " – v" + M.version : ""}`;
 }
 /* light / dark / follow the computer; ?theme=light also works */
 const THEMES = ["auto", "light", "dark"];
@@ -1321,7 +1354,10 @@ document.addEventListener("click", ev => {
   route();
 });
 document.getElementById("theme").onclick = () => setTheme(THEMES[(THEMES.indexOf(THEME) + 1) % 3]);
-document.getElementById("brand-sub").textContent = `${M.label} · ${M.generated ? M.generated.split("|")[0].replace("Generated", "").trim() : ""}`;
+const READ_AT = M.generated ? M.generated.split("|")[0].replace("Generated", "").trim() : "";
+document.getElementById("brand-sub").textContent = `${M.label} · data read ${READ_AT}`;
+const verEl = document.getElementById("ver");
+if (M.version) { verEl.textContent = "v" + M.version; verEl.title = `Data Dictionary v${M.version}, run ${READ_AT}`; } else verEl.remove();
 window.addEventListener("hashchange", route);
 document.addEventListener("click", ev => {
   const a = ev.target.closest('a[href^="#f-"],a[href^="#s-"],a[href^="#a-"],a[href^="#d-"],a[href^="#j-"],a[href^="#x-"]');
