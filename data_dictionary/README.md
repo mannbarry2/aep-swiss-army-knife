@@ -14,6 +14,7 @@ Everything that describes what exists in a sandbox: schemas, fields, datasets, a
 | [`audience_complexity_score.py`](audience_complexity_score.py) | Library: the 0-100 complexity score the Data Dictionary gives every audience. |
 | [`release_notes_html_builder.py`](release_notes_html_builder.py) | Builds RELEASE_NOTES.html from RELEASE_NOTES.md. |
 | [`data_dictionary_explorer_html_builder.py`](data_dictionary_explorer_html_builder.py) | Prototype: a Data Dictionary workbook as one web page, with search and clickable lineage. Draws the workbook only. |
+| [`distribution_pack_builder.py`](distribution_pack_builder.py) | The hand-on zip: Explorer + workbook per market and a READ ME FIRST, version in every name. |
 | [`lineage_sources_journeys_and_destinations.py`](lineage_sources_journeys_and_destinations.py) | Library: sources into datasets, AJO journeys and destinations out of audiences (Data Dictionary lineage tabs; also used by the journey census and streaming triage). |
 | [`audience_rule_reader.py`](audience_rule_reader.py) | Library: the fields and audiences an audience rule reads (Data Dictionary Audiences tab). |
 

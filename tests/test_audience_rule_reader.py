@@ -33,10 +33,10 @@ def lit(v):
 
 # Profile array through select: the Data Dictionary writes array items as 'list[].field'.
 sel = {"nodeType": "select", "variables": [{"nodeType": "varDecl", "varName": "_Lcm1",
-       "from": look("_tescostores", "lcmDataGroup", "lcmData"),
+       "from": look("_acmestores", "lcmDataGroup", "lcmData"),
        "where": {"nodeType": "fnApply", "fnName": "equals", "params": [look("campaignCode", root=var("_Lcm1")), lit("X")]}}]}
 got = rr.field_refs(sel)
-check("profile array field via select", got == {("profile", "_tescostores.lcmDataGroup.lcmData[].campaignCode")}, got)
+check("profile array field via select", got == {("profile", "_acmestores.lcmDataGroup.lcmData[].campaignCode")}, got)
 
 # Event sequence over xEvent: fields relative to the event; its timestamp is left out.
 chain = {"nodeType": "chain", "array": look("xEvent"),
@@ -74,13 +74,13 @@ refs, ids = rr.text_refs('inSegment("aaa") and xEvent.commerce.order.priceTotal 
 check("PQL text: inSegment ids and dotted names",
       ids == ["aaa"] and ("event", "commerce.order.priceTotal") in refs and ("profile", "person.gender") in refs, (refs, ids))
 both = {"nodeType": "fnApply", "fnName": "and", "params": [
-    sel, chain, {"nodeType": "fnApply", "fnName": "equals", "params": [look("_tescostores", "tescoIdentities", "userId"), lit("1")]}]}
+    sel, chain, {"nodeType": "fnApply", "fnName": "equals", "params": [look("_acmestores", "acmeIdentities", "userId"), lit("1")]}]}
 prof, evt = rr.fields_read_by_root(both)
 check("profile and event fields kept apart",
-      prof == ["_tescostores.lcmDataGroup.lcmData[].campaignCode", "_tescostores.tescoIdentities.userId"]
+      prof == ["_acmestores.acmeIdentities.userId", "_acmestores.lcmDataGroup.lcmData[].campaignCode"]
       and evt == ["_experience.customerJourneyManagement.messageExecution.journeyVersionID"], (prof, evt))
 check("fields_read: sorted dot paths, from a tree or from text",
-      rr.fields_read(sel) == ["_tescostores.lcmDataGroup.lcmData[].campaignCode"]
+      rr.fields_read(sel) == ["_acmestores.lcmDataGroup.lcmData[].campaignCode"]
       and rr.fields_read(text="person.gender = 'f'") == ["person.gender"])
 
 print(f"\n{sum(results)}/{len(results)} passed")

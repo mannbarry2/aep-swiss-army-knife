@@ -96,7 +96,7 @@ audiences use it – and where those audiences go (journeys and destinations).</
 </ul>
 
 <div class="box"><b>Internal only.</b> This holds our customer data model, audience rules and colleagues' names.
-Keep it inside the company: share it from the Data Dictionary distribution folder on SharePoint, not by email or outside Tesco.</div>
+Keep it inside the company: share it from the Data Dictionary distribution folder on SharePoint, not by email or outside the company.</div>
 </body></html>
 """
 
