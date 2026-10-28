@@ -2391,6 +2391,15 @@ def _sheet_link(cell, sheet: str):
     cell.font = Font(color=LINK_COLOUR, underline="single")
 
 
+def _unfreeze(ws):
+    """Unfreeze a tab. openpyxl drops the frozen pane but leaves the selection
+    pointing at it ('bottomLeft'), and Excel then opens the whole workbook with
+    "We found a problem with some content" (v3.4.22 to v3.4.23's Summary)."""
+    ws.freeze_panes = None
+    for sel in ws.sheet_view.selection:
+        sel.pane = None
+
+
 def _header_row(ws):
     """The row a sheet's table header is on: the one style_header recorded,
     else the top of the sheet's filter, else None (a sheet of prose)."""
@@ -3573,7 +3582,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     style_header(ws, len(hdr), row=r)
     # The Summary is read top to bottom: freezing its first 13 rows filled a
     # laptop screen, and a one-row table needs no filter.
-    ws.freeze_panes = None
+    _unfreeze(ws)
     ws._dd_table = None
     r += 1
     for res in results:

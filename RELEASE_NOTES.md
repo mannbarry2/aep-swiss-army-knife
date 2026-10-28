@@ -66,6 +66,7 @@ workbook, which stands on its own.
 | --- | --- |
 | One copy of the journey logic ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.23` | `extract_audiences()` moved from the journey census into `data_dictionary/lineage_sources_journeys_and_destinations.py`, which the census now imports; the streaming triage tool finds destinations through the same module. |
 | Explorer draws, the workbook knows ![Updated](https://img.shields.io/badge/Updated-1F5FA8?style=flat-square)<br>`v3.4.23` | Reading an audience's rule moved out of the Explorer prototype into `data_dictionary/audience_rule_reader.py`, used by the dictionary. The Explorer now only draws what the workbook holds, and has pages for journeys, sources and destinations. |
+| Excel's "found a problem" warning ![Fixed](https://img.shields.io/badge/Fixed-B35A00?style=flat-square)<br>`v3.4.23` | Excel offered to repair every workbook from v3.4.22 on: the Summary tab was unfrozen but its selection still pointed at the removed pane (Excel's log: "Repaired Records: View"). The data was never affected. Fixed in the code; the UK, ROI and HU workbooks already made were corrected without a re-run. |
 
 ---
 

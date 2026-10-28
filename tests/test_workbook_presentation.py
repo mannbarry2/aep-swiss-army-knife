@@ -71,6 +71,18 @@ check("long note merged and wrapped",
       any(str(r) .startswith("A3:") for r in ws.merged_cells.ranges) and ws["A3"].alignment.wrap_text)
 check("colour scale on the months", any("F6" in str(r.sqref) for r in ws.conditional_formatting))
 
+# An unfrozen tab must not point its selection at the pane that has gone:
+# Excel "repairs" the whole workbook for it.
+import io, re, zipfile  # noqa: E401,E402
+wb3 = Workbook()
+ws3 = wb3.active
+ws3.freeze_panes = "A14"
+dd._unfreeze(ws3)
+buf = io.BytesIO()
+wb3.save(buf)
+view = re.search(r"<sheetViews>.*?</sheetViews>", zipfile.ZipFile(buf).read("xl/worksheets/sheet1.xml").decode(), re.S).group(0)
+check("unfrozen tab: no selection on a missing pane", "pane=" not in view, view)
+
 # Adobe Analytics report-suite schemas are flagged (kept, for the Explorer to hide).
 check("Adobe Analytics: an 'AA:' title", dd.is_adobe_analytics({"title": "AA: AcmeUKGroceries"}, ["a.b"]))
 check("Adobe Analytics: mostly _experience.analytics fields",
