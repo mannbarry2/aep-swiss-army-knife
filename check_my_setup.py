@@ -37,8 +37,8 @@ REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 SCRIPT_NAME = "check_my_setup"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-10-23"
+SCRIPT_VERSION = "1.0.1"
+SCRIPT_DATE = "2026-10-29"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 # (import name, pip name, needed?, what uses it)
@@ -51,7 +51,7 @@ PACKAGES = [
     ("pptx", "python-pptx", False, "the guardrail scoreboard slide"),
     ("docx", "python-docx", False, "the Word edition of the Data Dictionary overview"),
 ]
-SANDBOXES_URL = "https://platform.adobe.io/data/foundation/sandbox-management/sandboxes?limit=100"
+SANDBOXES_URL = "https://platform.adobe.io/data/foundation/sandbox-management/sandboxes"
 DEFAULT_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 
 problems = 0
