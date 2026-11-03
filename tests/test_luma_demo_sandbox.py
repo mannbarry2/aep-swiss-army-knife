@@ -344,5 +344,51 @@ check("feed --apply: 20 events streamed into the three event datasets",
       code == 0 and "feed: 20/20 accepted" in printed
       and {m["header"]["datasetId"] for m in sent} == {"ds-web-events", "ds-offline-purchases", "ds-inventory-events"}, printed)
 
+# --- audiences ---------------------------------------------------------------------------
+from ingestion.luma_demo_sandbox import audiences  # noqa: E402
+
+defs = audiences.definitions("_acme")
+check("audiences: every one named Luma: ..., tenant swapped in, no {T} left",
+      len(defs) == len(audiences.AUDIENCES) and all(d["name"].startswith("Luma: ") for d in defs)
+      and all("{T}" not in d["pql"] for d in defs) and any("_acme.systemIdentifier.loyaltyId" in d["pql"] for d in defs))
+check("audiences: names are unique", len({d["name"] for d in defs}) == len(defs))
+
+
+def segment_api(existing):
+    created = []
+
+    def handler(method, url, kw):
+        if method == "GET" and url.endswith("/segment/definitions"):
+            return 200, {"segments": [{"name": n, "id": f"seg-{i}"} for i, n in enumerate(existing)]}
+        if method == "GET" and "mergePolicies" in url:
+            return 200, {"children": [{"id": "mp-other", "schema": {"name": "_xdm.context.experienceevent"}, "default": True},
+                                      {"id": "mp-profile", "schema": {"name": "_xdm.context.profile"}, "default": True}]}
+        if method == "POST" and url.endswith("/segment/definitions"):
+            created.append(kw["json"])
+            return 200, {"id": f"new-{len(created)}"}
+        if method == "POST" and url.endswith("/segment/jobs"):
+            return 200, {"id": "job-1"}
+        if method == "GET" and url.endswith("/segment/jobs/job-1"):
+            ids = [f"new-{i}" for i in range(1, len(created) + 1)]
+            return 200, {"status": "SUCCEEDED", "metrics": {"segmentedProfileByStatusCounter":
+                                                            {sid: {"realized": 7} for sid in ids}}}
+        return 500, {"unexpected": url}
+    api, session = platform(handler)
+    return api, session, created
+
+
+api, session, created = segment_api([defs[0]["name"]])
+(ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=False)
+check("audiences without apply: one lookup, nothing created",
+      not created and counts == {"exists": 1, "created": 0, "missing": len(defs) - 1}
+      and all(c["method"] == "GET" for c in session.calls), counts)
+(ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
+check("audiences with apply: only the missing created, on the Profile merge policy, batch-evaluated",
+      len(created) == len(defs) - 1 and counts["created"] == len(defs) - 1 and len(ids) == len(defs)
+      and all(b["mergePolicyId"] == "mp-profile" and b["evaluationInfo"]["batch"]["enabled"] for b in created))
+members = audiences.evaluate(api, [f"new-{i}" for i in range(1, len(created) + 1)], log=lambda line: None,
+                             sleep=lambda s: None)
+check("segment job: members read per audience", set(members.values()) == {7} and len(members) == len(created))
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

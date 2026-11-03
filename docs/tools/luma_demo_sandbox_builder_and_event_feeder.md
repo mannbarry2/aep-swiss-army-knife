@@ -9,6 +9,7 @@ It is meant for filming and training in **demo sandboxes only**.
 | `setup` | Creates the Luma structure: 3 identity namespaces, 1 data type, 2 classes, 4 field groups, 7 schemas, 13 identity and relationship descriptors, 7 datasets. |
 | `load` | Loads Adobe's 7 Luma files (6,104 rows) by batch ingestion, with event timestamps moved up to now. |
 | `feed` | Sends N synthetic events (web, offline purchase, inventory) onto the loaded profiles. Run it hourly. |
+| `audiences` | Creates 19 demo audiences (`Luma: ...`) that all have members on the loaded data, and evaluates them once. |
 
 **It writes to Adobe, so it is read-only by default (house rule 12).** Without `--apply`, each
 command only reads and prints exactly what it would create or send. With `--apply` it writes.
@@ -119,6 +120,35 @@ safe to rerun after a partial failure.
   ```
   schtasks /Create /SC HOURLY /TN luma-demo-feed /TR "cmd /c cd /d C:\python\swiss-army-knife && python ingestion\luma_demo_sandbox_builder_and_event_feeder.py <credential> feed --sandbox=<name> --apply"
   ```
+
+### audiences
+
+19 batch audiences, all named `Luma: ...`, on the default Profile merge policy. The rules
+are in [`ingestion/luma_demo_sandbox/audiences.py`](../../ingestion/luma_demo_sandbox/audiences.py):
+
+- **Purchases**: all buyers, web buyers (30 days), in-store buyers (90 days), omnichannel,
+  high-value in-store (order $200+), big basket (3+ of one item).
+- **Browsing**: browsers who never bought, browsed in the last 7 days with no purchase,
+  save-for-later with no purchase in 14 days, interest in gear / men's / women's without
+  buying it. The SKU says the category: `24-` gear, `LLM` men's, `LLW` women's.
+- **Lifecycle**: new customers (first purchase in the last 14 days).
+- **Profile**: California residents, California buyers, loyalty gold or platinum,
+  points-rich (500,000+) with no purchase in 60 days, Gen Z (born 1997+), email-contactable
+  but never purchased.
+
+An in-store purchase is an event carrying a loyalty id; a web purchase is
+`eventType = commerce.purchases`. Web and in-store people join through the identity graph
+(the loyalty file links loyalty ids to CRM ids).
+
+Without `--apply` it lists what exists and what is missing. With `--apply` it creates the
+missing ones, then runs one batch segment job and prints each audience's members, so the
+counts are there without waiting for the nightly run. `--no-evaluate` skips the job.
+Orgs with Adobe's *B2B simplification* refuse on-demand segment jobs; the tool then says so,
+and the audiences fill at the next daily batch run.
+
+Left out on purpose: lapsed, dormant, win-back, one-time and repeat buyers. The loaded data
+spans about 30 days and most people have one event, so they would be empty. They fill up
+after weeks of `feed`.
 
 ## Check it worked
 

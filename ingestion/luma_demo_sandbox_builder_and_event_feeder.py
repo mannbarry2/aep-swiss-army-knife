@@ -15,11 +15,15 @@ Builds Adobe's Luma demo in one AEP sandbox, then keeps it alive:
           in, event timestamps moved up to now (UTC), fresh event _ids.
   feed    N synthetic events (web, offline purchase, inventory) on the loaded
           profiles, streamed to an HTTP API inlet. Schedule it hourly.
+  audiences  19 demo audiences ("Luma: ...") that all have members on the
+          loaded data; --apply creates the missing ones and runs one batch
+          segment job so their counts show straight away.
 
 WRITER -- read-only by default. Without --apply every command only reads from
 Adobe and prints exactly what it would create or send. With --apply:
   setup  creates the missing namespaces, schema registry objects and datasets
   load   ingests 7 batches;  feed  ingests N events.
+  audiences  creates the missing audiences and evaluates them once.
 Demo sandboxes only: the credential must be listed in config.json under
 "luma_demo_sandbox": {"allowed_credentials": [...]} (and its org in
 "allowed_org_ids", if that is set), or the tool refuses to start. If
@@ -33,6 +37,7 @@ Usage (credential name first, then --sandbox=):
     python ingestion/luma_demo_sandbox_builder_and_event_feeder.py <credential> setup --sandbox=<name> --apply
     python ingestion/luma_demo_sandbox_builder_and_event_feeder.py <credential> load  --sandbox=<name> --apply
     python ingestion/luma_demo_sandbox_builder_and_event_feeder.py <credential> feed  --sandbox=<name> --n=20 --apply
+    python ingestion/luma_demo_sandbox_builder_and_event_feeder.py <credential> audiences --sandbox=<name> --apply
 
 Guide: docs/tools/luma_demo_sandbox_builder_and_event_feeder.md
 """
@@ -49,13 +54,13 @@ from pathlib import Path
 # Repo root on the path, so toolkit_internals/ imports when run as python <folder>/<tool>.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from toolkit_internals import credential_loader  # noqa: E402
-from ingestion.luma_demo_sandbox import batch, datasets, stream, synth  # noqa: E402
+from ingestion.luma_demo_sandbox import audiences, batch, datasets, stream, synth  # noqa: E402
 from ingestion.luma_demo_sandbox.client import ApiError, Platform  # noqa: E402
 from ingestion.luma_demo_sandbox.registry import load_steps, run_setup  # noqa: E402
 from ingestion.luma_demo_sandbox.transform import prepare, to_json_file  # noqa: E402
 
 SCRIPT_NAME = "luma_demo_sandbox_builder_and_event_feeder"
-SCRIPT_VERSION = "1.0.1"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -255,6 +260,42 @@ def cmd_feed(api: Platform, opts: argparse.Namespace, state: dict, settings: dic
 
 
 # ----------------------------------------------------------------------------
+# audiences
+# ----------------------------------------------------------------------------
+def cmd_audiences(api: Platform, opts: argparse.Namespace, state: dict) -> int:
+    total = len(audiences.AUDIENCES)
+    print("  Estimate: 1-2 lookups" + (f", up to {total} creates, then one segment job "
+          "(Adobe usually takes 5-20 minutes)" if opts.apply else "") + ".\n")
+    ids, counts = audiences.run_audiences(api, resolve_tenant(api, state), apply=opts.apply)
+    state["audiences"] = ids
+    print(f"\n  {counts['exists']} exist, {counts['created']} created, {counts['missing']} missing")
+    if not opts.apply:
+        if counts["missing"]:
+            print(f"  Read-only: nothing was created. Add --apply to create the {counts['missing']} missing.")
+        return 0
+    if opts.no_evaluate:
+        return 0
+    print("")
+    try:
+        members = audiences.evaluate(api, list(ids.values()), interval=opts.poll_interval)
+    except ApiError as err:
+        if audiences.JOBS_BLOCKED not in str(err):
+            raise
+        print("  This org only allows scheduled segment jobs (Adobe's 'B2B simplification'), so the\n"
+              "  audiences get their members at the next daily batch run. Check them in AEP > Audiences\n"
+              "  after that run.")
+        return 0
+    width = max(len(name) for name in ids)
+    print("")
+    for name, sid in ids.items():
+        print(f"  {name:<{width}}  {members.get(sid, 0):>6,} profiles")
+    empty = [name for name, sid in ids.items() if not members.get(sid)]
+    if empty:
+        print(f"\n  EMPTY: {', '.join(empty)}")
+    return 1 if empty else 0
+
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -291,6 +332,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     sp.add_argument("--batch", action="store_true", help="batch ingestion instead of streaming")
     sp.add_argument("--seed", type=int, help="repeatable events")
     sp.add_argument("--poll-interval", type=float, default=15, help="seconds between Catalog polls (--batch)")
+
+    sp = sub.add_parser("audiences", help="demo audiences on the loaded data")
+    common(sp)
+    sp.add_argument("--no-evaluate", action="store_true", help="create only; skip the segment job")
+    sp.add_argument("--poll-interval", type=float, default=30, help="seconds between segment job polls")
     return p.parse_args(argv)
 
 
@@ -314,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
                 code = cmd_setup(api, opts, state)
             elif opts.command == "load":
                 code = cmd_load(api, opts, state)
+            elif opts.command == "audiences":
+                code = cmd_audiences(api, opts, state)
             else:
                 code = cmd_feed(api, opts, state, settings)
         finally:
@@ -322,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
                          updated_utc=now_utc().isoformat(timespec="seconds"))
             path = datasets.save_state(opts.credential, sandbox, state)
         print(f"\n  State: {path.relative_to(datasets.REPO_ROOT)}")
-        if opts.command == "load" or (opts.command == "feed" and opts.batch):
+        if opts.command in ("load", "audiences") or (opts.command == "feed" and opts.batch):
             print("\n  Endpoint health:")
             print("\n".join(api.health.report()))
         return code
