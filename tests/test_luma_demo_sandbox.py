@@ -349,7 +349,7 @@ from ingestion.luma_demo_sandbox import audiences  # noqa: E402
 
 defs = audiences.definitions("_acme")
 check("audiences: every one named Luma: ..., tenant swapped in, no {T} left",
-      len(defs) == len(audiences.AUDIENCES) and all(d["name"].startswith("Luma: ") for d in defs)
+      len(defs) == len(audiences.AUDIENCES) + len(audiences.STREAMING) and all(d["name"].startswith("Luma: ") for d in defs)
       and all("{T}" not in d["pql"] for d in defs) and any("_acme.systemIdentifier.loyaltyId" in d["pql"] for d in defs))
 check("audiences: names are unique", len({d["name"] for d in defs}) == len(defs))
 
@@ -391,7 +391,13 @@ check("audiences without apply: one lookup, nothing created",
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
 check("audiences with apply: only the missing created, on the Profile merge policy, batch-evaluated",
       len(created) == len(defs) - 1 and counts["created"] == len(defs) - 1 and len(ids) == len(defs)
-      and all(b["mergePolicyId"] == "mp-profile" and b["evaluationInfo"]["batch"]["enabled"] for b in created))
+      and all(b["mergePolicyId"] == "mp-profile" for b in created)
+      and all(b["evaluationInfo"]["batch"]["enabled"] for b in created if not b["name"].startswith("Luma: Streaming")))
+streamed = [b for b in created if b["name"].startswith("Luma: Streaming")]
+check("streaming audiences: continuous evaluation on, batch off, 24-hour window",
+      len(streamed) == len(audiences.STREAMING)
+      and all(b["evaluationInfo"]["continuous"]["enabled"] and not b["evaluationInfo"]["batch"]["enabled"]
+              for b in streamed) and all("24 hours before now" in b["expression"]["value"] for b in streamed))
 check("audiences are stored as pql/json (converted from the PQL text)",
       all(b["expression"]["format"] == "pql/json" and b["expression"]["value"].startswith("TREE:") for b in created))
 members = audiences.evaluate(api, [f"new-{i}" for i in range(1, len(created) + 1)], log=lambda line: None,

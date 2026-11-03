@@ -15,14 +15,17 @@ Builds Adobe's Luma demo in one AEP sandbox, then keeps it alive:
           in, event timestamps moved up to now (UTC), fresh event _ids.
   feed    N synthetic events (web, offline purchase, inventory) on the loaded
           profiles, streamed to an HTTP API inlet. Schedule it hourly.
+  inlet   the HTTP API streaming inlet (one connection, a dataflow per event
+          dataset); its URL goes in the state file for feed.
   audiences  19 demo audiences ("Luma: ...") that all have members on the
-          loaded data; --apply creates the missing ones and runs one batch
+          loaded data, plus 6 streaming ones that fill from feed's events; --apply creates the missing ones and runs one batch
           segment job so their counts show straight away.
 
 WRITER -- read-only by default. Without --apply every command only reads from
 Adobe and prints exactly what it would create or send. With --apply:
   setup  creates the missing namespaces, schema registry objects and datasets
   load   ingests 7 batches;  feed  ingests N events.
+  inlet  creates the streaming connection and dataflows.
   audiences  creates the missing audiences and evaluates them once.
 Demo sandboxes only: the credential must be listed in config.json under
 "luma_demo_sandbox": {"allowed_credentials": [...]} (and its org in
@@ -54,13 +57,13 @@ from pathlib import Path
 # Repo root on the path, so toolkit_internals/ imports when run as python <folder>/<tool>.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from toolkit_internals import credential_loader  # noqa: E402
-from ingestion.luma_demo_sandbox import audiences, batch, datasets, stream, synth  # noqa: E402
+from ingestion.luma_demo_sandbox import audiences, batch, datasets, inlet, stream, synth  # noqa: E402
 from ingestion.luma_demo_sandbox.client import ApiError, Platform  # noqa: E402
 from ingestion.luma_demo_sandbox.registry import load_steps, run_setup  # noqa: E402
 from ingestion.luma_demo_sandbox.transform import prepare, to_json_file  # noqa: E402
 
 SCRIPT_NAME = "luma_demo_sandbox_builder_and_event_feeder"
-SCRIPT_VERSION = "1.1.1"
+SCRIPT_VERSION = "1.2.0"
 SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -198,9 +201,9 @@ def cmd_load(api: Platform, opts: argparse.Namespace, state: dict) -> int:
 # ----------------------------------------------------------------------------
 # feed
 # ----------------------------------------------------------------------------
-def inlet_for(key: str, opts: argparse.Namespace, settings: dict) -> str:
+def inlet_for(key: str, opts: argparse.Namespace, settings: dict, state: dict) -> str:
     return (opts.inlet or (settings.get("streaming_inlet_urls") or {}).get(key)
-            or settings.get("streaming_inlet_url") or "")
+            or settings.get("streaming_inlet_url") or (state.get("streaming") or {}).get("inlet_url") or "")
 
 
 def cmd_feed(api: Platform, opts: argparse.Namespace, state: dict, settings: dict) -> int:
@@ -230,10 +233,11 @@ def cmd_feed(api: Platform, opts: argparse.Namespace, state: dict, settings: dic
               f" -- {'all batches success' if ok else 'BATCH FAILURE'}")
         return 0 if ok else 1
 
-    inlets = {key: inlet_for(key, opts, settings) for key in events}
+    inlets = {key: inlet_for(key, opts, settings, state) for key in events}
     if opts.apply and not all(inlets.values()):
-        raise Refused('no streaming inlet: pass --inlet=<url>, set "streaming_inlet_url" in config.json, '
-                      "or use --batch.")
+        raise Refused('no streaming inlet: run "inlet --apply", pass --inlet=<url>, set "streaming_inlet_url" '
+                      "in config.json, or use --batch.")
+    flow_ids = (state.get("streaming") or {}).get("flows") or {}
     messages = {key: [stream.envelope(e, schema_id=ids[key][1] or "<schema id>",
                                       dataset_id=ids[key][0] or "<dataset id>", org_id=api.conf["org_id"])
                       for e in rows] for key, rows in events.items()}
@@ -248,7 +252,7 @@ def cmd_feed(api: Platform, opts: argparse.Namespace, state: dict, settings: dic
     accepted, failures = 0, []
     for key, batch_of in messages.items():
         for message in batch_of:
-            resp = stream.post(api.session, inlets[key], message, auth)
+            resp = stream.post(api.session, inlets[key], message, auth, flow_id=flow_ids.get(key, ""))
             if resp.ok:
                 accepted += 1
             else:
@@ -260,14 +264,36 @@ def cmd_feed(api: Platform, opts: argparse.Namespace, state: dict, settings: dic
 
 
 # ----------------------------------------------------------------------------
+# inlet
+# ----------------------------------------------------------------------------
+def cmd_inlet(api: Platform, opts: argparse.Namespace, state: dict) -> int:
+    print("  Estimate: 4-5 lookups, up to 1 connection + 3 x (source, target, dataflow) creates.\n")
+    targets = {key: ids_for(datasets.BY_KEY[key], state) for key in synth.DEFAULT_MIX}
+    missing = [key for key, (dataset_id, schema_id) in targets.items() if not dataset_id or not schema_id]
+    if missing:
+        raise Refused(f"no dataset/schema id for {', '.join(missing)} -- run setup --apply first.")
+    found = inlet.run_inlet(api, targets, apply=opts.apply)
+    state["streaming"] = {k: found[k] for k in ("connection_id", "inlet_url", "flows")}
+    print(f"\n  Inlet: {found['inlet_url'] or '(none yet)'}")
+    if found["missing"]:
+        print(f"  Read-only: {len(found['missing'])} to create. Add --apply to create them.")
+        return 0
+    print("  Saved to the state file; feed streams to it. Unauthenticated: keep the URL to yourself.")
+    return 0
+
+
+# ----------------------------------------------------------------------------
 # audiences
 # ----------------------------------------------------------------------------
 def cmd_audiences(api: Platform, opts: argparse.Namespace, state: dict) -> int:
-    total = len(audiences.AUDIENCES)
+    total = len(audiences.AUDIENCES) + len(audiences.STREAMING)
     print("  Estimate: 1-2 lookups" + (f", up to {total} creates, then one segment job "
           "(Adobe usually takes 5-20 minutes)" if opts.apply else "") + ".\n")
     ids, counts = audiences.run_audiences(api, resolve_tenant(api, state), apply=opts.apply)
     state["audiences"] = ids
+    # Streaming audiences fill as events arrive; only the batch ones go in the segment job.
+    streaming = {audiences.PREFIX + name for name, _, _ in audiences.STREAMING}
+    ids = {name: sid for name, sid in ids.items() if name not in streaming}
     print(f"\n  {counts['exists']} exist, {counts['created']} created, {counts['missing']} missing, "
           f"{counts['converted']} converted, {counts['as_text']} still stored as text")
     if not opts.apply:
@@ -334,6 +360,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     sp.add_argument("--seed", type=int, help="repeatable events")
     sp.add_argument("--poll-interval", type=float, default=15, help="seconds between Catalog polls (--batch)")
 
+    sp = sub.add_parser("inlet", help="HTTP API streaming inlet + dataflows for the event datasets")
+    common(sp)
+
     sp = sub.add_parser("audiences", help="demo audiences on the loaded data")
     common(sp)
     sp.add_argument("--no-evaluate", action="store_true", help="create only; skip the segment job")
@@ -363,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
                 code = cmd_load(api, opts, state)
             elif opts.command == "audiences":
                 code = cmd_audiences(api, opts, state)
+            elif opts.command == "inlet":
+                code = cmd_inlet(api, opts, state)
             else:
                 code = cmd_feed(api, opts, state, settings)
         finally:
@@ -371,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                          updated_utc=now_utc().isoformat(timespec="seconds"))
             path = datasets.save_state(opts.credential, sandbox, state)
         print(f"\n  State: {path.relative_to(datasets.REPO_ROOT)}")
-        if opts.command in ("load", "audiences") or (opts.command == "feed" and opts.batch):
+        if opts.command in ("load", "audiences", "inlet") or (opts.command == "feed" and opts.batch):
             print("\n  Endpoint health:")
             print("\n".join(api.health.report()))
         return code

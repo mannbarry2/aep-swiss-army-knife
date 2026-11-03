@@ -21,8 +21,10 @@ def envelope(event: dict[str, Any], *, schema_id: str, dataset_id: str, org_id: 
 
 
 def post(session: requests.Session, inlet_url: str, message: dict[str, Any],
-         auth_headers: dict[str, str] | None = None) -> requests.Response:
+         auth_headers: dict[str, str] | None = None, flow_id: str = "") -> requests.Response:
     """Auth headers are only needed when the inlet was created as authenticated."""
     headers = {"Content-Type": "application/json", **(auth_headers or {})}
+    if flow_id:
+        headers["x-adobe-flow-id"] = flow_id
     return send(session, "POST", inlet_url, headers=headers, json=message,
                 params={"syncValidation": "false"})

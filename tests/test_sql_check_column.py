@@ -50,7 +50,15 @@ lk = dd._sql_check(k("Custom"), "a.b", "string", "profile_snapshot_export_x", "2
 check("lookup: records in the lake, no date", "FROM t_one" in lk and "timestamp" not in lk, lk[:160])
 check("no table: no SQL", dd._sql_check(k("Event", tables=()), "a.b", "string", None,
                                         "2024-11-01") is None)
-for name, sql in (("event", ev), ("profile", pr), ("lookup", lk)):
+check("plain Profile field: its values with count and share, (empty) for the rest",
+      "COALESCE(CAST(a.b AS STRING), '(empty)') AS value" in pr and "GROUP BY 1" in pr
+      and "OVER ()" in pr and "LIMIT 50" in pr, pr)
+arr = dd._sql_check(k("Profile"), "a.b", "array<string>", "profile_snapshot_export_x", "2024-11-01")
+check("array field: coverage, not values", "with_field" in arr and "GROUP BY" not in arr, arr[:160])
+two = dd._sql_check(k("Custom", tables=("t_one", "t_two")), "a.b", "string", None, "2024-11-01")
+check("values across two lake tables: one aliased column",
+      "SELECT a.b AS v FROM t_one UNION ALL SELECT a.b AS v FROM t_two" in two and "CAST(v AS STRING)" in two, two)
+for name, sql in (("event", ev), ("profile", pr), ("lookup", lk), ("two tables", two)):
     check(f"{name}: one line, labelled 'Data Dictionary', SELECT only",
           "\n" not in sql and sql.startswith("/* Data Dictionary: ")
           and sql.split("*/", 1)[1].strip().startswith("SELECT ")

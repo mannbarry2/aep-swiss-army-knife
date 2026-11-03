@@ -12,6 +12,11 @@ Rules are written here as PQL text but stored as pql/json (Adobe's conversion
 endpoint), the way the UI stores them: the Data Dictionary reads the fields an
 audience uses from that tree. An existing audience still stored as text is
 converted in place (same rule).
+
+STREAMING audiences are evaluated as each event arrives (continuous
+evaluation), so they fill from feed's streamed events within minutes. Adobe
+only streams rules of one event inside a window under 24 hours, alone or with
+profile attributes; anything wider stays batch.
 """
 from __future__ import annotations
 
@@ -47,6 +52,10 @@ def has(cond: str) -> str:
 
 def within(days: int) -> str:
     return f"X.timestamp occurs <= {days} days before now"
+
+
+def within_hours(hours: int) -> str:
+    return f"X.timestamp occurs <= {hours} hours before now"
 
 
 def sku(prefix: str) -> str:
@@ -86,10 +95,27 @@ AUDIENCES: list[tuple[str, str, str]] = [
      f"personalEmail.address.isNotNull() and not {has(ANY_BUY)}"),
 ]
 
+STREAMING: list[tuple[str, str, str]] = [
+    ("Streaming - In-store Order, Last 24 Hours", "An in-store (POS) order in the last 24 hours.",
+     has(f"{POS_BUY} and {within_hours(24)}")),
+    ("Streaming - Web Purchase, Last 24 Hours", "A web purchase in the last 24 hours.",
+     has(f"{WEB_BUY} and {within_hours(24)}")),
+    ("Streaming - In-store Order $200+, Last 24 Hours", "An in-store order of $200 or more in the last 24 hours.",
+     has(f"{POS_BUY} and X.commerce.order.priceTotal >= 200 and {within_hours(24)}")),
+    ("Streaming - Bought Gear, Last 24 Hours", "Bought gear, web or in store, in the last 24 hours.",
+     has(f"{ANY_BUY} and {sku(CATEGORY['Gear'])} and {within_hours(24)}")),
+    ("Streaming - Viewed a Product, Last 24 Hours", "Viewed a product in the last 24 hours.",
+     has(f"{VIEW} and {within_hours(24)}")),
+    ("Streaming - Gold or Platinum In-store Order, Last 24 Hours",
+     "Loyalty tier gold or platinum, with an in-store order in the last 24 hours.",
+     f'loyalty.tier in ["gold", "platinum"] and {has(f"{POS_BUY} and {within_hours(24)}")}'),
+]
 
-def definitions(tenant_prefix: str) -> list[dict[str, str]]:
-    return [{"name": PREFIX + name, "description": desc, "pql": pql.replace("{T}", tenant_prefix)}
-            for name, desc, pql in AUDIENCES]
+
+def definitions(tenant_prefix: str) -> list[dict[str, Any]]:
+    return [{"name": PREFIX + name, "description": desc, "pql": pql.replace("{T}", tenant_prefix),
+             "streaming": streaming}
+            for streaming, group in ((False, AUDIENCES), (True, STREAMING)) for name, desc, pql in group]
 
 
 def profile_merge_policy(api: Platform) -> str:
@@ -125,14 +151,15 @@ def is_text(segment: dict[str, Any]) -> bool:
     return (segment.get("expression") or {}).get("format") == "pql/text"
 
 
-def create_body(audience: dict[str, str], merge_policy_id: str, expression: dict[str, str]) -> dict[str, Any]:
+def create_body(audience: dict[str, Any], merge_policy_id: str, expression: dict[str, str]) -> dict[str, Any]:
+    streaming = bool(audience.get("streaming"))
     return {
         "name": audience["name"],
         "description": audience["description"],
         "schema": {"name": PROFILE},
         "expression": expression,
         "mergePolicyId": merge_policy_id,
-        "evaluationInfo": {"batch": {"enabled": True}, "continuous": {"enabled": False},
+        "evaluationInfo": {"batch": {"enabled": not streaming}, "continuous": {"enabled": streaming},
                            "synchronous": {"enabled": False}},
     }
 

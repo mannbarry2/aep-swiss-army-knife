@@ -106,11 +106,8 @@ safe to rerun after a partial failure.
   - Every SKU is a real product.
 - Events are streamed to an HTTP API inlet. `--batch` uses batch ingestion instead and
   needs no inlet.
-- **Finding the inlet URL:**
-  1. AEP → Sources → *Streaming* → **HTTP API** → *Add data*.
-  2. Tick **XDM compatible**, pick the event dataset and finish the dataflow.
-  3. The dataflow's **Streaming endpoint** is the URL.
-  4. Put it in `config.json` (`streaming_inlet_url`), or pass `--inlet=`.
+- **The inlet:** `inlet --apply` creates it, and `feed` reads its URL from the state file.
+  You can also pass `--inlet=` or set `streaming_inlet_url` in `config.json`.
 - If each dataflow is pinned to one dataset, give one URL per dataset in
   `streaming_inlet_urls`, keyed `web-events`, `offline-purchases` and `inventory-events`.
 - Set `streaming_authenticated` to `true` if the connection was created with
@@ -121,9 +118,28 @@ safe to rerun after a partial failure.
   schtasks /Create /SC HOURLY /TN luma-demo-feed /TR "cmd /c cd /d C:\python\swiss-army-knife && python ingestion\luma_demo_sandbox_builder_and_event_feeder.py <credential> feed --sandbox=<name> --apply"
   ```
 
+### inlet
+
+Creates the HTTP API streaming inlet for the three event datasets:
+
+- one unauthenticated streaming connection named `Luma demo streaming`, which is one inlet URL;
+- for each event dataset, a source connection, a Data Lake target connection and a
+  *Stream data without transformation* dataflow named `Luma demo streaming: <dataset>`.
+
+The URL and flow ids go in the state file. `feed` sends each event with its dataflow's
+`x-adobe-flow-id`. A new inlet answers `400 Inlet does not exist` for about a minute.
+Because it is unauthenticated, keep the URL to yourself.
+
+To send one event by hand on Windows, use `curl.exe`. In PowerShell 5.1, `curl` is
+`Invoke-WebRequest`. Send the JSON from a file:
+
+```
+curl.exe -X POST "<inlet url>" -H "Content-Type: application/json" -H "x-adobe-flow-id: <flow id>" --data-binary "@order.json"
+```
+
 ### audiences
 
-19 batch audiences, all named `Luma: ...`, on the default Profile merge policy. The rules
+19 batch audiences and 6 streaming ones, all named `Luma: ...`, on the default Profile merge policy. The rules
 are in [`ingestion/luma_demo_sandbox/audiences.py`](../../ingestion/luma_demo_sandbox/audiences.py):
 
 - **Purchases**: all buyers, web buyers (30 days), in-store buyers (90 days), omnichannel,
@@ -135,6 +151,12 @@ are in [`ingestion/luma_demo_sandbox/audiences.py`](../../ingestion/luma_demo_sa
 - **Profile**: California residents, California buyers, loyalty gold or platinum,
   points-rich (500,000+) with no purchase in 60 days, Gen Z (born 1997+), email-contactable
   but never purchased.
+
+- **Streaming** (`Luma: Streaming - ...`): an in-store order, a web purchase, an in-store
+  order of $200+, a gear purchase or a product view in the last 24 hours, and gold/platinum
+  members with an in-store order in the last 24 hours. They are evaluated as events
+  arrive, so `feed` fills them. Adobe refuses them (`NEBULA-100042-400`) unless the
+  Profile merge policy is **Active-On-Edge**.
 
 An in-store purchase is an event carrying a loyalty id; a web purchase is
 `eventType = commerce.purchases`. Web and in-store people join through the identity graph

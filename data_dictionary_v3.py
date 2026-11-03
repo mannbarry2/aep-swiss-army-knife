@@ -87,6 +87,12 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.24 -- Check by hand (SQL) shows the values. For a plain field (no array
+or map on the path) the SQL now lists each value with its record count and
+share -- e.g. loyalty.tier: gold 25%, silver 24% ... -- with an (empty) row,
+so the coverage is still there as 100 minus (empty). Top 50 values. Arrays,
+maps and event fields keep the coverage query.
+
 v3.4.23 -- Lineage: where data comes from and where audiences go, in the
 workbook. New tabs: Sources (every dataflow that brings data into a dataset --
 streaming inlets, files from cloud storage, files uploaded in the UI, the Edge,
@@ -383,8 +389,8 @@ from data_dictionary import dictionary_colours as colours   # one colour scheme 
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.23"
-SCRIPT_DATE    = "2026-10-26"
+SCRIPT_VERSION = "3.4.24"
+SCRIPT_DATE    = "2026-11-03"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -2609,10 +2615,26 @@ def _sql_check(k, path: str, dtype: str, snapshot_table, since: str):
         return (tag("by event month in the data lake")
                 + f"SELECT dataset, month, records, with_field, {pct} FROM ({union}) t "
                   f"ORDER BY dataset, month")
+    # A plain value (no array or map on the path): show the values themselves --
+    # each with its count and share, (empty) for records without it -- top 50.
+    scalar = "[]" not in path and dtype != "map" and not str(dtype).startswith(("array", "object"))
+
+    def values(source, what, col=path):
+        return (tag(f"values {what}")
+                + f"SELECT COALESCE(CAST({col} AS STRING), '(empty)') AS value, COUNT(1) AS records, "
+                  f"ROUND(100.0 * COUNT(1) / SUM(COUNT(1)) OVER (), 1) AS pct FROM {source} "
+                  f"GROUP BY 1 ORDER BY records DESC LIMIT 50")
     if k.get("kind") == KIND_LABEL["profile"] and k.get("profile_enabled") and snapshot_table:
+        if scalar:
+            return values(snapshot_table, "in Profile now, default merge policy snapshot")
         return (tag("in Profile now, default merge policy snapshot")
                 + f"SELECT records, with_field, {pct} FROM (SELECT COUNT(1) AS records, "
                   f"{has} AS with_field FROM {snapshot_table}) t")
+    if tables and scalar:
+        if len(tables) == 1:
+            return values(tables[0], "in the data lake, all dates")
+        union = " UNION ALL ".join(f"SELECT {path} AS v FROM {t}" for t in tables)
+        return values(f"({union}) t", "in the data lake, all dates", col="v")
     if tables:
         union = " UNION ALL ".join(
             f"SELECT '{t}' AS dataset, COUNT(1) AS records, {has} AS with_field FROM {t}"
