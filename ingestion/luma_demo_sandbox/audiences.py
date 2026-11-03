@@ -7,6 +7,11 @@ lapsed / repeat-buyer audiences yet.
 
 {T} is the tenant field prefix (_<tenant id>). Looked up by name first, so
 running it twice creates nothing the second time. Without apply it only reads.
+
+Rules are written here as PQL text but stored as pql/json (Adobe's conversion
+endpoint), the way the UI stores them: the Data Dictionary reads the fields an
+audience uses from that tree. An existing audience still stored as text is
+converted in place (same rule).
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ from .client import Platform
 PREFIX = "Luma: "
 DEFINITIONS = "/data/core/ups/segment/definitions"
 JOBS = "/data/core/ups/segment/jobs"
+CONVERSION = "/data/core/ups/segment/conversion"
 PROFILE = "_xdm.context.profile"
 # Adobe's 400 when the org refuses on-demand segment jobs.
 JOBS_BLOCKED = "Non-scheduled segment jobs are not allowed"
@@ -107,12 +113,24 @@ def existing_by_name(api: Platform) -> dict[str, dict[str, Any]]:
         start += 100
 
 
-def create_body(audience: dict[str, str], merge_policy_id: str) -> dict[str, Any]:
+def to_json_expression(api: Platform, pql: str) -> dict[str, str]:
+    """PQL text -> Adobe's pql/json expression."""
+    converted = api.call("POST", CONVERSION, json={
+        "type": "PQL", "targetFormat": "pql/json", "schema": {"name": PROFILE},
+        "expression": {"type": "PQL", "format": "pql/text", "value": pql}}).json()["expression"]
+    return {"type": "PQL", "format": "pql/json", "value": converted["value"]}
+
+
+def is_text(segment: dict[str, Any]) -> bool:
+    return (segment.get("expression") or {}).get("format") == "pql/text"
+
+
+def create_body(audience: dict[str, str], merge_policy_id: str, expression: dict[str, str]) -> dict[str, Any]:
     return {
         "name": audience["name"],
         "description": audience["description"],
         "schema": {"name": PROFILE},
-        "expression": {"type": "PQL", "format": "pql/text", "value": audience["pql"]},
+        "expression": expression,
         "mergePolicyId": merge_policy_id,
         "evaluationInfo": {"batch": {"enabled": True}, "continuous": {"enabled": False},
                            "synchronous": {"enabled": False}},
@@ -121,7 +139,8 @@ def create_body(audience: dict[str, str], merge_policy_id: str) -> dict[str, Any
 
 def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
                   log: Log = print) -> tuple[dict[str, str], dict[str, int]]:
-    """Look every audience up by name, create the missing ones with apply=True.
+    """Look every audience up by name; with apply=True create the missing ones and
+    convert any still stored as PQL text.
 
     Returns {name: segment id} for those that exist (or were created), and counts.
     """
@@ -129,20 +148,35 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
     have = existing_by_name(api)
     ids = {a["name"]: have[a["name"]]["id"] for a in wanted if a["name"] in have}
     missing = [a for a in wanted if a["name"] not in have]
+    as_text = [a for a in wanted if a["name"] in have and is_text(have[a["name"]])]
     for a in wanted:
-        status = "exists" if a["name"] in have else ("will create" if apply else "missing")
-        log(f"  {status:<13} {a['name']}")
-    counts = {"exists": len(ids), "created": 0, "missing": len(missing)}
-    if not apply or not missing:
+        if a["name"] not in have:
+            status = "will create" if apply else "missing"
+        elif is_text(have[a["name"]]):
+            status = "will convert" if apply else "stored as text"
+        else:
+            status = "exists"
+        log(f"  {status:<14} {a['name']}")
+    counts = {"exists": len(ids), "created": 0, "missing": len(missing), "converted": 0, "as_text": len(as_text)}
+    if not apply or not (missing or as_text):
+        return ids, counts
+    log("")
+    for a in as_text:
+        patch = [{"op": "add", "path": "/expression", "value": to_json_expression(api, a["pql"])}]
+        api.call("PATCH", f"{DEFINITIONS}/{ids[a['name']]}", json=patch, ok=(200, 204))
+        counts["converted"] += 1
+        counts["as_text"] -= 1
+        log(f"  converted      {a['name']}")
+    if not missing:
         return ids, counts
     merge_policy_id = profile_merge_policy(api)
-    log("")
     for a in missing:
-        created = api.call("POST", DEFINITIONS, json=create_body(a, merge_policy_id)).json()
+        body = create_body(a, merge_policy_id, to_json_expression(api, a["pql"]))
+        created = api.call("POST", DEFINITIONS, json=body).json()
         ids[a["name"]] = created["id"]
         counts["created"] += 1
         counts["missing"] -= 1
-        log(f"  created       {a['name']}")
+        log(f"  created        {a['name']}")
     return ids, counts
 
 

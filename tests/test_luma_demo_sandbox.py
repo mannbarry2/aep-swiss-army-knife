@@ -354,12 +354,18 @@ check("audiences: every one named Luma: ..., tenant swapped in, no {T} left",
 check("audiences: names are unique", len({d["name"] for d in defs}) == len(defs))
 
 
-def segment_api(existing):
-    created = []
+def segment_api(existing, text_names=()):
+    created, patched = [], []
 
     def handler(method, url, kw):
         if method == "GET" and url.endswith("/segment/definitions"):
-            return 200, {"segments": [{"name": n, "id": f"seg-{i}"} for i, n in enumerate(existing)]}
+            return 200, {"segments": [{"name": n, "id": f"seg-{i}", "expression": {
+                "format": "pql/text" if n in text_names else "pql/json"}} for i, n in enumerate(existing)]}
+        if method == "POST" and url.endswith("/segment/conversion"):
+            return 200, {"expression": {"format": "pql/json", "value": "TREE:" + kw["json"]["expression"]["value"]}}
+        if method == "PATCH" and "/segment/definitions/" in url:
+            patched.append((url.rsplit("/", 1)[1], kw["json"]))
+            return 204, None
         if method == "GET" and "mergePolicies" in url:
             return 200, {"children": [{"id": "mp-other", "schema": {"name": "_xdm.context.experienceevent"}, "default": True},
                                       {"id": "mp-profile", "schema": {"name": "_xdm.context.profile"}, "default": True}]}
@@ -374,21 +380,28 @@ def segment_api(existing):
                                                             {sid: {"realized": 7} for sid in ids}}}
         return 500, {"unexpected": url}
     api, session = platform(handler)
-    return api, session, created
+    return api, session, created, patched
 
 
-api, session, created = segment_api([defs[0]["name"]])
+api, session, created, patched = segment_api([defs[0]["name"]])
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=False)
 check("audiences without apply: one lookup, nothing created",
-      not created and counts == {"exists": 1, "created": 0, "missing": len(defs) - 1}
+      not created and counts == {"exists": 1, "created": 0, "missing": len(defs) - 1, "converted": 0, "as_text": 0}
       and all(c["method"] == "GET" for c in session.calls), counts)
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
 check("audiences with apply: only the missing created, on the Profile merge policy, batch-evaluated",
       len(created) == len(defs) - 1 and counts["created"] == len(defs) - 1 and len(ids) == len(defs)
       and all(b["mergePolicyId"] == "mp-profile" and b["evaluationInfo"]["batch"]["enabled"] for b in created))
+check("audiences are stored as pql/json (converted from the PQL text)",
+      all(b["expression"]["format"] == "pql/json" and b["expression"]["value"].startswith("TREE:") for b in created))
 members = audiences.evaluate(api, [f"new-{i}" for i in range(1, len(created) + 1)], log=lambda line: None,
                              sleep=lambda s: None)
 check("segment job: members read per audience", set(members.values()) == {7} and len(members) == len(created))
+api, session, created, patched = segment_api([d["name"] for d in defs], text_names={defs[2]["name"]})
+(ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
+check("an audience still stored as text is converted in place, nothing created",
+      not created and counts["converted"] == 1 and len(patched) == 1 and patched[0][0] == "seg-2"
+      and patched[0][1][0]["path"] == "/expression" and patched[0][1][0]["value"]["format"] == "pql/json", counts)
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

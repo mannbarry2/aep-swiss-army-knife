@@ -60,7 +60,7 @@ from ingestion.luma_demo_sandbox.registry import load_steps, run_setup  # noqa: 
 from ingestion.luma_demo_sandbox.transform import prepare, to_json_file  # noqa: E402
 
 SCRIPT_NAME = "luma_demo_sandbox_builder_and_event_feeder"
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.1.1"
 SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -268,10 +268,11 @@ def cmd_audiences(api: Platform, opts: argparse.Namespace, state: dict) -> int:
           "(Adobe usually takes 5-20 minutes)" if opts.apply else "") + ".\n")
     ids, counts = audiences.run_audiences(api, resolve_tenant(api, state), apply=opts.apply)
     state["audiences"] = ids
-    print(f"\n  {counts['exists']} exist, {counts['created']} created, {counts['missing']} missing")
+    print(f"\n  {counts['exists']} exist, {counts['created']} created, {counts['missing']} missing, "
+          f"{counts['converted']} converted, {counts['as_text']} still stored as text")
     if not opts.apply:
-        if counts["missing"]:
-            print(f"  Read-only: nothing was created. Add --apply to create the {counts['missing']} missing.")
+        if counts["missing"] or counts["as_text"]:
+            print("  Read-only: nothing was changed. Add --apply to create the missing and convert the text ones.")
         return 0
     if opts.no_evaluate:
         return 0

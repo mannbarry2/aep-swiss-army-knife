@@ -140,6 +140,10 @@ An in-store purchase is an event carrying a loyalty id; a web purchase is
 `eventType = commerce.purchases`. Web and in-store people join through the identity graph
 (the loyalty file links loyalty ids to CRM ids).
 
+The rules are written as PQL text but stored as `pql/json`, converted by Adobe's
+conversion endpoint, the way the UI stores them. The Data Dictionary reads the fields an
+audience uses from that form. An audience still stored as text is converted in place.
+
 Without `--apply` it lists what exists and what is missing. With `--apply` it creates the
 missing ones, then runs one batch segment job and prints each audience's members, so the
 counts are there without waiting for the nightly run. `--no-evaluate` skips the job.
