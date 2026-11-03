@@ -55,8 +55,8 @@ from ingestion.luma_demo_sandbox.registry import load_steps, run_setup  # noqa: 
 from ingestion.luma_demo_sandbox.transform import prepare, to_json_file  # noqa: E402
 
 SCRIPT_NAME = "luma_demo_sandbox_builder_and_event_feeder"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-11-02"
+SCRIPT_VERSION = "1.0.1"
+SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 

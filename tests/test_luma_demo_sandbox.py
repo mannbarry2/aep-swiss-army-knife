@@ -133,6 +133,9 @@ check("web events: real lumaCrmId with the ECID it already has, real SKUs",
           and e["identityMap"]["ECID"][0]["id"] == pools.ecid_by_crm[e["identityMap"]["lumaCrmId"][0]["id"]]
           and e["eventType"] in synth.WEB_EVENT_TYPES
           and all(i["SKU"] in skus for i in e["productListItems"]) for e in out["web-events"]))
+adobe_types = {r["eventType"] for r in datasets.read_rows(datasets.BY_KEY["web-events"])}
+check("web event types are exactly the ones in Adobe's web file",
+      set(synth.WEB_EVENT_TYPES) == adobe_types, sorted(adobe_types))
 check("inventory events: real SKU, the field group's enum",
       all(e["_acme"]["inventoryEvent"]["sku"] in skus
           and e["_acme"]["inventoryEvent"]["stockEventType"] in ("restock", "outOfStock") for e in out["inventory-events"]))

@@ -18,9 +18,9 @@ from .datasets import BY_KEY, SOURCE_TENANT_KEY, Dataset, read_rows
 from .transform import format_ts
 
 DEFAULT_MIX = {"web-events": 0.5, "offline-purchases": 0.4, "inventory-events": 0.1}
-# A rough shopping funnel: lots of views, few purchases.
-WEB_EVENT_TYPES = {"commerce.productViews": 0.5, "commerce.productListAdds": 0.25,
-                   "commerce.checkouts": 0.15, "commerce.purchases": 0.1}
+# The three event types in Adobe's web file, weighted a little like a funnel.
+WEB_EVENT_TYPES = {"commerce.productViews": 0.5, "commerce.saveForLaters": 0.25,
+                   "commerce.purchases": 0.25}
 STOCK_EVENT_TYPES = ("restock", "outOfStock")  # the enum in the inventory field group
 
 

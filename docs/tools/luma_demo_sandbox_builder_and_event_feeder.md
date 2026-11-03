@@ -154,8 +154,9 @@ safe to rerun after a partial failure.
   event files are not in the product catalogue.
 - **Offline baskets**: 1–4 lines with quantity 1–3. `priceTotal` is the catalogue price ×
   quantity.
-- **Web event types** are weighted like a funnel: views 50%, adds 25%, checkouts 15%,
-  purchases 10%. Purchases also get `commerce.order`.
+- **Web event types** are the three in Adobe's web file (`productViews`, `saveForLaters`,
+  `purchases`), weighted 50% / 25% / 25%, so audiences built on the loaded data also catch
+  the fed events. Purchases also get `commerce.order`, which Adobe's own web events lack.
 - **The event mix** is split by exact counts (20 → 10/8/2), not random draws.
 - **No `.env` and no GitHub Actions schedule.** Credentials come only from the credential
   loader (house rule 10), so `feed` is scheduled on the PC.
