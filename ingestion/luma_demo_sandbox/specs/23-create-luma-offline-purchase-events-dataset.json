@@ -1,0 +1,21 @@
+{
+  "name": "Luma Offline Purchase Events",
+  "schemaRef": {
+    "id": "{{luma_offline_purchase_event_schema_id}}",
+    "contentType": "application/vnd.adobe.xed-full-notext+json; version=1"
+  },
+  "fileDescription": {
+    "persisted": true,
+    "containerFormat": "parquet",
+    "format": "parquet"
+  },
+  "tags": {
+    "unifiedProfile": [
+      "enabled:true"
+    ],
+    "unifiedIdentity": [
+      "enabled:true"
+    ]
+  },
+  "enableErrorDiagnostics": true
+}

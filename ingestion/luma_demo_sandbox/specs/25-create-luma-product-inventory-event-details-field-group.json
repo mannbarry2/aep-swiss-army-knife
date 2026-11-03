@@ -1,0 +1,50 @@
+{
+  "meta:resourceType": "mixins",
+  "title": "Luma Product Inventory Event Details Field Group",
+  "type": "object",
+  "description": "Luma Product Inventory Event Details Field Group",
+  "properties": {
+    "{{TENANT_ID}}": {
+      "type": "object",
+      "properties": {
+        "inventoryEvent": {
+          "title": "Inventory Event",
+          "type": "object",
+          "properties": {
+            "sku": {
+              "title": "SKU",
+              "description": "Unique identifier of the product",
+              "type": "string",
+              "isRequired": true,
+              "meta:xdmType": "string"
+            },
+            "stockEventType": {
+              "title": "Stock Event Type",
+              "description": "Number of items left in stock",
+              "type": "string",
+              "enum": [
+                "restock",
+                "outOfStock"
+              ],
+              "meta:enum": {
+                "restock": "Restock",
+                "outOfStock": "Out of Stock"
+              },
+              "isRequired": true,
+              "meta:xdmType": "string"
+            }
+          },
+          "meta:xdmType": "object",
+          "required": [
+            "sku"
+          ]
+        }
+      }
+    }
+  },
+  "meta:extensible": true,
+  "meta:abstract": true,
+  "meta:intendedToExtend": [
+    "{{luma_business_event_class_id}}"
+  ]
+}

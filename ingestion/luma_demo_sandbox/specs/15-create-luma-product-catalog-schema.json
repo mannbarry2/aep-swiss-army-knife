@@ -1,0 +1,29 @@
+{
+  "meta:resourceType": "schemas",
+  "title": "Luma Product Catalog Schema",
+  "type": "object",
+  "description": "Luma Product Catalog Schema",
+  "allOf": [
+    {
+      "$ref": "{{luma_product_catalog_class_id}}",
+      "type": "object",
+      "meta:xdmType": "object"
+    },
+    {
+      "$ref": "{{luma_product_catalog_fieldgroup_id}}",
+      "type": "object",
+      "meta:xdmType": "object"
+    }
+  ],
+  "meta:extensible": false,
+  "meta:abstract": false,
+  "meta:extends": [
+    "https://ns.adobe.com/xdm/data/record",
+    "{{luma_product_catalog_fieldgroup_id}}",
+    "{{luma_product_catalog_class_id}}"
+  ],
+  "meta:xdmType": "object",
+  "meta:immutableTags": [
+    "union"
+  ]
+}

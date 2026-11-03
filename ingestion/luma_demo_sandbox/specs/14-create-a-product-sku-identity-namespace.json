@@ -1,0 +1,6 @@
+{
+  "name": "Luma Product SKU",
+  "code": "lumaProductSKU",
+  "idType": "Non_people",
+  "description": "The id associated with Luma's product sku."
+}

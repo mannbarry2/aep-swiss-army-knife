@@ -1,0 +1,7 @@
+{
+  "@type": "xdm:descriptorReferenceIdentity",
+  "xdm:sourceSchema": "{{luma_offline_purchase_event_schema_id}}",
+  "xdm:sourceVersion": 1,
+  "xdm:sourceProperty": "/productListItems[*]/SKU",
+  "xdm:identityNamespace": "lumaProductSKU"
+}

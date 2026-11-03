@@ -32,5 +32,15 @@
         "instructions": "<optional extra naming rules, e.g. 'Always include the primary dataset name. Prefer noun-verb format like users-count or events-by-day.'>",
         "ai_suffix": " [babelfish]",
         "ai_foreign_suffix": " [babelfish system]"
+    },
+
+    "_luma_demo_sandbox_note": "Optional. ingestion/luma_demo_sandbox_builder_and_event_feeder.py writes demo data, so it only runs for credentials listed here. Demo orgs only, never a client's.",
+    "luma_demo_sandbox": {
+        "allowed_credentials": ["<your-demo-credential-name>"],
+        "allowed_sandboxes": ["<your-demo-sandbox-name>"],
+        "allowed_org_ids": ["<your-demo-org-id>@AdobeOrg"],
+        "streaming_inlet_url": "",
+        "streaming_inlet_urls": {},
+        "streaming_authenticated": false
     }
 }

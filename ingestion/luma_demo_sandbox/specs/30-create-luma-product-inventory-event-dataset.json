@@ -1,0 +1,13 @@
+{
+  "name": "Luma Product Inventory Event Dataset",
+  "schemaRef": {
+    "id": "{{luma_product_inventory_event_schema_id}}",
+    "contentType": "application/vnd.adobe.xed-full-notext+json; version=1"
+  },
+  "fileDescription": {
+    "persisted": true,
+    "containerFormat": "parquet",
+    "format": "parquet"
+  },
+  "enableErrorDiagnostics": true
+}

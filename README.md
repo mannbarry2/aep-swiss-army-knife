@@ -20,14 +20,14 @@ README listing its tools in one line each.
 | [`platform_access_and_audit/`](platform_access_and_audit/) | **Who can reach the platform and what they do there:** access audit, user activity log, permissions, the role grid, audit-log investigations, and the credential manager. |
 | [`query_service/`](query_service/) | **Query Service:** saved query templates (export, rename), scheduled queries, external PostgreSQL clients. |
 | [`performance_and_guardrails/`](performance_and_guardrails/) | **How the platform is performing:** the guardrail scoreboard, batch evaluation timing, snapshot timing history, the 8am audience counts. |
-| [`ingestion/`](ingestion/) | **Getting data in:** failed batches, and what drove a jump in Profile. |
+| [`ingestion/`](ingestion/) | **Getting data in:** failed batches, what drove a jump in Profile, and stocking a demo sandbox with Adobe's Luma data. |
 | [`toolkit_internals/`](toolkit_internals/) | **Internal to this toolkit, not for other people to use:** the plumbing every tool imports: the credential loader and the house-style Excel writer. |
 | `aep_creds.py`, `house_xlsx.py`, `snapshot_tables.py`, `overlap_report.py`, `audience_complexity.py` | Temporary forwarding files, only for the Data Dictionary run that was in progress when everything moved (23 Oct 2026). They go when the Data Dictionary moves into its folder. |
 | [`RELEASE_NOTES.md`](RELEASE_NOTES.md) / `.html` | Data Dictionary release notes (the HTML edition is the page on GitHub Pages). |
 | [`docs/`](docs/) | Everything else to read: [Adobe API gotchas](docs/adobe-api-gotchas.md), the [external access audit](docs/external-access-audit.md), the [Data Dictionary overview](docs/data-dictionary-overview.md), per-tool notes in [`docs/tools/`](docs/tools/), plans in [`docs/plans/`](docs/plans/), images in `docs/images/`. |
 | [`parked/`](parked/) | Kept, but not for use: unfinished or one-off work. See its [README](parked/README.md). |
 | [`reference/`](reference/) | Reference material, not tools: Craig's original [AJO journey export](reference/ajo-journey-export/) (Node) and the AutoLID / Luma diagrams. |
-| `demo/` | The bundled Luma sample data the Data Dictionary can be tried on. |
+| `demo/` | The bundled Luma sample data the Data Dictionary can be tried on, and that the Luma demo sandbox builder loads. |
 | `baselines/` | Hand-measured guardrail baselines the guardrail audit compares against. |
 | `creds/`, `output/`, `config.json` | Never committed: credentials, generated workbooks and caches, local labels. Old outputs live in `output/archive/`. |
 
@@ -94,6 +94,7 @@ The toolkit spans two product ranges:
 | [`platform_access_and_audit/credential_keyring_manager_and_access_probe.py`](platform_access_and_audit/credential_keyring_manager_and_access_probe.py) | **The one credential tool.** Store a credential in the keyring (typed, or imported from a legacy JSON or an Adobe Postman export), check it authenticates, and probe which of 12 Adobe services it can actually reach. Also lists, deletes, migrates and sweeps. **Run this first on any new credential set.** |
 | [`ingestion/failed_batch_file_downloader.py`](ingestion/failed_batch_file_downloader.py) | Lists recent batches, then downloads a chosen batch's files locally. |
 | [`ingestion/failed_batches_summary_report.py`](ingestion/failed_batches_summary_report.py) | Exports a CSV summary of every batch that failed in the last N hours. |
+| [`ingestion/luma_demo_sandbox_builder_and_event_feeder.py`](ingestion/luma_demo_sandbox_builder_and_event_feeder.py) | **Writer, demo sandboxes only.** Builds Adobe's Luma demo in a sandbox (schemas, datasets, 6,104 rows moved up to today) and feeds it fresh synthetic events. Read-only without `--apply`. See **[its guide](docs/tools/luma_demo_sandbox_builder_and_event_feeder.md)**. |
 | [`data_dictionary/journeys_and_audiences_census.py`](data_dictionary/journeys_and_audiences_census.py) | Census of **journeys and audiences** (audiences formerly = segments). `--list` maps every AJO journey to the **audience behind it** (read-audience or qualification); `--audiences` inventories the **whole audience estate** across sandboxes with tags, evaluation type and the segmentation rule (PQL) rendered readable. |
 | [`query_service/query_service_scheduled_queries_audit.py`](query_service/query_service_scheduled_queries_audit.py) | Audits every sandbox's Query Service schedules, classifies each (SEGMENTATION / QUERY / CRON), flags anomalies (ODD_TIME, ONCE, DISABLED, LATE), and writes a tabbed XLSX + CSV. |
 | [`data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py`](data_dictionary/streaming_audiences_high_throughput_upgrade_triage.py) | Catalogues and triages streaming audiences/segments in a sandbox (read-only) — live from AEP or from a local file dump. |

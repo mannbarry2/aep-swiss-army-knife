@@ -1,0 +1,390 @@
+[
+  {
+    "collection": "1",
+    "name": "Create System Identifier Datatype",
+    "kind": "datatype",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/datatypes",
+    "spec": "01-create-system-identifier-datatype.json",
+    "save": {
+      "system_identifier_dataype_id": "$id"
+    }
+  },
+  {
+    "collection": "1",
+    "name": "Create Identity Profile Field Group",
+    "kind": "fieldgroup",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/fieldgroups",
+    "spec": "02-create-identity-profile-field-group.json",
+    "save": {
+      "luma_identity_profile_fieldgroup_id": "$id"
+    }
+  },
+  {
+    "collection": "1",
+    "name": "Create a Loyalty Identity Namespace",
+    "kind": "namespace",
+    "method": "POST",
+    "path": "/data/core/idnamespace/identities",
+    "spec": "03-create-a-loyalty-identity-namespace.json",
+    "save": {
+      "luma_loyalty_id_namespace": "id"
+    }
+  },
+  {
+    "collection": "1",
+    "name": "Create a CRM Identity Namespace",
+    "kind": "namespace",
+    "method": "POST",
+    "path": "/data/core/idnamespace/identities",
+    "spec": "04-create-a-crm-identity-namespace.json",
+    "save": {
+      "luma_crm_id_namespace": "id"
+    }
+  },
+  {
+    "collection": "1",
+    "name": "Create Loyalty Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "05-create-loyalty-schema.json",
+    "save": {
+      "luma_loyalty_schema_id": "$id",
+      "luma_loyalty_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "1",
+    "name": "Set Loyalty Id as the Primary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "06-set-loyalty-id-as-the-primary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "1",
+    "name": "Set CRM Id as a secondary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "07-set-crm-id-as-a-secondary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "1",
+    "name": "Create Loyalty Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "08-create-loyalty-dataset.json",
+    "save": {
+      "loyalty_dataset_id": "dataset_id"
+    }
+  },
+  {
+    "collection": "2",
+    "name": "Create CRM Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "09-create-crm-schema.json",
+    "save": {
+      "luma_crm_schema_id": "$id",
+      "luma_crm_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "2",
+    "name": "Set CRM Id as the Primary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "10-set-crm-id-as-the-primary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "2",
+    "name": "Create CRM Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "11-create-crm-dataset.json",
+    "save": {
+      "crm_dataset_id": "dataset_id"
+    }
+  },
+  {
+    "collection": "3",
+    "name": "Create Luma Product Catalog Class",
+    "kind": "class",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/classes",
+    "spec": "12-create-luma-product-catalog-class.json",
+    "save": {
+      "luma_product_catalog_class_id": "$id"
+    }
+  },
+  {
+    "collection": "3",
+    "name": "Create Luma Product Catalog Field Group",
+    "kind": "fieldgroup",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/fieldgroups",
+    "spec": "13-create-luma-product-catalog-field-group.json",
+    "save": {
+      "luma_product_catalog_fieldgroup_id": "$id"
+    }
+  },
+  {
+    "collection": "3",
+    "name": "Create a Product SKU Identity Namespace",
+    "kind": "namespace",
+    "method": "POST",
+    "path": "/data/core/idnamespace/identities",
+    "spec": "14-create-a-product-sku-identity-namespace.json",
+    "save": {
+      "luma_product_sku_namespace": "id"
+    }
+  },
+  {
+    "collection": "3",
+    "name": "Create Luma Product Catalog Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "15-create-luma-product-catalog-schema.json",
+    "save": {
+      "luma_product_catalog_schema_id": "$id",
+      "luma_product_catalog_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "3",
+    "name": "Set Product SKU as the Primary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "16-set-product-sku-as-the-primary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "3",
+    "name": "Create Luma Product Catalog Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "17-create-luma-product-catalog-dataset.json",
+    "save": {
+      "product_catalog_dataset_id": "dataset_id"
+    }
+  },
+  {
+    "collection": "4",
+    "name": "Create Luma Identity ExperienceEvent Field Group",
+    "kind": "fieldgroup",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/fieldgroups",
+    "spec": "18-create-luma-identity-experienceevent-field-group.json",
+    "save": {
+      "luma_identity_experience_event_fieldgroup_id": "$id"
+    }
+  },
+  {
+    "collection": "4",
+    "name": "Luma Offline Purchase Events Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "19-luma-offline-purchase-events-schema.json",
+    "save": {
+      "luma_offline_purchase_event_schema_id": "$id",
+      "luma_offline_purchase_event_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "4",
+    "name": "Set Loyalty Id as the Primary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "20-set-loyalty-id-as-the-primary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "4",
+    "name": "Set the SKU field as a reference identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "21-set-the-sku-field-as-a-reference-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "4",
+    "name": "Create relationship to Luma Product Catalog",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "22-create-relationship-to-luma-product-catalog.json",
+    "save": {}
+  },
+  {
+    "collection": "4",
+    "name": "Create Luma Offline Purchase Events Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "23-create-luma-offline-purchase-events-dataset.json",
+    "save": {
+      "luma_offline_purchase_event_dataset_id": "dataset_id"
+    }
+  },
+  {
+    "collection": "5",
+    "name": "Create Luma Business Event Class",
+    "kind": "class",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/classes",
+    "spec": "24-create-luma-business-event-class.json",
+    "save": {
+      "luma_business_event_class_id": "$id"
+    }
+  },
+  {
+    "collection": "5",
+    "name": "Create Luma Product Inventory Event Details Field Group",
+    "kind": "fieldgroup",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/fieldgroups",
+    "spec": "25-create-luma-product-inventory-event-details-field-group.json",
+    "save": {
+      "luma_product_inventory_event_fieldgroup_id": "$id"
+    }
+  },
+  {
+    "collection": "5",
+    "name": "Create Luma Product Inventory Event Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "26-create-luma-product-inventory-event-schema.json",
+    "save": {
+      "luma_product_inventory_event_schema_id": "$id",
+      "luma_product_inventory_event_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "5",
+    "name": "Set Product SKU as the Primary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "27-set-product-sku-as-the-primary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "5",
+    "name": "Set the SKU field as a reference identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "28-set-the-sku-field-as-a-reference-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "5",
+    "name": "Create relationship to Luma Product Catalog",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "29-create-relationship-to-luma-product-catalog.json",
+    "save": {}
+  },
+  {
+    "collection": "5",
+    "name": "Create Luma Product Inventory Event Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "30-create-luma-product-inventory-event-dataset.json",
+    "save": {
+      "product_inventory_event_dataset_id": "dataset_id"
+    }
+  },
+  {
+    "collection": "6",
+    "name": "Create Luma Test Profiles Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "31-create-luma-test-profiles-schema.json",
+    "save": {
+      "luma_test_profiles_schema_id": "$id",
+      "luma_test_profiles_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "6",
+    "name": "Set CRM Id as the Primary Identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "32-set-crm-id-as-the-primary-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "6",
+    "name": "Create Luma Test Profiles Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "33-create-luma-test-profiles-dataset.json",
+    "save": {
+      "luma_test_profiles_dataset_id": "dataset_id"
+    }
+  },
+  {
+    "collection": "7",
+    "name": "Luma Web Events Schema",
+    "kind": "schema",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/schemas",
+    "spec": "34-luma-web-events-schema.json",
+    "save": {
+      "luma_web_events_schema_id": "$id",
+      "luma_web_events_schema_altId": "meta:altId"
+    }
+  },
+  {
+    "collection": "7",
+    "name": "Set the SKU field as a reference identity",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "35-set-the-sku-field-as-a-reference-identity.json",
+    "save": {}
+  },
+  {
+    "collection": "7",
+    "name": "Create relationship to Luma Product Catalog",
+    "kind": "descriptor",
+    "method": "POST",
+    "path": "/data/foundation/schemaregistry/tenant/descriptors",
+    "spec": "36-create-relationship-to-luma-product-catalog.json",
+    "save": {}
+  },
+  {
+    "collection": "7",
+    "name": "Create Luma Web Events Dataset",
+    "kind": "dataset",
+    "method": "POST",
+    "path": "/data/foundation/catalog/dataSet",
+    "spec": "37-create-luma-web-events-dataset.json",
+    "save": {
+      "luma_web_events_dataset_id": "dataset_id"
+    }
+  }
+]

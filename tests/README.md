@@ -34,3 +34,14 @@ python tests/field_history_independent_check.py --sandbox=prod --limit=40   # a 
 
 Exit code 0 when everything checked holds. A new sandbox -- UK prod above all
 -- should pass it before its history is relied on.
+
+## Luma demo sandbox builder
+
+[`test_luma_demo_sandbox.py`](test_luma_demo_sandbox.py): offline (fake HTTP) checks for
+`ingestion/luma_demo_sandbox_builder_and_event_feeder.py`: the tenant swap and time shift on
+Adobe's files, the synthetic events, setup's lookup-before-create, batch and streaming calls,
+and the demo-only guard. Run after any change to the tool or `ingestion/luma_demo_sandbox/`.
+
+```
+python tests/test_luma_demo_sandbox.py
+```

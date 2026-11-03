@@ -1,0 +1,6 @@
+{
+  "name": "Luma CRM Id",
+  "code": "lumaCrmId",
+  "idType": "Cross_device",
+  "description": "The id associated with the customer's record in the CRM system."
+}

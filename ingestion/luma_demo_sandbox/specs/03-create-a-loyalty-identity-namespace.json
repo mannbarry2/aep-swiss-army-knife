@@ -1,0 +1,6 @@
+{
+  "name": "Luma Loyalty Id",
+  "code": "lumaLoyaltyId",
+  "idType": "Cross_device",
+  "description": "The id associated with loyalty program membership."
+}

@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "title": "Luma Business Event Class",
+  "description": "Luma Business Event Class",
+  "allOf": [
+    {
+      "$ref": "https://ns.adobe.com/xdm/data/time-series"
+    }
+  ]
+}

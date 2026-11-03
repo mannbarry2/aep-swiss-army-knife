@@ -1,0 +1,26 @@
+{
+  "meta:resourceType": "schemas",
+  "title": "Luma Product Inventory Event Schema",
+  "type": "object",
+  "description": "Luma Product Inventory Event Schema",
+  "allOf": [
+    {
+      "$ref": "{{luma_business_event_class_id}}",
+      "type": "object",
+      "meta:xdmType": "object"
+    },
+    {
+      "$ref": "{{luma_product_inventory_event_fieldgroup_id}}",
+      "type": "object",
+      "meta:xdmType": "object"
+    }
+  ],
+  "meta:extensible": false,
+  "meta:abstract": false,
+  "meta:extends": [
+    "https://ns.adobe.com/xdm/data/time-series",
+    "{{luma_product_inventory_event_fieldgroup_id}}",
+    "{{luma_business_event_class_id}}"
+  ],
+  "meta:xdmType": "object"
+}

@@ -1,0 +1,25 @@
+{
+  "meta:resourceType": "datatypes",
+  "title": "System Identifier",
+  "type": "object",
+  "description": "System Identifier Data type",
+  "properties": {
+    "loyaltyId": {
+      "title": "Loyalty Id",
+      "description": "",
+      "type": "string",
+      "isRequired": false,
+      "meta:xdmType": "string"
+    },
+    "crmId": {
+      "title": "CRM Id",
+      "description": "",
+      "type": "string",
+      "isRequired": false,
+      "meta:xdmType": "string"
+    }
+  },
+  "meta:extensible": true,
+  "meta:abstract": true,
+  "meta:xdmType": "object"
+}

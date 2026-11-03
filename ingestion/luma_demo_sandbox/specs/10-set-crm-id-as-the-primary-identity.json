@@ -1,0 +1,9 @@
+{
+  "@type": "xdm:descriptorIdentity",
+  "xdm:sourceSchema": "{{luma_crm_schema_id}}",
+  "xdm:sourceVersion": 1,
+  "xdm:sourceProperty": "/{{TENANT_ID}}/systemIdentifier/crmId",
+  "xdm:namespace": "lumaCrmId",
+  "xdm:property": "xdm:code",
+  "xdm:isPrimary": true
+}

@@ -1,0 +1,7 @@
+{
+  "@type": "xdm:descriptorReferenceIdentity",
+  "xdm:sourceSchema": "{{luma_product_inventory_event_schema_id}}",
+  "xdm:sourceVersion": 1,
+  "xdm:sourceProperty": "/{{TENANT_ID}}/inventoryEvent/sku",
+  "xdm:identityNamespace": "lumaProductSKU"
+}

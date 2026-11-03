@@ -1,0 +1,98 @@
+{
+  "meta:resourceType": "mixins",
+  "title": "Luma Product Catalog Field Group",
+  "type": "object",
+  "description": "",
+  "properties": {
+    "{{TENANT_ID}}": {
+      "type": "object",
+      "properties": {
+        "product": {
+          "type": "object",
+          "properties": {
+            "sku": {
+              "title": "Product SKU",
+              "description": "Unique identifier of the product",
+              "type": "string",
+              "isRequired": true,
+              "meta:xdmType": "string"
+            },
+            "name": {
+              "title": "Product Name",
+              "description": "Name of the product",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "category": {
+              "title": "Product Category",
+              "description": "Category of the product",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "color": {
+              "title": "Product Color",
+              "description": "Color of the product",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "size": {
+              "title": "Product Size",
+              "description": "Size of the product",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "price": {
+              "title": "Product Price",
+              "description": "Price of the product",
+              "type": "number",
+              "isRequired": false,
+              "meta:xdmType": "number"
+            },
+            "description": {
+              "title": "Product Description",
+              "description": "Description of the product",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "imageUrl": {
+              "title": "Product Image URL",
+              "description": "URL of the product thumbnail image used on the Luma website",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "url": {
+              "title": "Product URL",
+              "description": "URL of the product detail page on the Luma website",
+              "type": "string",
+              "isRequired": false,
+              "meta:xdmType": "string"
+            },
+            "stockQuantity": {
+              "title": "Product Stock Quantity",
+              "description": "Number of items left in stock",
+              "type": "integer",
+              "isRequired": false,
+              "meta:xdmType": "integer"
+            }
+          },
+          "meta:xdmType": "object",
+          "required": [
+            "sku"
+          ]
+        }
+      }
+    }
+  },
+  "meta:extensible": true,
+  "meta:abstract": true,
+  "meta:intendedToExtend": [
+    "{{luma_product_catalog_class_id}}"
+  ],
+  "meta:xdmType": "object"
+}

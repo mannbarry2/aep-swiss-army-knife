@@ -1,0 +1,29 @@
+{
+  "title": "Luma Identity Profile Field Group",
+  "description": "Luma Identity Profile Field Group created by the sample data importer",
+  "type": "object",
+  "meta:intendedToExtend": [
+    "https://ns.adobe.com/xdm/context/profile"
+  ],
+  "definitions": {
+    "property": {
+      "properties": {
+        "{{TENANT_ID}}": {
+          "type": "object",
+          "properties": {
+            "systemIdentifier": {
+              "type": "object",
+              "title": "System Identifier",
+              "$ref": "{{system_identifier_dataype_id}}"
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$ref": "#/definitions/property"
+    }
+  ]
+}
