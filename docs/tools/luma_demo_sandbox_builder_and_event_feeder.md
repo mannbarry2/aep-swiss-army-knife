@@ -139,7 +139,7 @@ curl.exe -X POST "<inlet url>" -H "Content-Type: application/json" -H "x-adobe-f
 
 ### audiences
 
-19 batch audiences and 6 streaming ones, all named `Luma: ...`, on the default Profile merge policy. The rules
+19 batch audiences, 12 child audiences and 6 streaming ones, all named `Luma: ...`, on the default Profile merge policy. The rules
 are in [`ingestion/luma_demo_sandbox/audiences.py`](../../ingestion/luma_demo_sandbox/audiences.py):
 
 - **Purchases**: all buyers, web buyers (30 days), in-store buyers (90 days), omnichannel,
@@ -152,6 +152,14 @@ are in [`ingestion/luma_demo_sandbox/audiences.py`](../../ingestion/luma_demo_sa
   points-rich (500,000+) with no purchase in 60 days, Gen Z (born 1997+), email-contactable
   but never purchased.
 
+- **Children** (`Luma: <parent> > <condition>`): audiences built on a buyer audience with
+  `inSegment("<parent id>")` plus one condition.
+  - All Buyers: California, gold or platinum, platinum, Gen Z, email-contactable and
+    points-rich.
+  - In-store Buyers (90 days) and Web Buyers (30 days): California, and gold or platinum.
+  - Omnichannel and High-Value In-store Buyers: gold or platinum.
+
+  They are created after their parent. The Data Dictionary shows them as the parent's children.
 - **Streaming** (`Luma: Streaming - ...`): an in-store order, a web purchase, an in-store
   order of $200+, a gear purchase or a product view in the last 24 hours, and gold/platinum
   members with an in-store order in the last 24 hours. They are evaluated as events

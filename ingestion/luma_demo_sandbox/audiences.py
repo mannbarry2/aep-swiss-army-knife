@@ -17,13 +17,17 @@ STREAMING audiences are evaluated as each event arrives (continuous
 evaluation), so they fill from feed's streamed events within minutes. Adobe
 only streams rules of one event inside a window under 24 hours, alone or with
 profile attributes; anything wider stays batch.
+
+CHILDREN are audiences of audiences: inSegment("<parent id>") and one more
+condition, e.g. "All Buyers > California". They are made after their parent,
+whose id goes into the rule.
 """
 from __future__ import annotations
 
 import time
 from typing import Any, Callable
 
-from .client import Platform
+from .client import ApiError, Platform
 
 PREFIX = "Luma: "
 DEFINITIONS = "/data/core/ups/segment/definitions"
@@ -32,6 +36,8 @@ CONVERSION = "/data/core/ups/segment/conversion"
 PROFILE = "_xdm.context.profile"
 # Adobe's 400 when the org refuses on-demand segment jobs.
 JOBS_BLOCKED = "Non-scheduled segment jobs are not allowed"
+# Adobe's 400 for a streaming audience when no merge policy is Active-On-Edge.
+NEEDS_EDGE = "NEBULA-100042"
 
 Log = Callable[[str], None]
 
@@ -111,11 +117,44 @@ STREAMING: list[tuple[str, str, str]] = [
      f'loyalty.tier in ["gold", "platinum"] and {has(f"{POS_BUY} and {within_hours(24)}")}'),
 ]
 
+# Profile conditions a child adds to its parent.
+CA = 'homeAddress.state.equals("CA", false)'
+GOLD_PLUS = 'loyalty.tier in ["gold", "platinum"]'
+CHILD_OF = {
+    "All Buyers": [("California", "who live in California", CA),
+                   ("Gold or Platinum", "on the gold or platinum tier", GOLD_PLUS),
+                   ("Platinum", "on the platinum tier", 'loyalty.tier.equals("platinum", false)'),
+                   ("Gen Z", "born 1997 or later", "person.birthYear >= 1997"),
+                   ("Email-Contactable", "with a personal email", "personalEmail.address.isNotNull()"),
+                   ("Points-Rich", "with 500,000+ loyalty points", "loyalty.points >= 500000")],
+    "In-store Buyers - Last 90 Days": [("California", "who live in California", CA),
+                                       ("Gold or Platinum", "on the gold or platinum tier", GOLD_PLUS)],
+    "Web Buyers - Last 30 Days": [("California", "who live in California", CA),
+                                  ("Gold or Platinum", "on the gold or platinum tier", GOLD_PLUS)],
+    "Omnichannel Buyers": [("Gold or Platinum", "on the gold or platinum tier", GOLD_PLUS)],
+    "High-Value In-store Buyers": [("Gold or Platinum", "on the gold or platinum tier", GOLD_PLUS)],
+}
+CHILDREN: list[tuple[str, str, str, str]] = [   # (parent, name, description, pql with {PARENT})
+    (parent, f"{parent} > {label}", f"{PREFIX}{parent}, {who}.", f'inSegment("{{PARENT}}") and {cond}')
+    for parent, kids in CHILD_OF.items() for label, who, cond in kids]
+
 
 def definitions(tenant_prefix: str) -> list[dict[str, Any]]:
-    return [{"name": PREFIX + name, "description": desc, "pql": pql.replace("{T}", tenant_prefix),
-             "streaming": streaming}
-            for streaming, group in ((False, AUDIENCES), (True, STREAMING)) for name, desc, pql in group]
+    """Parents first, then children, then streaming (refused without an edge merge policy)."""
+    out = [{"name": PREFIX + name, "description": desc, "pql": pql.replace("{T}", tenant_prefix),
+            "streaming": False} for name, desc, pql in AUDIENCES]
+    out += [{"name": PREFIX + name, "description": desc, "pql": pql, "streaming": False,
+             "parent": PREFIX + parent} for parent, name, desc, pql in CHILDREN]
+    out += [{"name": PREFIX + name, "description": desc, "pql": pql.replace("{T}", tenant_prefix),
+             "streaming": True} for name, desc, pql in STREAMING]
+    return out
+
+
+def rule(audience: dict[str, Any], ids: dict[str, str]) -> str:
+    """The PQL, with a child's parent id filled in."""
+    if not audience.get("parent"):
+        return audience["pql"]
+    return audience["pql"].replace("{PARENT}", ids[audience["parent"]])
 
 
 def profile_merge_policy(api: Platform) -> str:
@@ -189,7 +228,7 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
         return ids, counts
     log("")
     for a in as_text:
-        patch = [{"op": "add", "path": "/expression", "value": to_json_expression(api, a["pql"])}]
+        patch = [{"op": "add", "path": "/expression", "value": to_json_expression(api, rule(a, ids))}]
         api.call("PATCH", f"{DEFINITIONS}/{ids[a['name']]}", json=patch, ok=(200, 204))
         counts["converted"] += 1
         counts["as_text"] -= 1
@@ -197,13 +236,25 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
     if not missing:
         return ids, counts
     merge_policy_id = profile_merge_policy(api)
+    needs_edge = 0
     for a in missing:
-        body = create_body(a, merge_policy_id, to_json_expression(api, a["pql"]))
-        created = api.call("POST", DEFINITIONS, json=body).json()
+        if a.get("parent") and a["parent"] not in ids:
+            log(f"  skipped        {a['name']} (parent not there)")
+            continue
+        body = create_body(a, merge_policy_id, to_json_expression(api, rule(a, ids)))
+        try:
+            created = api.call("POST", DEFINITIONS, json=body).json()
+        except ApiError as err:
+            if not (a["streaming"] and NEEDS_EDGE in str(err)):
+                raise
+            needs_edge += 1
+            log(f"  refused        {a['name']} (needs an Active-On-Edge merge policy)")
+            continue
         ids[a["name"]] = created["id"]
         counts["created"] += 1
         counts["missing"] -= 1
         log(f"  created        {a['name']}")
+    counts["needs_edge"] = needs_edge
     return ids, counts
 
 

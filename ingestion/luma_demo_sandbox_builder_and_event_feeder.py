@@ -18,7 +18,8 @@ Builds Adobe's Luma demo in one AEP sandbox, then keeps it alive:
   inlet   the HTTP API streaming inlet (one connection, a dataflow per event
           dataset); its URL goes in the state file for feed.
   audiences  19 demo audiences ("Luma: ...") that all have members on the
-          loaded data, plus 6 streaming ones that fill from feed's events; --apply creates the missing ones and runs one batch
+          loaded data, 12 child audiences of the buyer ones ("All Buyers >
+          California"...), plus 6 streaming ones that fill from feed's events; --apply creates the missing ones and runs one batch
           segment job so their counts show straight away.
 
 WRITER -- read-only by default. Without --apply every command only reads from
@@ -63,7 +64,7 @@ from ingestion.luma_demo_sandbox.registry import load_steps, run_setup  # noqa: 
 from ingestion.luma_demo_sandbox.transform import prepare, to_json_file  # noqa: E402
 
 SCRIPT_NAME = "luma_demo_sandbox_builder_and_event_feeder"
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.3.0"
 SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -286,7 +287,7 @@ def cmd_inlet(api: Platform, opts: argparse.Namespace, state: dict) -> int:
 # audiences
 # ----------------------------------------------------------------------------
 def cmd_audiences(api: Platform, opts: argparse.Namespace, state: dict) -> int:
-    total = len(audiences.AUDIENCES) + len(audiences.STREAMING)
+    total = len(audiences.AUDIENCES) + len(audiences.CHILDREN) + len(audiences.STREAMING)
     print("  Estimate: 1-2 lookups" + (f", up to {total} creates, then one segment job "
           "(Adobe usually takes 5-20 minutes)" if opts.apply else "") + ".\n")
     ids, counts = audiences.run_audiences(api, resolve_tenant(api, state), apply=opts.apply)
@@ -296,6 +297,9 @@ def cmd_audiences(api: Platform, opts: argparse.Namespace, state: dict) -> int:
     ids = {name: sid for name, sid in ids.items() if name not in streaming}
     print(f"\n  {counts['exists']} exist, {counts['created']} created, {counts['missing']} missing, "
           f"{counts['converted']} converted, {counts['as_text']} still stored as text")
+    if counts.get("needs_edge"):
+        print(f"  {counts['needs_edge']} streaming audience(s) refused: turn on Active-On-Edge for the "
+              "Profile merge policy, then run again.")
     if not opts.apply:
         if counts["missing"] or counts["as_text"]:
             print("  Read-only: nothing was changed. Add --apply to create the missing and convert the text ones.")

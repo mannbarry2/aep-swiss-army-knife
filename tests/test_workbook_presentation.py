@@ -58,6 +58,7 @@ w = {c: ws.column_dimensions[c].width for c in "ABCDEFG"}
 check("width fitted to the content", 17 <= w["A"] <= 22, w["A"])
 check("a short column is not left wide", w["B"] <= 10, w["B"])
 check("a fixed-width (Consolas) column is left alone", w["G"] == 27, w["G"])
+check("table rows are 14 high", all(ws.row_dimensions[r].height == 14 for r in range(6, ws.max_row + 1)))
 check("header row tall enough for its words", ws.row_dimensions[5].height >= 36,
       ws.row_dimensions[5].height)
 check("technical column folded away", ws.column_dimensions["D"].hidden

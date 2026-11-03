@@ -87,6 +87,10 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.25 -- Every table row is 14 high: one line per row on every tab, the
+full text still in the cell. Headers and the notes above a table keep their
+heights.
+
 v3.4.24 -- Check by hand (SQL) shows the values. For a plain field (no array
 or map on the path) the SQL now lists each value with its record count and
 share -- e.g. loyalty.tier: gold 25%, silver 24% ... -- with an (empty) row,
@@ -389,7 +393,7 @@ from data_dictionary import dictionary_colours as colours   # one colour scheme 
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.24"
+SCRIPT_VERSION = "3.4.25"
 SCRIPT_DATE    = "2026-11-03"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -2337,6 +2341,7 @@ HEAD_LINES, HEAD_MAX = 2, 24
 # A note row taller than this is cut short -- long explanations belong on How
 # to Use, not above a table where they stay frozen on screen.
 NOTE_MAX_LINES = 6
+ROW_HEIGHT = 14           # every table row (v3.4.25)
 
 
 def _display_len(v) -> int:
@@ -2534,6 +2539,12 @@ def _polish_workbook(wb):
             ws.cell(r, 1).alignment = Alignment(wrap_text=True, vertical="top")
             ws.row_dimensions[r].height = 15 * min(NOTE_MAX_LINES,
                                                    _wrapped_lines(v, total * 1.05)) + 3
+        # Every table row is 14 high (v3.4.25): one line each, long text is in
+        # the cell in full. Without a set height Excel grows a wrapped row to fit.
+        # The header and the notes above it keep their heights.
+        for r in range(1, ws.max_row + 1):
+            if (hr and r > hr) or ws.row_dimensions[r].height is None:
+                ws.row_dimensions[r].height = ROW_HEIGHT
 
 
 def _safe_sheet_name(name: str, used: set) -> str:

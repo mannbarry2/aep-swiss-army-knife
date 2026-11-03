@@ -349,8 +349,9 @@ from ingestion.luma_demo_sandbox import audiences  # noqa: E402
 
 defs = audiences.definitions("_acme")
 check("audiences: every one named Luma: ..., tenant swapped in, no {T} left",
-      len(defs) == len(audiences.AUDIENCES) + len(audiences.STREAMING) and all(d["name"].startswith("Luma: ") for d in defs)
-      and all("{T}" not in d["pql"] for d in defs) and any("_acme.systemIdentifier.loyaltyId" in d["pql"] for d in defs))
+      len(defs) == len(audiences.AUDIENCES) + len(audiences.CHILDREN) + len(audiences.STREAMING) and all(d["name"].startswith("Luma: ") for d in defs)
+      and all("{T}" not in d["pql"] for d in defs)
+      and all(d["parent"] in {x["name"] for x in defs} for d in defs if d.get("parent")) and any("_acme.systemIdentifier.loyaltyId" in d["pql"] for d in defs))
 check("audiences: names are unique", len({d["name"] for d in defs}) == len(defs))
 
 
@@ -394,6 +395,13 @@ check("audiences with apply: only the missing created, on the Profile merge poli
       and all(b["mergePolicyId"] == "mp-profile" for b in created)
       and all(b["evaluationInfo"]["batch"]["enabled"] for b in created if not b["name"].startswith("Luma: Streaming")))
 streamed = [b for b in created if b["name"].startswith("Luma: Streaming")]
+kids = [b for b in created if " > " in b["name"]]
+check("child audiences: inSegment(parent id) and their condition, after the parent",
+      len(kids) == len(audiences.CHILDREN)
+      and any(b["name"] == "Luma: All Buyers > California" and 'inSegment("seg-0") and homeAddress.state' in
+              b["expression"]["value"] for b in kids)
+      and all("{PARENT}" not in b["expression"]["value"] for b in kids)
+      and all('inSegment("new-' in b["expression"]["value"] for b in kids if "All Buyers >" not in b["name"]))
 check("streaming audiences: continuous evaluation on, batch off, 24-hour window",
       len(streamed) == len(audiences.STREAMING)
       and all(b["evaluationInfo"]["continuous"]["enabled"] and not b["evaluationInfo"]["batch"]["enabled"]
