@@ -64,7 +64,7 @@ from ingestion.luma_demo_sandbox.registry import load_steps, run_setup  # noqa: 
 from ingestion.luma_demo_sandbox.transform import prepare, to_json_file  # noqa: E402
 
 SCRIPT_NAME = "luma_demo_sandbox_builder_and_event_feeder"
-SCRIPT_VERSION = "1.4.0"
+SCRIPT_VERSION = "1.5.0"
 SCRIPT_DATE = "2026-11-04"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -296,7 +296,9 @@ def cmd_audiences(api: Platform, opts: argparse.Namespace, state: dict) -> int:
     streaming = {audiences.PREFIX + name for name, _, _ in audiences.STREAMING}
     ids = {name: sid for name, sid in ids.items() if name not in streaming}
     print(f"\n  {counts['exists']} exist, {counts['created']} created, {counts['missing']} missing, "
-          f"{counts['repaired']} repaired, {counts['outdated']} with an old rule")
+          f"{counts['repaired']} repaired, {counts['outdated']} with an old rule"
+          + (f"; {counts['cards']} given Rule view cards, {counts['code_only']} code-view only"
+             if "cards" in counts else ""))
     if counts.get("needs_edge"):
         print(f"  {counts['needs_edge']} streaming audience(s) refused: turn on Active-On-Edge for the "
               "Profile merge policy, then run again.")

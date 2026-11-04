@@ -31,6 +31,7 @@ import json
 import time
 from typing import Any, Callable
 
+from .cards import card_model, rule_hash
 from .client import ApiError, Platform
 
 PREFIX = "Luma: "
@@ -250,7 +251,10 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
                 status = "will repair" if apply else "rule differs"
         log(f"  {status:<14} {a['name']}")
     counts = {"exists": len(ids), "created": 0, "missing": len(missing), "repaired": 0, "outdated": len(outdated)}
-    if not apply or not (missing or outdated):
+    if not apply:
+        return ids, counts
+    if not (missing or outdated):
+        add_cards(api, wanted, ids, have, counts, log)
         return ids, counts
     log("")
     for a, expr in outdated:
@@ -260,6 +264,7 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
         counts["outdated"] -= 1
         log(f"  repaired       {a['name']}")
     if not missing:
+        add_cards(api, wanted, ids, have, counts, log)
         return ids, counts
     merge_policy_id = profile_merge_policy(api)
     needs_edge = 0
@@ -281,7 +286,46 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
         counts["missing"] -= 1
         log(f"  created        {a['name']}")
     counts["needs_edge"] = needs_edge
+    add_cards(api, wanted, ids, have, counts, log)
     return ids, counts
+
+
+def same_layout(a: Any, b: Any) -> bool:
+    """Equal apart from the random card / variable ids."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(k == "id" and isinstance(a[k], str) and "-" in a[k]
+                                            or same_layout(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(same_layout(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def add_cards(api: Platform, wanted: list[dict[str, Any]], ids: dict[str, str],
+              have: dict[str, dict[str, Any]], counts: dict[str, int], log: Log) -> None:
+    """Give each audience the rule builder's card layout, so the UI's Rule view
+    opens it. A layout whose hash already matches the stored rule (the UI's own,
+    or one written here before) is left alone."""
+    names = {sid: name for name, sid in ids.items()}
+    counts["cards"] = counts["code_only"] = 0
+    for a in wanted:
+        if a["name"] not in ids:
+            continue
+        current = api.get_json(f"{DEFINITIONS}/{ids[a['name']]}")
+        stored = (current.get("expression") or {}).get("value") or ""
+        laid_out = current.get("ansibleDataModel") or {}
+        by_person = not str(current.get("lastModifiedBy") or "").endswith("@techacct.adobe.com")
+        if laid_out and laid_out.get("hash") == rule_hash(stored) and by_person:
+            continue           # laid out (or edited) in the UI: leave it
+        model = card_model(rule(a, ids), names, stored)
+        if model and laid_out and same_layout(laid_out, model):
+            continue
+        if model is None:
+            counts["code_only"] += 1
+            continue
+        api.call("PATCH", f"{DEFINITIONS}/{ids[a['name']]}", ok=(200, 204),
+                 json=[{"op": "add", "path": "/ansibleDataModel", "value": model}])
+        counts["cards"] += 1
+        log(f"  rule view      {a['name']}")
 
 
 def evaluate(api: Platform, segment_ids: list[str], *, interval: float = 30, timeout: float = 3600,

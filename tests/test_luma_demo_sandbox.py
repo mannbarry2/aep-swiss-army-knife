@@ -345,7 +345,7 @@ check("feed --apply: 20 events streamed into the three event datasets",
       and {m["header"]["datasetId"] for m in sent} == {"ds-web-events", "ds-offline-purchases", "ds-inventory-events"}, printed)
 
 # --- audiences ---------------------------------------------------------------------------
-from ingestion.luma_demo_sandbox import audiences  # noqa: E402
+from ingestion.luma_demo_sandbox import audiences, cards  # noqa: E402
 
 defs = audiences.definitions("_acme")
 check("audiences: every one named Luma: ..., tenant swapped in, no {T} left",
@@ -371,6 +371,13 @@ def segment_api(existing, old_names=()):
         return {"format": "pql/json", "value": tree(audiences.rule(by_name[n], seg))}
 
     def handler(method, url, kw):
+        if method == "GET" and "/segment/definitions/" in url:
+            sid = url.rsplit("/", 1)[1]
+            name = next((n for n, i in seg.items() if i == sid), None)
+            if name:
+                return 200, {"id": sid, "expression": stored(name)}
+            body = created[int(sid.split("-")[1]) - 1]
+            return 200, {"id": sid, "expression": body["expression"]}
         if method == "GET" and url.endswith("/segment/definitions"):
             return 200, {"segments": [{"name": n, "id": seg[n], "expression": stored(n)} for n in existing]}
         if method == "POST" and url.endswith("/segment/conversion"):
@@ -400,6 +407,8 @@ api, session, created, patched = segment_api([defs[0]["name"]])
 check("audiences without apply: one lookup, nothing created",
       not created and counts == {"exists": 1, "created": 0, "missing": len(defs) - 1, "repaired": 0, "outdated": 0}
       and all(c["method"] == "GET" or c["url"].endswith("/segment/conversion") for c in session.calls), counts)
+check("cards: the layout hash is String.hashCode of the stored rule (matches a UI-built audience)",
+      cards.rule_hash("hello") == 99162322 and cards.rule_hash("polygenelubricants") == -2147483648)
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
 check("audiences with apply: only the missing created, on the Profile merge policy, batch-evaluated",
       len(created) == len(defs) - 1 and counts["created"] == len(defs) - 1 and len(ids) == len(defs)
@@ -428,8 +437,42 @@ check("segment job: members read per audience", set(members.values()) == {7} and
 api, session, created, patched = segment_api([d["name"] for d in defs], old_names={defs[2]["name"]})
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
 check("an audience with an old rule is repaired in place (same id), the rest left alone, nothing created",
-      not created and counts["repaired"] == 1 and len(patched) == 1 and patched[0][0] == "seg-2"
-      and patched[0][1][0]["path"] == "/expression" and patched[0][1][0]["value"]["format"] == "pql/json", counts)
+      not created and counts["repaired"] == 1
+      and [p[0] for p in patched if p[1][0]["path"] == "/expression"] == ["seg-2"]
+      and all(p[1][0]["value"]["format"] == "pql/json" for p in patched if p[1][0]["path"] == "/expression"), counts)
+check("apply also gives Rule view cards to the audiences it can lay out, the rest stay code-view only",
+      counts["cards"] == sum(p[1][0]["path"] == "/ansibleDataModel" for p in patched) > 0
+      and counts["cards"] + counts["code_only"] == len(defs), counts)
+
+# --- Rule view cards ---------------------------------------------------------------------
+from ingestion.luma_demo_sandbox import cards  # noqa: E402
+
+m = cards.card_model(audiences.tier("gold", "platinum"), {})
+prof = m["dataModel"]["expression"]["profileAttributesContainer"]["items"]
+check("cards: tier gold-or-platinum is one equals card with both values (as the UI lays it out)",
+      len(prof) == 1 and prof[0]["component"]["id"] == "profile.loyalty.tier"
+      and prof[0]["comparisonType"] == "equals" and prof[0]["value"] == ["gold", "platinum"], prof)
+m = cards.card_model('inSegment("p-1") and homeAddress.state.equals("CA", false)', {"p-1": "Luma: All Buyers"})
+prof = m["dataModel"]["expression"]["profileAttributesContainer"]["items"]
+check("cards: a child is its parent's membership card and its condition",
+      [r["component"]["id"] for r in prof] == ["profile.segmentMembership.segmentID._id", "profile.homeAddress.state"]
+      and prof[0]["value"]["name"] == "Luma: All Buyers" and prof[1]["value"] == ["CA"], prof)
+m = cards.card_model(audiences.has(audiences.WEB_BUY, audiences.within(30)), {})
+ev = m["dataModel"]["expression"]["xEventAttributesContainer"]
+check("cards: one event with an in-last-30-days window",
+      ev["temporalConstraint"] == {"type": "in-last", "unit": "days", "subType": "in-last-constraint", "quantity": 30}
+      and ev["items"][0]["items"][0]["container"]["items"][0]["component"]["id"] == "xEvent.eventType", ev)
+m = cards.card_model(next(d["pql"] for d in defs if d["name"] == "Luma: Interested in Gear, Never Bought It"), {})
+ev = m["dataModel"]["expression"]["xEventAttributesContainer"]
+check("cards: an excluded event is its own card with exclude on, beside the included one",
+      [c["exclude"] for c in ev["items"]] == [False, True] and ev["logicalOperator"] == "and", ev)
+check("cards: product SKU starts-with is a rule on the list item",
+      '"xEvent.productListItems.SKU"' in json.dumps(m) and '"startsWith"' in json.dumps(m))
+check("cards: exists is the UI's isNotNull",
+      cards.card_model("personalEmail.address.isNotNull()", {})["dataModel"]["expression"]
+      ["profileAttributesContainer"]["items"][0]["comparisonType"] == "isNotNull")
+check("cards: a window the UI can't show (more than N days ago) stays code-view only",
+      cards.card_model(next(d["pql"] for d in defs if d["name"] == "Luma: New Customers - Last 14 Days"), {}) is None)
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -179,6 +179,15 @@ uses from that form. An audience whose stored rule differs from the tool's (olde
 or still text) is repaired in place with `--apply`. Its id stays the same, so children
 and activations keep pointing at it.
 
+The UI's Rule view also needs the rule builder's card layout (`ansibleDataModel`) stored
+on the audience. Without it the UI says the audience "can't be updated in the rule builder".
+`--apply` writes one for every audience it can lay out (`luma_demo_sandbox/cards.py`):
+profile fields, audience membership, events with an "in last N" window, excluded events,
+groups and product-list fields. The layout's `hash` is the String.hashCode of the stored
+`pql/json` rule; the UI only trusts a layout whose hash matches. A layout last edited by a
+person in the UI is left alone. A rule with a window the UI can't show (e.g. "more than
+14 days ago") stays Code-view only.
+
 Without `--apply` it lists what exists and what is missing. With `--apply` it creates the
 missing ones, then runs one batch segment job and prints each audience's members, so the
 counts are there without waiting for the nightly run. `--no-evaluate` skips the job.
