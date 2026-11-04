@@ -141,7 +141,7 @@ One workbook: `output/aep-user-logs/external_access_audit_<date>.xlsx`
 | **All accounts** | Every account, with usage and a verdict |
 | **Purge list** | Entitled, no usage found — the removal list |
 | **External accounts** | Everything outside the corporate domain |
-| **Profiles** | What grants access, and how many hold each |
+| **Profiles** | What grants access, how many hold each, and each group's Admin Console description |
 | **Tech accounts** | Service / API integrations by volume — not people |
 
 ### The verdicts

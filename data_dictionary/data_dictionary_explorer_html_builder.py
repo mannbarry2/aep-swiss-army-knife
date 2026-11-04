@@ -46,7 +46,7 @@ from data_dictionary import dictionary_colours as colours  # noqa: E402  -- the 
 from toolkit_internals import output_paths  # noqa: E402  -- one folder per client
 
 SCRIPT_NAME = "data_dictionary_explorer_html_builder"
-SCRIPT_VERSION = "0.3.0"
+SCRIPT_VERSION = "0.4.0"
 SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -137,6 +137,7 @@ def read_workbook(path: Path) -> dict:
     audiences = _table(wb["Audiences"], "Sandbox") if "Audiences" in wb.sheetnames else []
     lineage = {n: _table(wb[n], "Sandbox") if n in wb.sheetnames else []
                for n in ("Sources", "Journeys", "Destinations")}
+    times = _table(wb["System Times"], "Sandbox") if "System Times" in wb.sheetnames else []
     tabs = {}
     for s in schemas:
         tab = s.get("Tab")
@@ -144,7 +145,7 @@ def read_workbook(path: Path) -> dict:
             tabs[tab] = {r.get("Field (dot notation)"): r for r in _table(wb[tab], "Field (dot notation)")}
     wb.close()
     return {"meta": meta, "schemas": schemas, "datasets": datasets, "fields": fields,
-            "hist": hist, "months": hist_head, "audiences": audiences, "tabs": tabs, **lineage}
+            "hist": hist, "months": hist_head, "audiences": audiences, "tabs": tabs, "times": times, **lineage}
 
 
 def read_pql(path: Path | None) -> dict:
@@ -300,7 +301,8 @@ def build_model(wbk: dict, pql: dict, workbook_name: str, label: str = "") -> di
                      "gaps": meta["gaps"], "built": datetime.now().strftime("%Y-%m-%d %H:%M"),
                      "builder": f"{SCRIPT_NAME} v{SCRIPT_VERSION}"},
             "schemas": schemas, "datasets": datasets, "fields": fields, "audiences": audiences,
-            "journeys": journeys, "destinations": destinations, "sources": sources}
+            "journeys": journeys, "destinations": destinations, "sources": sources,
+            "times": wbk.get("times") or []}
 
 
 def palette_css() -> str:
@@ -533,7 +535,7 @@ path.e{fill:none;stroke:var(--edge);stroke-width:1.4} path.e.hot{stroke:var(--ed
   <a class="brand" href="#/">Data Dictionary Explorer<span class="ver" id="ver"></span><span class="proto">PROTOTYPE</span><small id="brand-sub"></small></a>
   <div class="searchwrap" id="topsearch"></div>
   <nav class="main" id="nav">
-    <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/help">Help</a>
+    <a href="#/">Home</a><a href="#/fields">Fields</a><a href="#/schemas">Schemas</a><a href="#/datasets">Datasets</a><a href="#/audiences">Audiences</a><a href="#/journeys">Journeys</a><a href="#/sources">Sources</a><a href="#/times">System times</a><a href="#/help">Help</a>
   </nav>
   <button id="aa" hidden title="Adobe Analytics report-suite data: in the workbook, hidden here by default">AA hidden</button>
   <button id="theme" title="Theme: auto (click for light, dark, auto)">◐</button>
@@ -1266,6 +1268,15 @@ function pageSources() {
   return listPage("Sources", `Every dataflow that brings data into a dataset. ${HAS_LINEAGE ? "Pick a kind to narrow it down." : NOT_IN}${aaNote("feeds")}`,
     "t-sources", srcCols(), showRows("r", D.sources), [{label: "Live", test: r => r.live}, {label: "Into Profile", test: r => r.profile}, ...chips], {sort: 3, dir: -1});
 }
+function pageTimes() {
+  const col = (label, key) => ({label, v: r => (r[key] || "").toString().toLowerCase(), html: r => h(r[key] == null ? "" : r[key])});
+  const cols = [col("Sandbox", "Sandbox"), col("Area", "Area"), col("What", "What"), col("When (UTC)", "When (UTC)"),
+                col("How often", "How often"), col("Last ran (UTC)", "Last ran (UTC)"), col("What it means", "What it means")];
+  const areas = [...new Set(D.times.map(r => r.Area))].map(a => ({label: a, test: r => r.Area === a}));
+  const lede = D.times.length ? "When each sandbox evaluates its audiences, writes its snapshots and refreshes its counts, and what runs on a timer. All times are UTC."
+    : "Not in this workbook: rerun the Data Dictionary to get them.";
+  return listPage("System times", lede, "t-times", cols, D.times.map(r => ({...r, name: `${r.Sandbox} ${r.Area} ${r.What}`})), areas, {});
+}
 function pageJourney(i) {
   const x = D.journeys[i];
   return `<div class="crumb"><a href="#/journeys">Journeys</a> › ${h(x.id || "")}</div>
@@ -1342,6 +1353,7 @@ function route() {
   else if (kind === "destination") { html = by.destination[key] !== undefined ? pageDestination(by.destination[key]) : miss("destination"); nav = "journeys"; }
   else if (kind === "journeys") html = pageJourneys();
   else if (kind === "sources") html = pageSources();
+  else if (kind === "times") html = pageTimes();
   else if (kind === "destinations") { html = pageDestinations(); nav = "journeys"; }
   else if (kind === "fields") html = pageFields();
   else if (kind === "schemas") html = pageSchemas();

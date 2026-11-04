@@ -20,8 +20,8 @@ says plainly which it could not establish.
 
 SCOPE -- the AEP umbrella only
 ------------------------------
-Experience Platform / RTCDP, Customer Journey Analytics, Journey Optimizer,
-Data Collection and Privacy Service. Workfront, Analytics, Creative Cloud and
+Experience Platform / RTCDP and Journey Optimizer. Customer Journey Analytics,
+Data Collection, Privacy Service, Workfront, Analytics, Creative Cloud and
 Acrobat are deliberately OUT of scope: they are somebody else's estate. They
 are still counted on the Summary tab, so you can see they were considered and
 set aside rather than missed.
@@ -32,8 +32,8 @@ HONEST LIMITS, stated on the Summary tab of every run
     activity" therefore means "none in the last 90 days", never "never".
   * A sandbox the credential cannot read is listed as UNREADABLE, not as
     clean. Silence from a door you could not open is not an all-clear.
-  * CJA keeps its OWN audit trail, which this does not read. A CJA-only user
-    can show entitlement here with no activity and still be active in CJA.
+  * CJA is out of scope and keeps its OWN audit trail, which this does not
+    read. CJA-only users and CJA groups are not listed as entitled here.
   * Product profiles are read as a user's DIRECT memberships. Access inherited
     by nesting a user group inside a profile is not resolved, so the entitled
     count is a floor.
@@ -43,7 +43,8 @@ Output: ONE workbook, output/aep-user-logs/external_access_audit_<YYYYMMDD>.xlsx
   External users   every account on a non-corporate domain, entitlement + use
   AEP access       every account entitled to anything under the AEP umbrella
   System admins    everyone with the Admin Console System Administrator role
-  Profiles         the AEP product profiles and how many hold each
+  Profiles         the AEP product profiles and AD groups, how many hold each,
+                   and each group's Admin Console description
   Tech accounts    @techacct.adobe.com service accounts by audit volume
 
 READ-ONLY, AND ENFORCED
@@ -85,7 +86,7 @@ from toolkit_internals import credential_loader
 from platform_access_and_audit import user_activity_log_from_audit_events as ul
 
 SCRIPT_NAME = "external_access_entitlement_and_usage_audit"
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.2.0"
 SCRIPT_DATE = "2026-11-04"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
@@ -306,6 +307,43 @@ def _um_paged(token: str, conf: dict, kind: str, key: str) -> list:
             break
         page += 1
     return out
+
+
+def fetch_group_descriptions(token: str, conf: dict) -> dict | None:
+    """{user group name: description}, or None if the route could not be read.
+
+    Only /user-groups carries a description; the /groups route _um_paged reads
+    does not, so a group missing from there proves nothing. A blank description
+    is a missing key, and a page past the end repeats the last one, so this
+    stops on a page with nothing new rather than on an empty page. User groups
+    only: product profiles are not in this list.
+    """
+    out, seen = {}, set()
+    try:
+        for page in range(100):
+            url = f"{USER_MGMT}/{conf['org_id']}/user-groups?page={page}&page_size=200"
+            rows = json.loads(ul.http(url, headers=_um_headers(token, conf), timeout=90)) or []
+            fresh = [g for g in rows if g.get("id") not in seen]
+            if not fresh:
+                break
+            seen |= {g.get("id") for g in fresh}
+            for g in fresh:
+                out[g.get("name") or ""] = (g.get("description") or "").strip()
+    except Exception as e:
+        logger.warning(f"Could not read group descriptions: {e}")
+        return None
+    logger.info(f"  {sum(1 for d in out.values() if d)} of {len(out)} user group(s) "
+                f"have a description.")
+    return out
+
+
+def group_description(group: dict, descriptions: dict) -> str:
+    """A group's own text, or its parent's for an _admin_ group, which has none."""
+    own = descriptions.get(group.get("groupName"))
+    if own:
+        return own
+    parent = descriptions.get(group.get("userGroupName"))
+    return f"Admins of: {parent}" if parent else ""
 
 
 def fetch_roster(token: str, conf: dict) -> tuple[list, list]:
@@ -969,26 +1007,30 @@ def write_xlsx(data: dict, path: Path) -> Path:
     # many outsiders hold each. The external column is the one to read: a
     # profile with outside members is where a third party got in.
     cols = ["Profile / AD group", "Adobe product", "Type", "Members (org)",
-            "Members on external domains"]
+            "Members on external domains", "Description"]
     ws = sheet("Profiles", "What grants AEP access",
                "Every product profile or Active Directory group that confers "
-               "Experience Platform, CJA or Journey Optimizer access, with "
-               "how many people hold it. Most access here comes via the "
-               "GG-*-AdobeAEP-* AD groups rather than Adobe product profiles, "
-               "which is why they are listed alongside. Sorted by external "
-               "members first.", cols)
+               "Experience Platform or Journey Optimizer access, with how many "
+               "people hold it. CJA groups are out of scope and not listed. "
+               "Most access here comes via the GG-*-AdobeAEP-* AD groups rather "
+               "than Adobe product profiles, which is why they are listed "
+               "alongside. Description is the group's text in the Admin Console, "
+               "or its parent group's for the _admin_ groups; blank means none, "
+               "and Adobe's list has no descriptions for product profiles. "
+               "Sorted by external members first.", cols)
     rr = 6
     for pr in data["profiles"]:
         for c, v in enumerate([pr["name"], pr["product"] or "(AD group - no "
                                "Adobe product)", pr["type"] or "USER_GROUP",
-                               pr["members"], pr["external"]], 1):
+                               pr["members"], pr["external"],
+                               pr["description"]], 1):
             cell = ws.cell(rr, c, v)
             if c in (4, 5):
                 cell.alignment = centre
             if c == 5 and v:
                 cell.font = red
         rr += 1
-    fit(ws, 5, caps={1: 50, 2: 46})
+    fit(ws, 5, caps={1: 50, 2: 46, 6: 70})
 
     # ---- Technical accounts: usage AND permissions, busiest first ---------
     cols = ["Technical account", "Project", "Client id (last 4)", "What it is",
@@ -1291,10 +1333,13 @@ def main():
             if p["email"] in ext_emails:
                 prof_ext[g] += 1
     gmeta = {g.get("groupName"): g for g in groups}
+    descriptions = fetch_group_descriptions(token, conf)
     profiles = [{"name": n,
                  "product": (gmeta.get(n, {}) or {}).get("productName") or "",
                  "type": (gmeta.get(n, {}) or {}).get("type") or "",
-                 "members": prof_members[n], "external": prof_ext[n]}
+                 "members": prof_members[n], "external": prof_ext[n],
+                 "description": "(could not be read)" if descriptions is None
+                 else group_description(gmeta.get(n, {}), descriptions)}
                 for n in sorted(prof_members, key=lambda x: (-prof_ext[x],
                                                              -prof_members[x],
                                                              x.lower()))]
@@ -1321,7 +1366,7 @@ def main():
         (f"Used AEP in the last {opts.days} days", len(active),
          "accounts with at least one recorded audit event"),
         ("Entitled to AEP", len(aep_users),
-         "can reach AEP / CJA / AJO / Data Collection / Privacy Service"),
+         "can reach Experience Platform or Journey Optimizer"),
         ("PURGE: entitled, no usage found", len(purge),
          "every READABLE sandbox answered and found nothing"),
         ("UNKNOWN: entitled, could not check", len(unknown),
@@ -1338,8 +1383,8 @@ def main():
         ("Sandboxes that could NOT be read: "
          + (", ".join(sorted(set(unreadable))) if unreadable else "none")
          + ". A sandbox that refused us is not an all-clear."),
-        "CJA keeps its own audit trail, which this does not read. A CJA-only "
-        "user can show zero usage here and still be active in CJA.",
+        "CJA is out of scope and keeps its own audit trail, which this does "
+        "not read. CJA-only users and CJA groups are not listed as entitled.",
         "Product profiles are read as DIRECT memberships; access inherited via "
         "a nested user group is not resolved, so entitled counts are a floor.",
         ("Sandboxes swept: " + (", ".join(sandboxes) if sandboxes else "none")),

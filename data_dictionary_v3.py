@@ -87,6 +87,12 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.27 -- System Times tab: every clock that matters, per sandbox. System
+evaluation, snapshot exports, when the member counts were last refreshed, the
+estimator's sample, scheduled SQL and dataflows on a timer, in plain UTC times
+with what each one means. Adobe's internal jobs are listed last. The same
+table is a page in the Explorer.
+
 v3.4.26 -- One folder per client. When config.json lists the org under
 "output_by_client", the workbook goes to <client>/data_dictionary, the PQL
 sidecar to <client>/pql and everything older to <client>/archive (see
@@ -393,13 +399,14 @@ from house_xlsx import Book
 from data_dictionary import audience_rule_reader      # which fields / audiences a rule reads
 from data_dictionary import lineage_sources_journeys_and_destinations as lineage  # sources in, journeys + destinations out
 from data_dictionary import dictionary_colours as colours   # one colour scheme with the Explorer
+from data_dictionary import system_times
 
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.26"
-SCRIPT_DATE    = "2026-11-03"
+SCRIPT_VERSION = "3.4.27"
+SCRIPT_DATE    = "2026-11-04"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
 AUTHOR_LINKEDIN = "https://www.linkedin.com/in/barrymann/"
@@ -3251,6 +3258,7 @@ def attach_lineage(token, conf, res, caches):
         fs = lineage.read_flow_service(get_json)
         res["sources"] = lineage.read_sources(fs)
         res["destinations"] = lineage.read_destinations(get_json, fs)
+        res["scheduled_flows"] = system_times.scheduled_flows(fs)
     except Exception as e:
         res["lineage_errors"].append(f"dataflows: {type(e).__name__}: {e}")
     try:
@@ -3387,6 +3395,48 @@ def _archive_previous(out_dir: Path, safe_client: str,
             continue
         moved += 1
     return moved
+
+
+def attach_system_times(token, conf, res, snapshot_rows):
+    """res['system_times'] for the System Times tab (v3.4.27). Never fatal."""
+    headers = aep_headers(token, conf, res["name"])
+
+    def get_json(url):
+        body, _ = http(url, headers=headers, timeout=60)
+        return json.loads(body or "{}")
+
+    res["system_times"] = system_times.read(get_json, snapshot_rows, res.get("scheduled_flows"))
+    first = res["system_times"][0] if res["system_times"] else {}
+    logger.info(f"  system times: {len(res['system_times'])} row(s); "
+                f"{first.get('What', 'nothing read')} {first.get('When (UTC)', '')}".rstrip())
+
+
+def system_times_tab(wb, results, label, confidential, style_header, autofit, title_font):
+    """Every clock that matters, one block per sandbox (v3.4.27)."""
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+    rows = [[res["title"]] + [r.get(c, "") for c in system_times.COLUMNS[1:]]
+            for res in results for r in res.get("system_times") or []]
+    if not rows:
+        return
+    ws = wb.create_sheet("System Times")
+    confidential(ws)
+    ws["A2"] = f"System Times: when things happen – {label}"
+    ws["A2"].font = title_font
+    ws["A3"] = ("When each sandbox evaluates its audiences, writes its snapshots and refreshes its counts, "
+                "and what runs on a timer. All times are UTC, as Adobe stores them; UK time is an hour "
+                "later in summer. 'Adobe schedule' is the setting exactly as Adobe holds it.")
+    ws["A3"].font = Font(italic=True, color="666666")
+    hr = 5
+    for c, nm in enumerate(system_times.COLUMNS, 1):
+        ws.cell(hr, c, nm)
+    style_header(ws, len(system_times.COLUMNS), row=hr)
+    for r, row in enumerate(rows, hr + 1):
+        for c, val in enumerate(row, 1):
+            ws.cell(r, c, val)
+    autofit(ws, [16, 15, 42, 22, 18, 13, 17, 90, 18])
+    ws.freeze_panes = ws.cell(hr + 1, 1).coordinate
+    ws.auto_filter.ref = f"A{hr}:{get_column_letter(len(system_times.COLUMNS))}{hr + len(rows)}"
 
 
 def lineage_tabs(wb, results, label, confidential, style_header, autofit, title_font):
@@ -3824,6 +3874,11 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
          "running total against the Addressable Audience licence. The full report "
          "is every combination of datasets a profile is built from, largest first "
          "-- a sudden new combination is a new route in."),
+        ("...know when things happen in a sandbox",
+         "System Times",
+         "When each sandbox evaluates its audiences, writes its snapshots and "
+         "refreshes its counts, how old the estimator's sample is, and what runs "
+         "on a timer. All times UTC."),
         ("...know how fresh the snapshot is",
          "Snapshot Summary",
          "Per sandbox: when the system evaluation is scheduled, when it last "
@@ -4358,6 +4413,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
 
     # ---- Lineage tabs (v3.4.23): where data comes from, where audiences go --
     lineage_tabs(wb, results, label, confidential, style_header, autofit, title_font)
+    system_times_tab(wb, results, label, confidential, style_header, autofit, title_font)
 
     # ---- Snapshot tabs: which snapshot table to query, and how fresh it is ---
     # Folded in from snapshot_tables.py, which owns the layout -- the tabs here
@@ -5600,6 +5656,7 @@ def run(service: str, sandbox_arg: str | None,
             continue
         attach_audiences(token, conf, res, aud_caches)
         attach_lineage(token, conf, res, aud_caches)
+        attach_system_times(token, conf, res, got)
         print_sandbox(res)
         results.append(res)
 
