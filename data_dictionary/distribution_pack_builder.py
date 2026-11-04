@@ -13,6 +13,7 @@ Reads only the Data Dictionary's own output; makes no Adobe calls.
 Usage:
     python data_dictionary/distribution_pack_builder.py
     python data_dictionary/distribution_pack_builder.py --markets=prod:UK,roi-prod:ROI,hu-prod:HU
+    python data_dictionary/distribution_pack_builder.py --client=<client>   # that client's folders
 Each market is <sandbox>:<name people know it by>. The newest workbook for each
 in AEP_OUTPUT_DIR/data_dictionary (else output/data_dictionary) is used; every
 workbook must be the same Data Dictionary version. The zip is written to
@@ -35,10 +36,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from data_dictionary import data_dictionary_explorer_html_builder as explorer  # noqa: E402
+from toolkit_internals import output_paths  # noqa: E402
 
 SCRIPT_NAME = "distribution_pack_builder"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-10-27"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 DEFAULT_MARKETS = "prod:UK,roi-prod:ROI"
 
@@ -105,7 +107,15 @@ def main():
     if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
         print(__doc__)
         return
-    folder = Path(os.environ.get("AEP_OUTPUT_DIR") or REPO / "output") / "data_dictionary"
+    # --client= reads that client's folders (toolkit_internals/output_paths.py);
+    # without it, the old flat output/data_dictionary.
+    client = opt("client")
+    if client:
+        folder = output_paths.client_root(client) / "data_dictionary"
+        pql_dir, out_root = output_paths.client_root(client) / "pql", output_paths.client_root(client)
+    else:
+        folder = Path(os.environ.get("AEP_OUTPUT_DIR") or REPO / "output") / "data_dictionary"
+        pql_dir, out_root = folder / "pql", folder
     markets = []
     for item in (opt("markets", DEFAULT_MARKETS) or "").split(","):
         sb, _, name = item.partition(":")
@@ -121,7 +131,7 @@ def main():
         for m in markets:
             stem = m["path"].stem
             date = stem.rsplit(" - ", 1)[-1]
-            pql = folder / "pql" / f"audiences_pql_{m['sandbox']}_{date.replace('-', '')}.jsonl"
+            pql = pql_dir / f"audiences_pql_{m['sandbox']}_{date.replace('-', '')}.jsonl"
             model = explorer.build_model(explorer.read_workbook(m["path"]), explorer.read_pql(pql), m["path"].name, m["name"])
             models.append((m, model, date))
         versions = {model["meta"]["version"] for _, model, _ in models}
@@ -142,7 +152,7 @@ def main():
             listed.append({"name": m["name"], "read": read, "explorer": ex_name, "workbook": wb_name})
             print(f"  {m['name']:<5} {m['path'].name}  ->  {ex_name}")
         (root / "READ ME FIRST.html").write_text(read_me(version, built, listed), encoding="utf-8")
-        out_dir = folder / "distribution"
+        out_dir = out_root / "distribution"
         out_dir.mkdir(parents=True, exist_ok=True)
         zip_path = out_dir / f"{top}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:

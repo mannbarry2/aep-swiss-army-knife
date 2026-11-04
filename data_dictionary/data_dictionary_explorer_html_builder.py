@@ -21,10 +21,13 @@ Stdlib + openpyxl only.
 
 Usage:
     python data_dictionary/data_dictionary_explorer_html_builder.py --sandbox=roi-prod
+    python data_dictionary/data_dictionary_explorer_html_builder.py --sandbox=prod --client=<client>
     python data_dictionary/data_dictionary_explorer_html_builder.py --workbook="...xlsx" [--pql="...jsonl"] [--out="...html"]
-The newest "Data Dictionary - <sandbox> - *.xlsx" in AEP_OUTPUT_DIR/data_dictionary
-(else output/data_dictionary) is used; the page is written next to it as
-"Data Dictionary Explorer - <sandbox> - <date>.html".
+The newest "Data Dictionary - <sandbox> - *.xlsx" in any client's data_dictionary
+folder is used (toolkit_internals/output_paths.py); --client= picks one when two
+clients have the sandbox. In a client folder the page goes to
+<client>/data_dictionary_explorer/, older pages to <client>/archive/; in the old
+flat folder it is written next to the workbook.
 """
 
 from __future__ import annotations
@@ -40,10 +43,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from data_dictionary import dictionary_colours as colours  # noqa: E402  -- the workbook's colours
+from toolkit_internals import output_paths  # noqa: E402  -- one folder per client
 
 SCRIPT_NAME = "data_dictionary_explorer_html_builder"
-SCRIPT_VERSION = "0.2.0"
-SCRIPT_DATE = "2026-10-26"
+SCRIPT_VERSION = "0.3.0"
+SCRIPT_DATE = "2026-11-03"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 RAW_PQL_MAX = 60_000        # characters of raw rule kept per audience (the rest is in the PQL file)
@@ -324,22 +328,54 @@ def render_html(model: dict) -> str:
                 .replace("/*{{DATA}}*/", data))
 
 
+def archive_previous(folder: Path, sandbox: str, archive: Path) -> None:
+    """Older Explorer pages for this sandbox go to the archive, so the folder
+    holds only the newest. A page open in a browser still moves on Windows."""
+    for old in folder.glob(f"Data Dictionary Explorer - {sandbox} - *.html"):
+        archive.mkdir(parents=True, exist_ok=True)
+        dest, i = archive / old.name, 2
+        while dest.exists():
+            dest = archive / f"{old.stem} ({i}){old.suffix}"
+            i += 1
+        try:
+            old.rename(dest)
+        except OSError as e:
+            print(f"could not archive {old.name} ({e.__class__.__name__}); left where it is")
+
+
 def main():
     if "-h" in sys.argv[1:] or "--help" in sys.argv[1:] or not (opt("sandbox") or opt("workbook")):
         print(__doc__)
         return
-    out_dir = Path(os.environ.get("AEP_OUTPUT_DIR") or REPO / "output") / "data_dictionary"
-    sandbox = opt("sandbox")
-    wb_path = Path(opt("workbook")) if opt("workbook") else max(
-        out_dir.glob(f"Data Dictionary - {sandbox} - *.xlsx"), key=lambda p: p.stat().st_mtime, default=None)
+    sandbox, client = opt("sandbox"), opt("client")
+    if opt("workbook"):
+        wb_path = Path(opt("workbook"))
+    else:
+        # Every client's data_dictionary folder (toolkit_internals/output_paths.py);
+        # the same sandbox name in two clients needs --client.
+        found = [(name, p) for name, folder in output_paths.all_folders("data_dictionary")
+                 if not client or name == client
+                 for p in folder.glob(f"Data Dictionary - {sandbox} - *.xlsx")]
+        owners = sorted({name or "(no client)" for name, _ in found})
+        if len(owners) > 1:
+            sys.exit(f"'{sandbox}' has workbooks for {', '.join(owners)} -- pass --client=<name>.")
+        wb_path = max((p for _, p in found), key=lambda p: p.stat().st_mtime, default=None)
     if not wb_path or not wb_path.exists():
-        sys.exit(f"No Data Dictionary workbook for {sandbox} in {out_dir} -- run the Data Dictionary first.")
-    m = re.match(r"Data Dictionary - (.+) - (\d{4}-\d{2}-\d{2})", wb_path.stem)
+        sys.exit(f"No Data Dictionary workbook for {sandbox} -- run the Data Dictionary first.")
+    m = re.match(r"Data Dictionary - (.+?) - (\d{4}-\d{2}-\d{2})", wb_path.stem)
     sandbox = sandbox or (m.group(1) if m else "")
+    # A client folder has data_dictionary/, pql/, data_dictionary_explorer/ and
+    # archive/ side by side; the old flat folder keeps pql/ and archive/ inside.
+    split = wb_path.parent.name == "data_dictionary" and (wb_path.parent.parent / "pql").is_dir()
+    base = wb_path.parent.parent if split else wb_path.parent
     pql_path = Path(opt("pql")) if opt("pql") else (
-        wb_path.parent / "pql" / f"audiences_pql_{sandbox}_{m.group(2).replace('-', '')}.jsonl" if m else None)
-    out = Path(opt("out")) if opt("out") else wb_path.with_name(
-        wb_path.name.replace("Data Dictionary - ", "Data Dictionary Explorer - ", 1)).with_suffix(".html")
+        base / "pql" / f"audiences_pql_{sandbox}_{m.group(2).replace('-', '')}.jsonl" if m else None)
+    out_dir = base / "data_dictionary_explorer" if split else wb_path.parent
+    out = Path(opt("out")) if opt("out") else out_dir / wb_path.name.replace(
+        "Data Dictionary - ", "Data Dictionary Explorer - ", 1).replace(".xlsx", ".html")
+    if not opt("out"):
+        archive_previous(out_dir, sandbox, base / "archive")
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"{SCRIPT_NAME} v{SCRIPT_VERSION} ({SCRIPT_DATE})  by {SCRIPT_AUTHOR}")
     print(f"workbook {wb_path.name}  |  PQL {pql_path.name if pql_path and pql_path.exists() else '(none)'}")

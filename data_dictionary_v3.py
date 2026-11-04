@@ -87,6 +87,11 @@ v3.2 -- Two things ship under this label:
     if its (huge) file manifest 504s under load, the failure is cached so the
     other Profile schemas fail fast instead of each re-hitting the dead snapshot.
 
+v3.4.26 -- One folder per client. When config.json lists the org under
+"output_by_client", the workbook goes to <client>/data_dictionary, the PQL
+sidecar to <client>/pql and everything older to <client>/archive (see
+toolkit_internals/output_paths.py). Other orgs keep the flat layout.
+
 v3.4.25 -- Every table row is 14 high: one line per row on every tab, the
 full text still in the cell. Headers and the notes above a table keep their
 heights.
@@ -393,7 +398,7 @@ from data_dictionary import dictionary_colours as colours   # one colour scheme 
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_NAME    = "data_dictionary_v3"
-SCRIPT_VERSION = "3.4.25"
+SCRIPT_VERSION = "3.4.26"
 SCRIPT_DATE    = "2026-11-03"
 SCRIPT_AUTHOR  = "Barry Mann (barrymann.com)"
 AUTHOR_SITE     = "https://barrymann.com"
@@ -410,6 +415,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # shared with every other tool in the repo and this is the file that matters.
 OUTPUT_DIR = Path(os.environ.get("AEP_OUTPUT_DIR") or SCRIPT_DIR / "output") / "data_dictionary"
 PQL_DIR = OUTPUT_DIR / "pql"          # full-PQL sidecars, one per sandbox per run
+ARCHIVE_DIR = OUTPUT_DIR / "archive"  # every older workbook and sidecar
+
+
+def _use_client_folders(org_id: str) -> None:
+    """Point the output at this org's client folder (v3.4.26) when config.json
+    lists the client (toolkit_internals/output_paths.py); else the flat layout."""
+    global OUTPUT_DIR, PQL_DIR, ARCHIVE_DIR
+    from toolkit_internals import output_paths
+    OUTPUT_DIR = output_paths.folder(org_id, "data_dictionary")
+    PQL_DIR = output_paths.folder(org_id, "pql")
+    ARCHIVE_DIR = output_paths.folder(org_id, "archive")
+    client = output_paths.client_for(org_id)
+    if client:
+        logger.info(f"Output for client '{client}': {OUTPUT_DIR.parent}")
 
 IMS_URL = "https://ims-na1.adobelogin.com/ims/token"
 PLATFORM = "https://platform.adobe.io"
@@ -3341,15 +3360,15 @@ def provenance_line(prov: dict) -> str:
 def _archive_previous(out_dir: Path, safe_client: str,
                       kind: str = "dictionary") -> int:
     """Move any prior dictionary for this client (or, kind='sidecar', any prior
-    audiences_pql sidecar for this sandbox) into out_dir/archive/ so the output
+    audiences_pql sidecar for this sandbox) into ARCHIVE_DIR so the output
     folder only ever holds the newest. Returns how many were moved."""
     pattern = (f"audiences_pql_{safe_client}_*.jsonl" if kind == "sidecar"
                else f"Data Dictionary - {safe_client} - *.xlsx")
     prev = sorted(out_dir.glob(pattern))
     if not prev:
         return 0
-    arch = out_dir / "archive"
-    arch.mkdir(exist_ok=True)
+    arch = ARCHIVE_DIR
+    arch.mkdir(parents=True, exist_ok=True)
     moved = 0
     for p in prev:
         dest = arch / p.name
@@ -4480,7 +4499,7 @@ def write_xlsx(results, client: str, datestr: str, snapshots=None, overlaps=None
     archived = _archive_previous(OUTPUT_DIR, safe_client)
     if archived:
         logger.info(f"Archived {archived} previous dictionary file(s) -> "
-                    f"{OUTPUT_DIR / 'archive'}")
+                    f"{ARCHIVE_DIR}")
     # The full-PQL sidecar travels with the workbook: written beside it, and
     # any earlier one for the same sandbox archived with the old dictionary.
     for res in results:
@@ -5513,6 +5532,7 @@ def run(service: str, sandbox_arg: str | None,
         return
     token = resp["access_token"]
     logger.info(f"IMS authenticated (org {conf['org_id']}).")
+    _use_client_folders(conf["org_id"])
 
     ok, result = list_sandboxes(token, conf)
     if not ok:

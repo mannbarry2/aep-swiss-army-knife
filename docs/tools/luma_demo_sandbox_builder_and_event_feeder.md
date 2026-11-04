@@ -170,9 +170,14 @@ An in-store purchase is an event carrying a loyalty id; a web purchase is
 `eventType = commerce.purchases`. Web and in-store people join through the identity graph
 (the loyalty file links loyalty ids to CRM ids).
 
-The rules are written as PQL text but stored as `pql/json`, converted by Adobe's
-conversion endpoint, the way the UI stores them. The Data Dictionary reads the fields an
-audience uses from that form. An audience still stored as text is converted in place.
+Event rules are written in the rule builder's own form,
+`CHAIN(xEvent, timestamp, [C0: WHAT(...) WHEN(...)])`, so the UI's Rule view can open and
+edit them. Rules in `select X from xEvent` form are code-view only, and Adobe refuses them
+for streaming. The rules are stored as `pql/json`, converted by Adobe's conversion
+endpoint, the way the UI stores them. The Data Dictionary reads the fields an audience
+uses from that form. An audience whose stored rule differs from the tool's (older form,
+or still text) is repaired in place with `--apply`. Its id stays the same, so children
+and activations keep pointing at it.
 
 Without `--apply` it lists what exists and what is missing. With `--apply` it creates the
 missing ones, then runs one batch segment job and prints each audience's members, so the

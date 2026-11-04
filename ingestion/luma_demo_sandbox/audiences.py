@@ -8,10 +8,13 @@ lapsed / repeat-buyer audiences yet.
 {T} is the tenant field prefix (_<tenant id>). Looked up by name first, so
 running it twice creates nothing the second time. Without apply it only reads.
 
-Rules are written here as PQL text but stored as pql/json (Adobe's conversion
-endpoint), the way the UI stores them: the Data Dictionary reads the fields an
-audience uses from that tree. An existing audience still stored as text is
-converted in place (same rule).
+Rules are written in the rule builder's own form (CHAIN(xEvent, timestamp,
+[C0: WHAT(...) WHEN(...)]) for events), so the UI's Rule view can open and edit
+them; "select X from xEvent" rules are code-view only and never stream. They
+are stored as pql/json (Adobe's conversion endpoint), the way the UI stores
+them: the Data Dictionary reads the fields an audience uses from that tree. An
+existing audience whose stored rule differs from the one here is repaired in
+place (same id, so children and activations keep pointing at it).
 
 STREAMING audiences are evaluated as each event arrives (continuous
 evaluation), so they fill from feed's streamed events within minutes. Adobe
@@ -24,6 +27,7 @@ whose id goes into the rule.
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable
 
@@ -41,89 +45,98 @@ NEEDS_EDGE = "NEBULA-100042"
 
 Log = Callable[[str], None]
 
-# Event building blocks (X is one event).
-WEB_BUY = 'X.eventType.equals("commerce.purchases", false)'
-POS_BUY = "X.{T}.systemIdentifier.loyaltyId.isNotNull()"   # only offline purchases carry it
+# Event building blocks: conditions on one event, inside CHAIN's WHAT(...).
+WEB_BUY = 'eventType.equals("commerce.purchases", false)'
+POS_BUY = "{T}.systemIdentifier.loyaltyId.isNotNull()"   # only offline purchases carry it
 ANY_BUY = f"({WEB_BUY} or {POS_BUY})"
-VIEW = 'X.eventType.equals("commerce.productViews", false)'
-SAVE = 'X.eventType.equals("commerce.saveForLaters", false)'
+VIEW = 'eventType.equals("commerce.productViews", false)'
+SAVE = 'eventType.equals("commerce.saveForLaters", false)'
 BROWSE = f"({VIEW} or {SAVE})"
 # SKU prefixes in the Luma catalogue: LLM men's, LLW women's, 24- gear.
 CATEGORY = {"Gear": "24-", "Men's Apparel": "LLM", "Women's Apparel": "LLW"}
 
 
-def has(cond: str) -> str:
-    return f"(select X from xEvent where {cond})"
+def has(cond: str, when: str = "") -> str:
+    """An event rule in the rule builder's own form, so the UI can open and edit it."""
+    return f"CHAIN(xEvent, timestamp, [C0: WHAT({cond}){f' WHEN({when})' if when else ''}])"
+
+
+def never(cond: str, when: str = "") -> str:
+    return f"not({has(cond, when)})"
 
 
 def within(days: int) -> str:
-    return f"X.timestamp occurs <= {days} days before now"
+    return f"<= {days} days before now"
 
 
 def within_hours(hours: int) -> str:
-    return f"X.timestamp occurs <= {hours} hours before now"
+    return f"<= {hours} hours before now"
 
 
 def sku(prefix: str) -> str:
-    return f'X.productListItems.exists(SKU.startsWith("{prefix}", false))'
+    return f'productListItems.exists(SKU.startsWith("{prefix}", false))'
+
+
+def tier(*names: str) -> str:
+    return "(" + " or ".join(f'loyalty.tier.equals("{n}", false)' for n in names) + ")"
 
 
 AUDIENCES: list[tuple[str, str, str]] = [
     ("All Buyers", "Any purchase, web or in store.", has(ANY_BUY)),
-    ("Web Buyers - Last 30 Days", "A web purchase in the last 30 days.",
-     has(f"{WEB_BUY} and {within(30)}")),
+    ("Web Buyers - Last 30 Days", "A web purchase in the last 30 days.", has(WEB_BUY, within(30))),
     ("In-store Buyers - Last 90 Days", "An in-store (POS) purchase in the last 90 days.",
-     has(f"{POS_BUY} and {within(90)}")),
+     has(POS_BUY, within(90))),
     ("Omnichannel Buyers", "Bought on the web and in store.", f"{has(WEB_BUY)} and {has(POS_BUY)}"),
     ("High-Value In-store Buyers", "An in-store order of $200 or more.",
-     has(f"{POS_BUY} and X.commerce.order.priceTotal >= 200")),
+     has(f"{POS_BUY} and commerce.order.priceTotal >= 200")),
     ("Big Basket", "An in-store order with 3 or more of one item.",
-     has(f"{POS_BUY} and X.productListItems.exists(quantity >= 3)")),
+     has(f"{POS_BUY} and productListItems.exists(quantity >= 3)")),
     ("Browsers, Never Bought", "Viewed a product, never bought anything.",
-     f"{has(VIEW)} and not {has(ANY_BUY)}"),
+     f"{has(VIEW)} and {never(ANY_BUY)}"),
     ("Browsed Last 7 Days, No Purchase", "Viewed a product in the last 7 days, no purchase since.",
-     f"{has(f'{VIEW} and {within(7)}')} and not {has(f'{ANY_BUY} and {within(7)}')}"),
+     f"{has(VIEW, within(7))} and {never(ANY_BUY, within(7))}"),
     ("Save-for-Later, No Purchase 14 Days", "Saved a product for later, no purchase in 14 days.",
-     f"{has(SAVE)} and not {has(f'{ANY_BUY} and {within(14)}')}"),
+     f"{has(SAVE)} and {never(ANY_BUY, within(14))}"),
     *[(f"Interested in {name}, Never Bought It", f"Viewed or saved {name.lower()}, never bought any.",
-       f"{has(f'{BROWSE} and {sku(prefix)}')} and not {has(f'{ANY_BUY} and {sku(prefix)}')}")
+       f"{has(f'{BROWSE} and {sku(prefix)}')} and {never(f'{ANY_BUY} and {sku(prefix)}')}")
       for name, prefix in CATEGORY.items()],
     ("New Customers - Last 14 Days", "First purchase in the last 14 days.",
-     f"{has(f'{ANY_BUY} and {within(14)}')} and not {has(f'{ANY_BUY} and X.timestamp occurs > 14 days before now')}"),
+     f"{has(ANY_BUY, within(14))} and {never(ANY_BUY, '> 14 days before now')}"),
     ("California Residents", "Home address in California.", 'homeAddress.state.equals("CA", false)'),
     ("California Buyers", "Lives in California and has bought something.",
      f'homeAddress.state.equals("CA", false) and {has(ANY_BUY)}'),
-    ("Loyalty Gold or Platinum", "Loyalty tier gold or platinum.", 'loyalty.tier in ["gold", "platinum"]'),
+    ("Loyalty Gold or Platinum", "Loyalty tier gold or platinum.", tier("gold", "platinum")),
     ("Points-Rich, No Purchase 60 Days", "500,000+ loyalty points, no purchase in 60 days.",
-     f"loyalty.points >= 500000 and not {has(f'{ANY_BUY} and {within(60)}')}"),
+     f"loyalty.points >= 500000 and {never(ANY_BUY, within(60))}"),
     ("Gen Z", "Born 1997 or later.", "person.birthYear >= 1997"),
     ("Email-Contactable, Never Purchased", "Has a personal email, never bought anything.",
-     f"personalEmail.address.isNotNull() and not {has(ANY_BUY)}"),
+     f"personalEmail.address.isNotNull() and {never(ANY_BUY)}"),
 ]
 
+# Streaming needs a time window on the event (WHEN), 24 hours or less.
 STREAMING: list[tuple[str, str, str]] = [
     ("Streaming - In-store Order, Last 24 Hours", "An in-store (POS) order in the last 24 hours.",
-     has(f"{POS_BUY} and {within_hours(24)}")),
+     has(POS_BUY, within_hours(24))),
     ("Streaming - Web Purchase, Last 24 Hours", "A web purchase in the last 24 hours.",
-     has(f"{WEB_BUY} and {within_hours(24)}")),
+     has(WEB_BUY, within_hours(24))),
     ("Streaming - In-store Order $200+, Last 24 Hours", "An in-store order of $200 or more in the last 24 hours.",
-     has(f"{POS_BUY} and X.commerce.order.priceTotal >= 200 and {within_hours(24)}")),
+     has(f"{POS_BUY} and commerce.order.priceTotal >= 200", within_hours(24))),
     ("Streaming - Bought Gear, Last 24 Hours", "Bought gear, web or in store, in the last 24 hours.",
-     has(f"{ANY_BUY} and {sku(CATEGORY['Gear'])} and {within_hours(24)}")),
+     has(f"{ANY_BUY} and {sku(CATEGORY['Gear'])}", within_hours(24))),
     ("Streaming - Viewed a Product, Last 24 Hours", "Viewed a product in the last 24 hours.",
-     has(f"{VIEW} and {within_hours(24)}")),
+     has(VIEW, within_hours(24))),
     ("Streaming - Gold or Platinum In-store Order, Last 24 Hours",
      "Loyalty tier gold or platinum, with an in-store order in the last 24 hours.",
-     f'loyalty.tier in ["gold", "platinum"] and {has(f"{POS_BUY} and {within_hours(24)}")}'),
+     f'{tier("gold", "platinum")} and {has(POS_BUY, within_hours(24))}'),
 ]
 
 # Profile conditions a child adds to its parent.
 CA = 'homeAddress.state.equals("CA", false)'
-GOLD_PLUS = 'loyalty.tier in ["gold", "platinum"]'
+GOLD_PLUS = tier("gold", "platinum")
 CHILD_OF = {
     "All Buyers": [("California", "who live in California", CA),
                    ("Gold or Platinum", "on the gold or platinum tier", GOLD_PLUS),
-                   ("Platinum", "on the platinum tier", 'loyalty.tier.equals("platinum", false)'),
+                   ("Platinum", "on the platinum tier", tier("platinum")),
                    ("Gen Z", "born 1997 or later", "person.birthYear >= 1997"),
                    ("Email-Contactable", "with a personal email", "personalEmail.address.isNotNull()"),
                    ("Points-Rich", "with 500,000+ loyalty points", "loyalty.points >= 500000")],
@@ -203,10 +216,20 @@ def create_body(audience: dict[str, Any], merge_policy_id: str, expression: dict
     }
 
 
+def same_rule(segment: dict[str, Any], wanted: dict[str, str]) -> bool:
+    have = segment.get("expression") or {}
+    if have.get("format") != wanted["format"]:
+        return False
+    try:
+        return json.loads(have.get("value") or "null") == json.loads(wanted["value"])
+    except ValueError:
+        return False
+
+
 def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
                   log: Log = print) -> tuple[dict[str, str], dict[str, int]]:
     """Look every audience up by name; with apply=True create the missing ones and
-    convert any still stored as PQL text.
+    repair any whose stored rule differs from the one here (old text or old form).
 
     Returns {name: segment id} for those that exist (or were created), and counts.
     """
@@ -214,25 +237,28 @@ def run_audiences(api: Platform, tenant_prefix: str, *, apply: bool,
     have = existing_by_name(api)
     ids = {a["name"]: have[a["name"]]["id"] for a in wanted if a["name"] in have}
     missing = [a for a in wanted if a["name"] not in have]
-    as_text = [a for a in wanted if a["name"] in have and is_text(have[a["name"]])]
+    outdated: list[tuple[dict[str, Any], dict[str, str]]] = []
     for a in wanted:
         if a["name"] not in have:
             status = "will create" if apply else "missing"
-        elif is_text(have[a["name"]]):
-            status = "will convert" if apply else "stored as text"
         else:
-            status = "exists"
+            expr = to_json_expression(api, rule(a, ids))
+            if same_rule(have[a["name"]], expr):
+                status = "exists"
+            else:
+                outdated.append((a, expr))
+                status = "will repair" if apply else "rule differs"
         log(f"  {status:<14} {a['name']}")
-    counts = {"exists": len(ids), "created": 0, "missing": len(missing), "converted": 0, "as_text": len(as_text)}
-    if not apply or not (missing or as_text):
+    counts = {"exists": len(ids), "created": 0, "missing": len(missing), "repaired": 0, "outdated": len(outdated)}
+    if not apply or not (missing or outdated):
         return ids, counts
     log("")
-    for a in as_text:
-        patch = [{"op": "add", "path": "/expression", "value": to_json_expression(api, rule(a, ids))}]
+    for a, expr in outdated:
+        patch = [{"op": "add", "path": "/expression", "value": expr}]
         api.call("PATCH", f"{DEFINITIONS}/{ids[a['name']]}", json=patch, ok=(200, 204))
-        counts["converted"] += 1
-        counts["as_text"] -= 1
-        log(f"  converted      {a['name']}")
+        counts["repaired"] += 1
+        counts["outdated"] -= 1
+        log(f"  repaired       {a['name']}")
     if not missing:
         return ids, counts
     merge_policy_id = profile_merge_policy(api)

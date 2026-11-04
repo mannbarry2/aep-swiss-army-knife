@@ -355,15 +355,26 @@ check("audiences: every one named Luma: ..., tenant swapped in, no {T} left",
 check("audiences: names are unique", len({d["name"] for d in defs}) == len(defs))
 
 
-def segment_api(existing, text_names=()):
+def tree(pql):
+    return json.dumps({"tree": pql})
+
+
+def segment_api(existing, old_names=()):
+    """existing audiences carry today's rule, except old_names (an older rule form)."""
     created, patched = [], []
+    seg = {n: f"seg-{i}" for i, n in enumerate(existing)}
+    by_name = {d["name"]: d for d in defs}
+
+    def stored(n):
+        if n in old_names:
+            return {"format": "pql/text", "value": "select X from xEvent where X.old"}
+        return {"format": "pql/json", "value": tree(audiences.rule(by_name[n], seg))}
 
     def handler(method, url, kw):
         if method == "GET" and url.endswith("/segment/definitions"):
-            return 200, {"segments": [{"name": n, "id": f"seg-{i}", "expression": {
-                "format": "pql/text" if n in text_names else "pql/json"}} for i, n in enumerate(existing)]}
+            return 200, {"segments": [{"name": n, "id": seg[n], "expression": stored(n)} for n in existing]}
         if method == "POST" and url.endswith("/segment/conversion"):
-            return 200, {"expression": {"format": "pql/json", "value": "TREE:" + kw["json"]["expression"]["value"]}}
+            return 200, {"expression": {"format": "pql/json", "value": tree(kw["json"]["expression"]["value"])}}
         if method == "PATCH" and "/segment/definitions/" in url:
             patched.append((url.rsplit("/", 1)[1], kw["json"]))
             return 204, None
@@ -387,8 +398,8 @@ def segment_api(existing, text_names=()):
 api, session, created, patched = segment_api([defs[0]["name"]])
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=False)
 check("audiences without apply: one lookup, nothing created",
-      not created and counts == {"exists": 1, "created": 0, "missing": len(defs) - 1, "converted": 0, "as_text": 0}
-      and all(c["method"] == "GET" for c in session.calls), counts)
+      not created and counts == {"exists": 1, "created": 0, "missing": len(defs) - 1, "repaired": 0, "outdated": 0}
+      and all(c["method"] == "GET" or c["url"].endswith("/segment/conversion") for c in session.calls), counts)
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
 check("audiences with apply: only the missing created, on the Profile merge policy, batch-evaluated",
       len(created) == len(defs) - 1 and counts["created"] == len(defs) - 1 and len(ids) == len(defs)
@@ -398,23 +409,26 @@ streamed = [b for b in created if b["name"].startswith("Luma: Streaming")]
 kids = [b for b in created if " > " in b["name"]]
 check("child audiences: inSegment(parent id) and their condition, after the parent",
       len(kids) == len(audiences.CHILDREN)
-      and any(b["name"] == "Luma: All Buyers > California" and 'inSegment("seg-0") and homeAddress.state' in
+      and any(b["name"] == "Luma: All Buyers > California" and 'inSegment(\\"seg-0\\") and homeAddress.state' in
               b["expression"]["value"] for b in kids)
       and all("{PARENT}" not in b["expression"]["value"] for b in kids)
-      and all('inSegment("new-' in b["expression"]["value"] for b in kids if "All Buyers >" not in b["name"]))
+      and all('inSegment(\\"new-' in b["expression"]["value"] for b in kids if "All Buyers >" not in b["name"]))
 check("streaming audiences: continuous evaluation on, batch off, 24-hour window",
       len(streamed) == len(audiences.STREAMING)
       and all(b["evaluationInfo"]["continuous"]["enabled"] and not b["evaluationInfo"]["batch"]["enabled"]
               for b in streamed) and all("24 hours before now" in b["expression"]["value"] for b in streamed))
 check("audiences are stored as pql/json (converted from the PQL text)",
-      all(b["expression"]["format"] == "pql/json" and b["expression"]["value"].startswith("TREE:") for b in created))
+      all(b["expression"]["format"] == "pql/json" and "tree" in json.loads(b["expression"]["value"]) for b in created))
+check("event rules are in the rule builder's CHAIN form (UI-editable), none in select form",
+      all("select X from xEvent" not in d["pql"] for d in defs)
+      and all("CHAIN(xEvent, timestamp, [C0: WHAT(" in d["pql"] for d in defs if "Buyers" in d["name"] and " > " not in d["name"]))
 members = audiences.evaluate(api, [f"new-{i}" for i in range(1, len(created) + 1)], log=lambda line: None,
                              sleep=lambda s: None)
 check("segment job: members read per audience", set(members.values()) == {7} and len(members) == len(created))
-api, session, created, patched = segment_api([d["name"] for d in defs], text_names={defs[2]["name"]})
+api, session, created, patched = segment_api([d["name"] for d in defs], old_names={defs[2]["name"]})
 (ids, counts), printed = quiet(audiences.run_audiences, api, "_acme", apply=True)
-check("an audience still stored as text is converted in place, nothing created",
-      not created and counts["converted"] == 1 and len(patched) == 1 and patched[0][0] == "seg-2"
+check("an audience with an old rule is repaired in place (same id), the rest left alone, nothing created",
+      not created and counts["repaired"] == 1 and len(patched) == 1 and patched[0][0] == "seg-2"
       and patched[0][1][0]["path"] == "/expression" and patched[0][1][0]["value"]["format"] == "pql/json", counts)
 
 print(f"\n{sum(results)}/{len(results)} passed")

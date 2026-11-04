@@ -42,5 +42,13 @@
         "streaming_inlet_url": "",
         "streaming_inlet_urls": {},
         "streaming_authenticated": false
+    },
+
+    "_output_by_client_note": "Optional. One output folder per client, so clients never mix (toolkit_internals/output_paths.py). A client with a root writes there (e.g. a synced work folder); without one, to output/<client>. Each holds data_dictionary, data_dictionary_explorer, pql and archive. Orgs not listed keep output/data_dictionary.",
+    "output_by_client": {
+        "clients": {
+            "<client-a>": {"org_ids": ["<org-id>@AdobeOrg"], "root": "<C:\\path\\to\\synced\\folder>"},
+            "<client-b>": {"org_ids": ["<org-id>@AdobeOrg"]}
+        }
     }
 }
