@@ -42,6 +42,7 @@ Output: ONE workbook, output/aep-user-logs/external_access_audit_<YYYYMMDD>.xlsx
   Summary          the numbers, the scope and the limits above
   External users   every account on a non-corporate domain, entitlement + use
   AEP access       every account entitled to anything under the AEP umbrella
+  System admins    everyone with the Admin Console System Administrator role
   Profiles         the AEP product profiles and how many hold each
   Tech accounts    @techacct.adobe.com service accounts by audit volume
 
@@ -84,8 +85,8 @@ from toolkit_internals import credential_loader
 from platform_access_and_audit import user_activity_log_from_audit_events as ul
 
 SCRIPT_NAME = "external_access_entitlement_and_usage_audit"
-SCRIPT_VERSION = "1.0.0"
-SCRIPT_DATE = "2026-10-19"
+SCRIPT_VERSION = "1.1.0"
+SCRIPT_DATE = "2026-11-04"
 SCRIPT_AUTHOR = "Barry Mann (barrymann.com)"
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -877,6 +878,33 @@ def write_xlsx(data: dict, path: Path) -> Path:
                              else green if v in ("Keep", "this week") else Font())
         rr += 1
     fit(ws, 5, caps={1: 40, 2: 26, 4: 52, 10: 30})
+
+    # ---- System admins -----------------------------------------------------
+    admins = sorted((u for u in data["all_accounts"] if "org" in u["admin"]),
+                    key=lambda u: (u["domain"] == data["home_domain"], u["email"].lower()))
+    cols = ["Email", "Name", "Domain", "ID type", "Status", "Other admin roles",
+            "AEP / AJO access", "Last active", "Days ago",
+            f"Events ({data['days']}d)" if data["swept"] or data["review"] else "Events"]
+    ws = sheet("System admins", f"System administrators ({len(admins)})",
+               "Everyone holding the Admin Console's System Administrator role "
+               "(adminRoles 'org'): they can grant themselves anything, so this "
+               "list should be short and every name known. Accounts outside "
+               f"{data['home_domain']} are listed first, in red.", cols)
+    rr = 6
+    for u in admins:
+        others = ", ".join(r for r in u["admin"] if r != "org")
+        vals = [u["email"], u["name"], u["domain"], u["type"], u["status"], others,
+                ", ".join(u["aep"]), (u["last"] or "")[:16].replace("T", " "),
+                days_since(u["last"]) if u["checked"] else "",
+                (u["events"] or 0) if u["checked"] else "not checked"]
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(rr, c, v)
+            if c in (9, 10):
+                cell.alignment = centre
+            if c == 3 and u["domain"] != data["home_domain"]:
+                cell.font = red
+        rr += 1
+    fit(ws, 5, caps={1: 40, 2: 26, 6: 30, 7: 52})
 
     # ---- Purge list --------------------------------------------------------
     cols = ["Email", "Domain", "Name", "ID type", "AEP profile names",
